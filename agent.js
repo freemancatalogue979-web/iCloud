@@ -140,7 +140,6 @@
 
   const URL_ATTRS = [
     ["src", toProxy],
-    ["href", toProxy],
     ["poster", toProxy],
     ["data", toProxy],
     ["action", toProxy],
@@ -151,6 +150,14 @@
     if (!el.getAttribute) return;
     for (const [attr, fix] of URL_ATTRS) {
       if (el.hasAttribute(attr)) el.setAttribute(attr, fix(el.getAttribute(attr)));
+    }
+    // href is two different things. On <link> it names a resource, and routing
+    // it through the proxy is what makes the site's stylesheet load with its
+    // cookies. On <a> it is navigation - proxying it turns every link into a
+    // fetch of raw HTML, so those are only resolved to an absolute URL.
+    if (el.hasAttribute("href")) {
+      const href = el.getAttribute("href");
+      el.setAttribute("href", el.tagName === "LINK" ? toProxy(href) : toAbsolute(href));
     }
     const style = el.getAttribute("style");
     if (style) el.setAttribute("style", proxyCss(style));
