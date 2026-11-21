@@ -211,17 +211,21 @@
 
     if (patch.length === 0) return;
 
-    // If the patch got big, a fresh document is cheaper than the deltas.
-    const size = JSON.stringify(patch).length;
-    if (size > 400_000) {
-      sendDocument();
-      return;
-    }
-
+    // Send the patch however big it is. Re-seeding the whole document instead
+    // looks like a flash, and a page that mutates constantly would loop on it.
+    // Bandwidth is local, so a large delta is cheaper than a reload.
     emit({ kind: "mut", patch });
   }
 
-  function sendDocument() {
+  let lastDocSent = 0;
+
+  function sendDocument(force) {
+    // Rate-limit re-seeds. Without this a chatty page re-seeds several times a
+    // second and the mirror strobes.
+    const now = Date.now();
+    if (!force && lastDocSent && now - lastDocSent < 2000) return;
+    lastDocSent = now;
+
     pending = [];
     dirty.clear();
     emit({
@@ -234,8 +238,9 @@
     });
   }
 
-  // The mirror asks for this when its structure drifts out of step.
-  window.__rbResync = sendDocument;
+  // The mirror asks for this when its structure drifts out of step. Forced, so
+  // a genuine desync is never swallowed by the rate limit.
+  window.__rbResync = () => sendDocument(true);
 
   // Exposed so the URL rewriting can be exercised without a real browser.
   window.__rbInternals = {

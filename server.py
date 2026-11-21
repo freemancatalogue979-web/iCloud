@@ -65,6 +65,37 @@ AGENT_JS = (HERE / "agent.js").read_text(encoding="utf-8")
 clients: set[asyncio.Queue] = set()
 last_doc: dict | None = None
 
+# The sign-in form lives in a cross-origin iframe, and add_init_script puts the
+# agent in every frame. Without frame identity their messages collide, so each
+# frame gets a stable id plus its parent's.
+frame_ids: dict[int, str] = {}
+frame_parents: dict[int, str | None] = {}
+
+
+def frame_tag(source) -> tuple[str, str | None]:
+    """Stable id for the sending frame, and its parent's id (None for the root)."""
+    frame = source.get("frame") if source else None
+    if frame is None:
+        return "f0", None
+
+    chain = []
+    current = frame
+    while current is not None:
+        chain.append(current)
+        current = current.parent_frame
+    chain.reverse()  # root first
+
+    parent_id = None
+    for item in chain:
+        key = id(item)
+        if key not in frame_ids:
+            frame_ids[key] = f"f{len(frame_ids)}"
+        frame_parents[key] = parent_id
+        parent_id = frame_ids[key]
+
+    key = id(frame)
+    return frame_ids[key], frame_parents[key]
+
 
 async def broadcast(message: dict):
     for queue in list(clients):
@@ -76,8 +107,16 @@ async def broadcast(message: dict):
 
 async def on_emit(source, message):
     """Called from inside the real page via the Playwright binding."""
+    frame_id, parent_id = frame_tag(source)
+    message["frame"] = frame_id
+    message["parent"] = parent_id
+
+    frame = source.get("frame") if source else None
+    if frame is not None:
+        message["frameUrl"] = frame.url
+
     global last_doc
-    if message.get("kind") == "doc":
+    if message.get("kind") == "doc" and parent_id is None:
         last_doc = message
     await broadcast(message)
 

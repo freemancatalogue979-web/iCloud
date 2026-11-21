@@ -5,45 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Remote view</title>
 <style>
-  html, body { height:100%; margin:0; background:#000; overflow:hidden; }
-
-  #mirror { width:100%; height:100%; border:0; display:block; background:#fff; }
-
-  #wait {
-    position:absolute; inset:0; display:grid; place-items:center;
-    color:#666; font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    pointer-events:none;
-  }
-  #wait.gone { display:none; }
-
-  #hud {
-    position:absolute; right:8px; bottom:8px;
-    color:#666; font:10.5px ui-monospace,Menlo,Consolas,monospace;
-    background:rgba(0,0,0,.6); padding:3px 7px; border-radius:5px;
-    pointer-events:none;
-  }
+  html, body { height:100%; margin:0; background:#fff; overflow:hidden; }
+  #mirror { width:100%; height:100%; border:0; display:block; }
 </style>
 </head>
 <body>
-  <div id="wait">waiting for the page…</div>
+  <!-- Only the mirrored page lives here. -->
   <iframe id="mirror" title="Mirrored page" sandbox="allow-same-origin"></iframe>
-  <div id="hud"></div>
 
 <script>
   const mirror = document.getElementById("mirror");
-  const wait = document.getElementById("wait");
-  const hud = document.getElementById("hud");
 
-  let pageWidth = 1280;
-  let pageHeight = 800;
-  let applied = 0;
-  let resyncs = 0;
+  // frameId -> { doc, el }. Root document plus one entry per nested frame.
+  const frames = new Map();
+  // Mutations can arrive before a frame's document has loaded; hold them.
+  const queued = new Map();
+  // Child frames whose parent iframe we have not matched yet.
+  const orphaned = new Map();
 
   const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
   let ws = null;
 
-  // ------------------------------------------------------------- resolve
-  // Paths are index chains from <body>, produced by agent.js.
+  // -------------------------------------------------------------- paths
   function resolve(doc, sel) {
     if (!doc || !doc.body) return null;
     if (sel === "") return doc.body;
@@ -59,7 +42,7 @@
   function applyPatch(doc, patch) {
     for (const p of patch) {
       const el = resolve(doc, p.sel);
-      if (!el) return false;            // structure drifted - need a resync
+      if (!el) return false;               // structure drifted - need a resync
 
       if (p.t === "a") {
         if (p.value === null) el.removeAttribute(p.name);
@@ -74,37 +57,96 @@
     return true;
   }
 
-  function seed(html, url) {
-    // agent.js has already absolutized resources and injected the <base> tag,
-    // so the serialised document can be dropped straight in.
-    mirror.srcdoc = html;
+  // ------------------------------------------------------------- frames
+  function register(frameId, doc) {
+    frames.set(frameId, { doc });
+    const backlog = queued.get(frameId);
+    if (backlog && backlog.length) {
+      queued.delete(frameId);
+      for (const patch of backlog) applyPatch(doc, patch);
+    }
   }
 
-  // --------------------------------------------------------------- input
-  // Clicks and keystrokes go to the real page; the DOM comes back as patches.
-  mirror.addEventListener("load", () => {
-    const doc = mirror.contentDocument;
-    if (!doc) return;
+  function realSrc(iframe) {
+    // agent.js rewrites src to /res?url=<encoded real url>
+    const src = iframe.getAttribute("src") || "";
+    if (src.startsWith("/res?url=")) {
+      try { return decodeURIComponent(src.slice("/res?url=".length)); } catch (e) {}
+    }
+    return src;
+  }
+
+  function findIframeFor(doc, url) {
+    if (!url) return null;
+    let target;
+    try { target = new URL(url); } catch (e) { return null; }
+
+    for (const frame of doc.querySelectorAll("iframe")) {
+      if (frame.dataset.rbFrame) continue;
+      let candidate;
+      try { candidate = new URL(realSrc(frame), target.href); } catch (e) { continue; }
+      if (candidate.origin === target.origin && candidate.pathname === target.pathname) {
+        frame.dataset.rbFrame = "1";
+        return frame;
+      }
+    }
+    return null;
+  }
+
+  function seedRoot(message) {
+    mirror.onload = () => register(message.frame, mirror.contentDocument);
+    mirror.srcdoc = message.html;
+    // A child frame may have reported before the root finished loading.
+    retryOrphans();
+  }
+
+  function seedChild(message) {
+    const parent = frames.get(message.parent);
+    if (!parent || !parent.doc) {
+      orphaned.set(message.frame, message);
+      setTimeout(retryOrphans, 200);
+      return;
+    }
+
+    const el = findIframeFor(parent.doc, message.frameUrl || message.url);
+    if (!el) {
+      orphaned.set(message.frame, message);
+      setTimeout(retryOrphans, 300);
+      return;
+    }
+
+    orphaned.delete(message.frame);
+    // Swap the real cross-origin src for our own copy of its DOM.
+    el.removeAttribute("src");
+    el.setAttribute("sandbox", "allow-same-origin");
+    el.onload = () => register(message.frame, el.contentDocument);
+    el.srcdoc = message.html;
+  }
+
+  function retryOrphans() {
+    for (const message of [...orphaned.values()]) seedChild(message);
+  }
+
+  // -------------------------------------------------------------- input
+  function wireInput(doc) {
+    const NAMED = new Set(["Enter","Tab","Backspace","Delete","Escape",
+      "ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown"]);
 
     doc.addEventListener("mousedown", (ev) => {
       const rect = mirror.getBoundingClientRect();
-      const x = (ev.clientX - rect.left) * (pageWidth / rect.width);
-      const y = (ev.clientY - rect.top) * (pageHeight / rect.height);
-      post("/click", { x, y });
+      post("/click", {
+        x: (ev.clientX - rect.left) * (1280 / rect.width),
+        y: (ev.clientY - rect.top) * (800 / rect.height),
+      });
       ev.preventDefault();
     }, true);
 
     doc.addEventListener("keydown", (ev) => {
-      const NAMED = new Set(["Enter","Tab","Backspace","Delete","Escape",
-        "ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown"]);
       if (NAMED.has(ev.key)) { post("/key", { key: ev.key }); ev.preventDefault(); }
       else if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
       else if (ev.key.length === 1) { post("/keys", { text: ev.key }); ev.preventDefault(); }
     }, true);
-
-    // The mirror needs focus to receive keystrokes.
-    doc.addEventListener("click", () => mirror.focus(), true);
-  });
+  }
 
   function post(path, body) {
     fetch(path, {
@@ -114,7 +156,7 @@
     }).catch(() => {});
   }
 
-  // ------------------------------------------------------------ stream
+  // ------------------------------------------------------------- stream
   function connect() {
     ws = new WebSocket(wsProto + "//" + location.host + "/ws");
 
@@ -123,22 +165,28 @@
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
 
       if (msg.kind === "doc") {
-        pageWidth = msg.width || pageWidth;
-        pageHeight = msg.height || pageHeight;
-        seed(msg.html, msg.url);
-        wait.classList.add("gone");
-      } else if (msg.kind === "mut") {
-        const doc = mirror.contentDocument;
-        if (!doc || !doc.body) return;
-        if (!applyPatch(doc, msg.patch)) {
-          resyncs++;
+        if (msg.parent) seedChild(msg);
+        else seedRoot(msg);
+        return;
+      }
+
+      if (msg.kind === "mut") {
+        const entry = frames.get(msg.frame);
+        if (!entry || !entry.doc || !entry.doc.body) {
+          const list = queued.get(msg.frame) || [];
+          list.push(msg.patch);
+          queued.set(msg.frame, list);
+          return;
+        }
+        if (!applyPatch(entry.doc, msg.patch)) {
           ws.send(JSON.stringify({ cmd: "resync" }));
-        } else {
-          applied += msg.patch.length;
         }
       }
-      hud.textContent = `${applied} patches · ${resyncs} resyncs`;
     };
+
+    ws.onopen = () => { mirror.addEventListener("load", () => {
+      if (mirror.contentDocument) wireInput(mirror.contentDocument);
+    }); };
 
     ws.onclose = () => setTimeout(connect, 400);
   }
