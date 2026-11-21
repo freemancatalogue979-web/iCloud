@@ -15,19 +15,19 @@
   }
   @keyframes spin { to { transform:rotate(360deg) } }
 
+  /* Shown only if something went wrong. */
   .icon {
     width:128px; height:128px; border-radius:28px;
-    background:#000; border:1px solid #1c1c1e;
+    background:#000; border:1px solid #5a1d1d;
     display:grid; place-items:center;
-    box-shadow:0 18px 50px rgba(255,255,255,.08);
+    box-shadow:0 18px 50px rgba(255,69,58,.22);
     animation:pop .45s cubic-bezier(.2,1.4,.4,1);
   }
+  .icon svg { fill:#ff453a; }
   @keyframes pop { from { transform:scale(.6); opacity:0 } }
 
-  /* Same icon, but you can tell it failed. The tile always reddens; the
-     bundled SVG recolours too. A loaded <img> logo cannot be recoloured. */
-  .icon.failed { border-color:#5a1d1d; box-shadow:0 18px 50px rgba(255,69,58,.22); }
-  .icon.failed svg { fill:#ff453a; }
+  /* The remote browser, filling the page. */
+  #remote { width:100vw; height:100vh; border:0; display:block; }
 
   [hidden] { display:none !important; }
 </style>
@@ -35,50 +35,41 @@
 <body>
   <div id="spinner" class="spinner"></div>
 
-  <div id="icon" class="icon" hidden>
-    <!--
-      The real Brandfetch Apple logo. Paste your free client ID below to use it:
-      https://developers.brandfetch.com/register
-      Leave it blank and the inline SVG underneath is used instead.
-    -->
-    <img id="logo" width="72" height="88" alt="Apple" hidden
-         onerror="this.hidden = true; document.getElementById('fallback').hidden = false;">
+  <iframe id="remote" src="/view" title="Remote browser" hidden></iframe>
 
-    <svg id="fallback" width="64" height="64" viewBox="0 0 24 24" fill="#fff" aria-label="Apple">
+  <div id="icon" class="icon" hidden>
+    <svg width="64" height="64" viewBox="0 0 24 24" aria-label="Apple">
       <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25z"/>
     </svg>
   </div>
 
 <script>
-  // Free at https://developers.brandfetch.com/register - paste it here to use
-  // the official Brandfetch asset. Empty means use the bundled SVG.
-  const BRANDFETCH_CLIENT_ID = "";
+  const spinner = document.getElementById("spinner");
+  const remote = document.getElementById("remote");
+  const icon = document.getElementById("icon");
 
-  if (BRANDFETCH_CLIENT_ID) {
-    const img = document.getElementById("logo");
-    img.hidden = false;
-    document.getElementById("fallback").hidden = true;
-    // theme/light is the white mark, meant for a dark background.
-    img.src = "https://cdn.brandfetch.io/domain/apple.com/theme/light/logo.svg"
-            + "?c=" + encodeURIComponent(BRANDFETCH_CLIENT_ID);
-  }
-
-  // Poll only while it is still working; stop as soon as it finishes.
   const timer = setInterval(() => {
     fetch("/status").then(r => r.json()).then(show);
-  }, 2000);
+  }, 1000);
 
   fetch("/start").then(r => r.json()).then(show);
 
   function show(s) {
-    const finished = s.status === "done" || s.status === "error";
-    document.getElementById("spinner").hidden = finished;
+    if (s.status === "error") {
+      spinner.hidden = true;
+      remote.hidden = true;
+      icon.hidden = false;
+      clearInterval(timer);
+      return;
+    }
 
-    const icon = document.getElementById("icon");
-    icon.hidden = !finished;
-    icon.classList.toggle("failed", s.status === "error");
-
-    if (finished) clearInterval(timer);
+    // Swap to the live view as soon as the browser exists, rather than waiting
+    // for the whole flow, so you can watch it navigate.
+    if (s.browser_open) {
+      spinner.hidden = true;
+      remote.hidden = false;
+      clearInterval(timer);
+    }
   }
 </script>
 </body>

@@ -14,6 +14,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, Response
 from playwright.async_api import async_playwright
+from pydantic import BaseModel
 
 HERE = Path(__file__).parent
 
@@ -34,7 +35,21 @@ state = {
     "status": "idle",      # idle | running | done | error
     "step": "",
     "error": "",
+    "browser_open": False,
 }
+
+
+class Click(BaseModel):
+    x: float
+    y: float
+
+
+class Keys(BaseModel):
+    text: str
+
+
+class Key(BaseModel):
+    key: str
 
 pw = None
 ctx = None
@@ -163,6 +178,8 @@ async def start():
             await install_chromium()
             ctx, page = await launch()
 
+        state["browser_open"] = True
+
         log("going to icloud.com")
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
         await page.bring_to_front()
@@ -184,6 +201,56 @@ async def start():
 @app.get("/status")
 async def status():
     return state
+
+
+# --------------------------------------------------------------------------
+# Remote view: stream the real rendered page, forward input straight to it.
+#
+# Nothing here knows what page is loaded. There are no page-specific selectors
+# and no copy of any site's markup - the client sees the live screenshot and
+# its clicks and keystrokes land on whatever actually has focus.
+# --------------------------------------------------------------------------
+@app.get("/view")
+async def view():
+    return FileResponse(HERE / "view.html", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/shot.png")
+async def shot():
+    if page is None:
+        return Response(status_code=404)
+    try:
+        png = await page.screenshot()
+    except Exception as exc:
+        log(f"screenshot failed: {str(exc).splitlines()[0]}")
+        return Response(status_code=503)
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/click")
+async def click(where: Click):
+    if page is None:
+        return {"ok": False, "error": "no browser"}
+    await page.mouse.click(where.x, where.y)
+    return {"ok": True}
+
+
+@app.post("/keys")
+async def keys(body: Keys):
+    """Type into whatever currently has focus."""
+    if page is None:
+        return {"ok": False, "error": "no browser"}
+    await page.keyboard.type(body.text)
+    return {"ok": True}
+
+
+@app.post("/key")
+async def key(body: Key):
+    """A named key: Enter, Tab, Backspace, ArrowDown, ..."""
+    if page is None:
+        return {"ok": False, "error": "no browser"}
+    await page.keyboard.press(body.key)
+    return {"ok": True}
 
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json")

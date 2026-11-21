@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Remote view</title>
+<style>
+  html, body { height:100%; margin:0; background:#000; overflow:hidden; }
+
+  #stage { position:relative; width:100%; height:100%; outline:none; }
+
+  #screen {
+    display:block; width:100%; height:100%;
+    object-fit:contain; object-position:top left;
+    image-rendering:auto; cursor:default;
+  }
+
+  #wait {
+    position:absolute; inset:0; display:grid; place-items:center;
+    color:#666; font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  #wait.gone { display:none; }
+
+  /* Cursor hint so you can see where a click will land. */
+  #stage.live #screen { cursor:crosshair; }
+
+  #hint {
+    position:absolute; left:8px; bottom:8px;
+    color:#555; font:11px ui-monospace,Menlo,Consolas,monospace;
+    background:rgba(0,0,0,.6); padding:3px 7px; border-radius:5px;
+    pointer-events:none;
+  }
+</style>
+</head>
+<body>
+  <!-- tabindex so this frame receives keystrokes and can forward them -->
+  <div id="stage" tabindex="0">
+    <div id="wait">waiting for the browser…</div>
+    <img id="screen" alt="Remote browser">
+    <div id="hint">click to focus · keystrokes go to the remote page</div>
+  </div>
+
+<script>
+  const stage = document.getElementById("stage");
+  const screen = document.getElementById("screen");
+  const wait = document.getElementById("wait");
+
+  // ------------------------------------------------------------- screen
+  async function refresh() {
+    try {
+      const res = await fetch("/shot.png?n=" + Date.now(), { cache: "no-store" });
+      if (!res.ok) throw new Error(res.status);
+      const blob = await res.blob();
+      screen.src = URL.createObjectURL(blob);
+      wait.classList.add("gone");
+      stage.classList.add("live");
+    } catch (e) {
+      /* browser not up yet, or mid-navigation - next tick will retry */
+    }
+  }
+  refresh();
+  setInterval(refresh, 700);
+
+  // -------------------------------------------------------------- clicks
+  // The screenshot is taken at the page's CSS pixel size, so scale the
+  // displayed image coordinates back up to page coordinates.
+  screen.addEventListener("mousedown", async (ev) => {
+    ev.preventDefault();
+    stage.focus();
+
+    const rect = screen.getBoundingClientRect();
+    const scaleX = screen.naturalWidth / rect.width;
+    const scaleY = screen.naturalHeight / rect.height;
+
+    const x = (ev.clientX - rect.left) * scaleX;
+    const y = (ev.clientY - rect.top) * scaleY;
+
+    await fetch("/click", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ x, y }),
+    });
+    refresh();
+  });
+
+  // ------------------------------------------------------------ keyboard
+  const NAMED = new Set([
+    "Enter", "Tab", "Backspace", "Delete", "Escape",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown",
+  ]);
+
+  stage.addEventListener("keydown", async (ev) => {
+    ev.preventDefault();
+
+    let body, path;
+    if (NAMED.has(ev.key)) {
+      path = "/key";
+      body = { key: ev.key };
+    } else if (ev.ctrlKey || ev.metaKey || ev.altKey) {
+      // Let local shortcuts (Ctrl+R, Cmd+T, ...) work in this window.
+      return;
+    } else if (ev.key.length === 1) {
+      path = "/keys";
+      body = { text: ev.key };
+    } else {
+      return;
+    }
+
+    await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    refresh();
+  });
+
+  // Focus on load so typing works straight away.
+  window.addEventListener("load", () => stage.focus());
+</script>
+</body>
+</html>

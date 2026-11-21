@@ -21,12 +21,18 @@ python -m playwright install chromium
 
 ## The page
 
-A spinner while it works, then the app icon. Nothing else.
+A spinner while the browser starts, then a live remote view of it.
+
+The view streams screenshots of the real page and forwards your clicks and
+keystrokes back into it. Nothing is page-specific — there are no selectors for
+any site's fields and no copy of any site's markup, so it works on whatever is
+loaded.
 
 ## Files
 
-- `server.py` — FastAPI, three routes: `/` `/start` `/status`
-- `client.html` — the one page; calls `/start` on load
+- `server.py` — FastAPI: `/` `/start` `/status` `/view` `/shot.png` `/click` `/keys` `/key`
+- `client.html` — the one page; calls `/start` on load, then iframes `/view`
+- `view.html` — the remote view inside that iframe
 
 ## Note
 
