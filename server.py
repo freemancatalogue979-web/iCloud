@@ -104,7 +104,9 @@ async def launch():
 
 @app.get("/")
 async def index():
-    return FileResponse(HERE / "client.html")
+    # no-store, so an edit to client.html shows up on refresh instead of
+    # serving the browser's cached copy.
+    return FileResponse(HERE / "client.html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/start")
