@@ -290,10 +290,15 @@
         window.removeEventListener("message", onMessage);
         // A frame that never answers is unreachable. Read it directly if the
         // same-origin policy happens to allow it, otherwise give up on it.
+        // Serialised through the same walk, so the fallback is cleaned and
+        // rewritten too rather than being a raw outerHTML dump.
         try {
           const doc = entry.el.contentDocument;
-          if (doc && doc.documentElement) finish([{ windowId: entry.id, html: doc.documentElement.outerHTML }]);
-          else finish([]);
+          if (doc && doc.documentElement) {
+            finish([{ windowId: entry.id, html: serialiseDocumentOf(doc, new Map()) }]);
+          } else {
+            finish([]);
+          }
         } catch (e) {
           finish([]);
         }
@@ -322,10 +327,14 @@
     return frames;
   }
 
-  function serialiseDocumentWith(ids) {
-    const clone = document.documentElement.cloneNode(true);
-    walk(document.documentElement, clone, ids);
+  function serialiseDocumentOf(doc, ids) {
+    const clone = doc.documentElement.cloneNode(true);
+    walk(doc.documentElement, clone, ids);
     return "<!DOCTYPE html>" + clone.outerHTML;
+  }
+
+  function serialiseDocumentWith(ids) {
+    return serialiseDocumentOf(document, ids);
   }
 
   // A child frame answers its parent, recursively, with its own subtree.
@@ -345,9 +354,11 @@
 
   window.addEventListener("message", (event) => {
     const data = event.data;
-    if (!data || data.rb !== INIT_REQUEST || !event.source) return;
+    if (!data || data.rb !== INIT_REQUEST) return;
     event.stopPropagation();
-    replyTo(event.source, data.windowId);
+    // event.source is null in some environments (sandboxed frames, and jsdom),
+    // but in this protocol the requester is always our own parent.
+    replyTo(event.source || window.parent, data.windowId);
   });
 
   // --------------------------------------------------------- mutation
