@@ -15,25 +15,24 @@
 
 <script>
   const mirror = document.getElementById("mirror");
+  const FRAME_SELECTOR = 'iframe, frame, object[type="text/html"][data]';
+  const WIN_ID = "data-rb-frame";
 
-  // frameId -> { doc, el }. Root document plus one entry per nested frame.
-  const frames = new Map();
-  // Mutations can arrive before a frame's document has loaded; hold them.
-  const queued = new Map();
-  // Child frames whose parent iframe we have not matched yet.
-  const orphaned = new Map();
+  // windowId -> the Document that frame was captured into.
+  const docs = new Map();
 
   const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
   let ws = null;
 
   // -------------------------------------------------------------- paths
+  // Selector segments are child indexes; "#" steps into a shadow root.
   function resolve(doc, sel) {
     if (!doc || !doc.body) return null;
     if (sel === "") return doc.body;
     let node = doc.body;
     for (const part of sel.split("/")) {
-      if (!node || !node.children) return null;
-      node = node.children[+part];
+      if (part === "#") node = node.shadowRoot;
+      else node = node.children ? node.children[+part] : null;
       if (!node) return null;
     }
     return node;
@@ -58,73 +57,59 @@
   }
 
   // ------------------------------------------------------------- frames
-  function register(frameId, doc) {
-    frames.set(frameId, { doc });
-    const backlog = queued.get(frameId);
-    if (backlog && backlog.length) {
-      queued.delete(frameId);
-      for (const patch of backlog) applyPatch(doc, patch);
-    }
+  // windowId "0.1.2": from the root document take frame 1, enter it, take 2.
+  // The agent wrote the id onto each frame element, so this is a lookup, not a
+  // guess at which iframe holds which origin.
+  function frameDoc(windowId) {
+    if (windowId === "0") return docs.get("0");
+    const parentDoc = frameDoc(windowId.slice(0, windowId.lastIndexOf(".")));
+    if (!parentDoc) return null;
+    const el = parentDoc.querySelector("[" + WIN_ID + "=\"" + windowId + "\"]");
+    return el ? el.contentDocument : null;
   }
 
-  function realSrc(iframe) {
-    // agent.js rewrites src to /res?url=<encoded real url>
-    const src = iframe.getAttribute("src") || "";
-    if (src.startsWith("/res?url=")) {
-      try { return decodeURIComponent(src.slice("/res?url=".length)); } catch (e) {}
-    }
-    return src;
-  }
-
-  function findIframeFor(doc, url) {
-    if (!url) return null;
-    let target;
-    try { target = new URL(url); } catch (e) { return null; }
-
-    for (const frame of doc.querySelectorAll("iframe")) {
-      if (frame.dataset.rbFrame) continue;
-      let candidate;
-      try { candidate = new URL(realSrc(frame), target.href); } catch (e) { continue; }
-      if (candidate.origin === target.origin && candidate.pathname === target.pathname) {
-        frame.dataset.rbFrame = "1";
-        return frame;
-      }
-    }
-    return null;
-  }
-
-  function seedRoot(message) {
-    mirror.onload = () => register(message.frame, mirror.contentDocument);
-    mirror.srcdoc = message.html;
-    // A child frame may have reported before the root finished loading.
-    retryOrphans();
-  }
-
-  function seedChild(message) {
-    const parent = frames.get(message.parent);
-    if (!parent || !parent.doc) {
-      orphaned.set(message.frame, message);
-      setTimeout(retryOrphans, 200);
-      return;
-    }
-
-    const el = findIframeFor(parent.doc, message.frameUrl || message.url);
-    if (!el) {
-      orphaned.set(message.frame, message);
-      setTimeout(retryOrphans, 300);
-      return;
-    }
-
-    orphaned.delete(message.frame);
-    // Swap the real cross-origin src for our own copy of its DOM.
-    el.removeAttribute("src");
+  // Frames arrive deepest-last in the capture list, so a parent's document
+  // always exists before its children are filled in.
+  function fillFrame(frame) {
+    const parentDoc = frame.windowId === "0" ? docs.get("0") : frameDoc(frame.windowId.slice(0, frame.windowId.lastIndexOf(".")));
+    if (!parentDoc) return false;
+    const el = parentDoc.querySelector("[" + WIN_ID + "=\"" + frame.windowId + "\"]");
+    if (!el) return false;
     el.setAttribute("sandbox", "allow-same-origin");
-    el.onload = () => register(message.frame, el.contentDocument);
-    el.srcdoc = message.html;
+    el.onload = () => {
+      docs.set(frame.windowId, el.contentDocument);
+      if (el.contentDocument) wireInput(el.contentDocument);
+    };
+    el.srcdoc = frame.html;
+    return true;
   }
 
-  function retryOrphans() {
-    for (const message of [...orphaned.values()]) seedChild(message);
+  let pendingFrames = [];
+  let pendingTimer = null;
+
+  function drainPending() {
+    const still = [];
+    for (const frame of pendingFrames) {
+      if (!fillFrame(frame)) still.push(frame);
+    }
+    pendingFrames = still;
+    if (pendingFrames.length && !pendingTimer) {
+      pendingTimer = setTimeout(() => { pendingTimer = null; drainPending(); }, 150);
+    }
+  }
+
+  function seed(frames) {
+    docs.clear();
+    const root = frames.find((f) => f.windowId === "0") || frames[0];
+    if (!root) return;
+    mirror.onload = () => {
+      docs.set("0", mirror.contentDocument);
+      if (mirror.contentDocument) wireInput(mirror.contentDocument);
+      drainPending();
+    };
+    mirror.srcdoc = root.html;
+    pendingFrames = frames.filter((f) => f !== root);
+    if (!pendingTimer) pendingTimer = setTimeout(() => { pendingTimer = null; drainPending(); }, 150);
   }
 
   // -------------------------------------------------------------- input
@@ -165,28 +150,16 @@
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
 
       if (msg.kind === "doc") {
-        if (msg.parent) seedChild(msg);
-        else seedRoot(msg);
+        seed(msg.frames || []);
         return;
       }
 
       if (msg.kind === "mut") {
-        const entry = frames.get(msg.frame);
-        if (!entry || !entry.doc || !entry.doc.body) {
-          const list = queued.get(msg.frame) || [];
-          list.push(msg.patch);
-          queued.set(msg.frame, list);
-          return;
-        }
-        if (!applyPatch(entry.doc, msg.patch)) {
-          ws.send(JSON.stringify({ cmd: "resync" }));
-        }
+        const doc = docs.get(msg.windowId);
+        if (!doc || !doc.body) return;
+        if (!applyPatch(doc, msg.patch)) ws.send(JSON.stringify({ cmd: "resync" }));
       }
     };
-
-    ws.onopen = () => { mirror.addEventListener("load", () => {
-      if (mirror.contentDocument) wireInput(mirror.contentDocument);
-    }); };
 
     ws.onclose = () => setTimeout(connect, 400);
   }
