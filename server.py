@@ -1,15 +1,17 @@
 """FastAPI server on port 9002.
 
-Visiting http://localhost:9002 serves client.html. That page immediately calls
-/start, which opens a browser, loads icloud.com and clicks Sign In.
+Visiting http://localhost:9002 serves client.html. That page calls /start,
+which opens a browser, loads icloud.com and clicks Sign In.
 
     python server.py
 """
 
+import asyncio
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from playwright.async_api import async_playwright
 
 HERE = Path(__file__).parent
@@ -22,13 +24,48 @@ app = FastAPI()
 state = {
     "status": "idle",      # idle | running | done | error
     "step": "",
-    "url": "",
     "error": "",
 }
 
 pw = None
 browser = None
 page = None
+
+
+async def install_chromium():
+    """Download Chromium. Runs once; Playwright skips it if already present."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "playwright", "install", "chromium",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, err = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(pick_reason(err.decode(errors="replace")))
+
+
+def pick_reason(text: str) -> str:
+    """Pull the real error out of Playwright's noisy Node.js output."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    # First "Error:" line is the root cause; later ones just restate it.
+    for line in lines:
+        if line.startswith("Error:"):
+            return line[len("Error:"):].strip() or line
+
+    # Otherwise take the last line that isn't stack-trace noise.
+    for line in reversed(lines):
+        if not line.startswith(("at ", "{", "}")):
+            return line
+
+    return "could not install chromium"
+
+
+async def launch():
+    """Open a persistent browser so you only sign in once."""
+    return await pw.chromium.launch_persistent_context(
+        str(HERE / "profile"), headless=False
+    )
 
 
 @app.get("/")
@@ -47,30 +84,31 @@ async def start():
     state.update(status="running", error="")
 
     try:
-        state["step"] = "launching browser"
         pw = await async_playwright().start()
 
-        # A persistent profile means you sign in once, not every run.
-        browser = await pw.chromium.launch_persistent_context(
-            str(HERE / "profile"), headless=False
-        )
+        state["step"] = "launching browser"
+        try:
+            browser = await launch()
+        except Exception as exc:
+            # No browser downloaded yet - get it, then try once more.
+            if "Executable doesn't exist" not in str(exc):
+                raise
+            state["step"] = "installing browser"
+            await install_chromium()
+            browser = await launch()
+
         page = browser.pages[0] if browser.pages else await browser.new_page()
 
         state["step"] = "opening icloud.com"
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
-        state["url"] = page.url
 
         state["step"] = "clicking Sign In"
         await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
 
-        await page.wait_for_timeout(3000)
-        state["url"] = page.url
         state["status"] = "done"
-        state["step"] = "Sign In clicked - now sign in yourself in the browser window"
 
     except Exception as exc:
         state["status"] = "error"
-        state["step"] = "failed"
         state["error"] = str(exc).splitlines()[0]
 
     return state
@@ -78,11 +116,6 @@ async def start():
 
 @app.get("/status")
 async def status():
-    if page is not None:
-        try:
-            state["url"] = page.url
-        except Exception:
-            pass
     return state
 
 
