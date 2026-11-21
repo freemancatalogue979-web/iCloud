@@ -75,12 +75,9 @@
   }
 
   function seed(html, url) {
-    // A <base> so relative CSS and images resolve against the real origin.
-    const withBase = html.replace(
-      /<head([^>]*)>/i,
-      `<head$1><base href="${url}">`
-    );
-    mirror.srcdoc = withBase;
+    // agent.js has already absolutized resources and injected the <base> tag,
+    // so the serialised document can be dropped straight in.
+    mirror.srcdoc = html;
   }
 
   // --------------------------------------------------------------- input
