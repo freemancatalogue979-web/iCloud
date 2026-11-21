@@ -149,6 +149,12 @@ def build_api_router(manager: SessionManager, settings: Settings) -> APIRouter:
         status = await manager.goto(payload.target)
         return status.model_dump(mode="json")
 
+    @router.post("/session/click-signin")
+    async def click_signin() -> dict:
+        """Click the Sign In button on the iCloud landing page."""
+        status = await manager.click_signin()
+        return status.model_dump(mode="json")
+
     @router.get("/session/snapshot")
     async def snapshot() -> dict:
         snap = await manager.snapshot()

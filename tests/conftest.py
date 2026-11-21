@@ -19,5 +19,6 @@ def settings(tmp_path: Path) -> Settings:
         profile_dir=tmp_path / "profile",
         signin_wait_seconds=4,
         nav_timeout_ms=5_000,
+        click_settle_ms=0,
         headless=True,
     )

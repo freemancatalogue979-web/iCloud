@@ -211,6 +211,67 @@ class SessionManager:
             self._set_state(SessionState.RUNNING)
         return self.session.status()
 
+    # --------------------------------------------------------- interaction
+    async def click_signin(self, wait_for_signin: bool = True) -> SessionStatus:
+        """Click the landing-page Sign In button and follow the redirect.
+
+        This only clicks. The Apple ID form that follows is filled in by a
+        human — see the class docstring.
+        """
+        driver = self.session.driver
+        if driver is None or not driver.running:
+            self.bus.error("No active browser session to click in")
+            self.session.error = "No active browser session."
+            self.session.updated_at = self._stamp()
+            return self.session.status()
+
+        self.bus.step("Clicking the Sign In button")
+        used = await driver.click_signin_button()
+        if used is None:
+            self.session.error = (
+                "Could not find or click the Sign In button. The page may still "
+                "be loading, or Apple changed the markup."
+            )
+            self.session.hint = "Refresh the snapshot, or navigate to 'signin' directly."
+            self.session.updated_at = self._stamp()
+            self._set_state(SessionState.ERROR, error=self.session.error,
+                            hint=self.session.hint)
+            return self.session.status()
+
+        self.bus.info("Sign In clicked", selector=used)
+        # Give the redirect to idmsa.apple.com a moment to land.
+        await asyncio.sleep(self.settings.click_settle_ms / 1000.0)
+
+        try:
+            snap = await driver.snapshot()
+        except Exception as exc:
+            self.bus.error(f"Snapshot after click failed: {exc}")
+            self.session.updated_at = self._stamp()
+            return self.session.status()
+
+        self.session.snapshot = snap
+        self.session.error = None
+        self.session.updated_at = self._stamp()
+        self.bus.info("Landed after Sign In click",
+                      url=snap.url, title=snap.title,
+                      page_state=snap.page_state.value)
+
+        if snap.page_state in (PageState.SIGN_IN_REQUIRED, PageState.TWO_FACTOR_PROMPT):
+            self._set_state(SessionState.AWAITING_SIGNIN)
+            self.session.hint = (
+                "You are on the Apple sign-in page. Enter your Apple ID, "
+                "password and two-factor code yourself in the opened browser "
+                "window — this console never types Apple credentials."
+            )
+            if wait_for_signin:
+                self._spawn_signin_watch()
+        elif snap.page_state == PageState.SIGNED_IN:
+            self._set_state(SessionState.READY, hint=None)
+        else:
+            self._set_state(SessionState.RUNNING)
+
+        return self.session.status()
+
     async def snapshot(self) -> PageSnapshot | None:
         driver = self.session.driver
         if driver is None or not driver.running:

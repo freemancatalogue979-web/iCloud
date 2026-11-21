@@ -181,6 +181,34 @@ class PlaywrightDriver(BrowserDriver):
             raise RuntimeError(ERR_NOT_RUNNING)
         return await self._page.screenshot(full_page=False)
 
+    # -- interaction -------------------------------------------------------
+    async def probe_selectors(self, selectors) -> set[str]:
+        """Return the subset of selectors that match a visible element."""
+        found: set[str] = set()
+        if not self._running or self._page is None:
+            return found
+        for selector in selectors:
+            try:
+                locator = self._page.locator(selector).first
+                if await locator.count() > 0 and await locator.is_visible():
+                    found.add(selector)
+            except Exception:
+                continue
+        return found
+
+    async def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        if not self._running or self._page is None:
+            return False
+        try:
+            locator = self._page.locator(selector).first
+            await locator.scroll_into_view_if_needed(timeout=timeout_ms)
+            await locator.click(timeout=timeout_ms)
+            self.ctx.log("info", "Clicked", selector=selector)
+            return True
+        except Exception as exc:
+            self.ctx.log("warn", f"Click failed for {selector}: {exc}")
+            return False
+
     # -- convenience -------------------------------------------------------
     async def wait_for_selector(self, selector: str, timeout_ms: int = 10_000) -> bool:
         if not self._running or self._page is None:

@@ -122,3 +122,17 @@ def test_replay_limit_is_honoured(client: TestClient) -> None:
     res = client.get("/api/events?once=1&limit=2")
     frames = [l for l in res.text.splitlines() if l.startswith("data: ")]
     assert len(frames) <= 2
+
+
+# --------------------------------------------- step 2: click "Sign In"
+def test_click_signin_without_session_reports_error(client: TestClient) -> None:
+    res = client.post("/api/session/click-signin")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["error"] == "No active browser session."
+
+
+def test_console_exposes_the_sign_in_step(client: TestClient) -> None:
+    html = client.get("/").text
+    assert 'id="btn-signin"' in html
+    assert "sign-in-button" in html

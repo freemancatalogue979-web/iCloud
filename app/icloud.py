@@ -14,6 +14,29 @@ from .models import PageState
 
 SIGNIN_HOST = "idmsa.apple.com"
 
+# The "Sign In" button on the www.icloud.com landing page, in priority order.
+#
+# Real markup (supplied 2026-11-21):
+#   <ui-button class="push primary sign-in-button icloud-mouse" tabindex="0"
+#              ontouchstart="void(0)" role="button" aria-haspopup="false">
+#     <button type="button" tabindex="-1"></button>Sign In
+#   </ui-button>
+#
+# It is a custom element whose inner <button> is tabindex="-1" and empty, so
+# clicking the host <ui-button> is the reliable target. Wider fallbacks follow
+# in case Apple ships a different build.
+SIGNIN_BUTTON_SELECTORS: tuple[str, ...] = (
+    "ui-button.sign-in-button",
+    "ui-button.push.primary.sign-in-button",
+    "ui-button[class*='sign-in-button']",
+    "[class*='sign-in-button']",
+    "ui-button.sign-in-button > button",
+    "#sign-in",
+    "[data-testid='sign-in']",
+    "a[href*='/signin']",
+    "a[href*='idmsa.apple.com']",
+)
+
 # Each group maps a stable key to a comma-separated CSS selector list. Any one
 # match counts as the group being present.
 SELECTOR_GROUPS: dict[str, str] = {
@@ -30,12 +53,30 @@ SELECTOR_GROUPS: dict[str, str] = {
     "account_menu": "[data-testid='accountMenu'], #account-menu, .icloud-header-account, "
     "button[aria-label*='ccount']",
     "app_launcher": "[data-testid='appList'], #app-list, .app-list, [data-testid='apps']",
+    # Landing-page entry point into the Apple sign-in flow. This is the
+    # <ui-button class="push primary sign-in-button icloud-mouse"> element.
+    "signin_button": ", ".join(SIGNIN_BUTTON_SELECTORS),
     # Error / interstitial states
     "error_page": "#error, .error-page, [data-testid='error'], #server-error",
 }
 
 SIGNIN_GROUPS = ("two_factor", "account_entry")
 SIGNED_IN_GROUPS = ("user_initials", "account_menu", "app_launcher")
+
+
+def first_present_selector(
+    candidates: tuple[str, ...], present: set[str] | list[str] | None
+) -> str | None:
+    """Return the highest-priority candidate selector that is actually present.
+
+    Pure and order-preserving, so the click strategy is testable without a
+    browser. Returns None when nothing matched.
+    """
+    have = set(present or ())
+    for selector in candidates:
+        if selector in have:
+            return selector
+    return None
 
 
 def host_of(url: str) -> str:

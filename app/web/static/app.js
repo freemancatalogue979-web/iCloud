@@ -96,6 +96,13 @@ function renderState(state) {
   $("btn-refresh").disabled = !active;
   $("btn-shot").disabled = !active;
 
+  // Step 2 is only meaningful while the landing page is up — i.e. before the
+  // Apple sign-in form or 2FA prompt has taken over.
+  const pageState = SESSION.snapshot?.page_state;
+  const signinUseful = (state === "running" || state === "ready")
+    && (!pageState || pageState === "unknown");
+  $("btn-signin").disabled = !signinUseful;
+
   document.querySelectorAll(".chip").forEach((c) => { c.disabled = !active; });
 }
 
@@ -256,8 +263,23 @@ async function doGoto(target) {
   }
 }
 
-async function doStop() {
-  $("btn-stop").disabled = true;
+async function doClickSignin() {
+  $("btn-signin").disabled = true;
+  addLog("step", "Clicking the Sign In button…");
+  try {
+    const status = await api("/api/session/click-signin", { method: "POST" });
+    renderSession(status);
+  } catch (err) {
+    addLog("error", `Sign In click failed: ${err.message}`);
+    const banner = $("banner");
+    banner.hidden = false;
+    banner.className = "banner banner-err";
+    banner.textContent = `Sign In click failed: ${err.message}`;
+    renderSession(SESSION);
+  }
+}
+
+async function doStop() {  $("btn-stop").disabled = true;
   try {
     const status = await api("/api/session/stop", { method: "POST" });
     renderSession(status);
@@ -293,6 +315,7 @@ async function doScreenshot() {
 window.addEventListener("DOMContentLoaded", () => {
   addLog("info", "Console loaded");
   $("btn-start").onclick = doStart;
+  $("btn-signin").onclick = doClickSignin;
   $("btn-stop").onclick = doStop;
   $("btn-refresh").onclick = doRefresh;
   $("btn-shot").onclick = doScreenshot;

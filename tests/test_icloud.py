@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from app.icloud import SELECTOR_GROUPS, classify_page, host_of, matched_groups
+from app.icloud import (
+    SELECTOR_GROUPS,
+    SIGNIN_BUTTON_SELECTORS,
+    classify_page,
+    first_present_selector,
+    host_of,
+    matched_groups,
+)
 from app.models import PageState
 
 
@@ -79,3 +86,40 @@ def test_selector_groups_are_non_empty_css() -> None:
         assert css.strip(), f"selector group {key} is empty"
         for part in css.split(","):
             assert part.strip(), f"selector group {key} has an empty alternative"
+
+
+# ------------------------------------------------ step 2: Sign In button
+def test_the_reported_markup_selector_is_first_priority() -> None:
+    """The exact class from the real landing page must win the click race."""
+    assert SIGNIN_BUTTON_SELECTORS[0] == "ui-button.sign-in-button"
+
+
+def test_signin_selectors_are_unique_and_non_empty() -> None:
+    assert len(SIGNIN_BUTTON_SELECTORS) == len(set(SIGNIN_BUTTON_SELECTORS))
+    assert all(s.strip() for s in SIGNIN_BUTTON_SELECTORS)
+
+
+def test_signin_button_is_a_selector_group() -> None:
+    assert "signin_button" in SELECTOR_GROUPS
+    assert "ui-button.sign-in-button" in SELECTOR_GROUPS["signin_button"]
+
+
+def test_first_present_selector_respects_priority_order() -> None:
+    present = {"a[href*='/signin']", "ui-button.sign-in-button"}
+    assert first_present_selector(SIGNIN_BUTTON_SELECTORS, present) == (
+        "ui-button.sign-in-button"
+    )
+
+
+def test_first_present_selector_falls_back_to_a_link() -> None:
+    present = {"a[href*='/signin']"}
+    assert first_present_selector(SIGNIN_BUTTON_SELECTORS, present) == "a[href*='/signin']"
+
+
+def test_first_present_selector_returns_none_when_absent() -> None:
+    assert first_present_selector(SIGNIN_BUTTON_SELECTORS, set()) is None
+    assert first_present_selector(SIGNIN_BUTTON_SELECTORS, None) is None
+
+
+def test_first_present_selector_ignores_unknown_selectors() -> None:
+    assert first_present_selector(SIGNIN_BUTTON_SELECTORS, {"button.nope"}) is None

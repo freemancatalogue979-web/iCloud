@@ -79,6 +79,7 @@ class Settings:
 
     nav_timeout_ms: int = 30_000
     signin_wait_seconds: int = 180
+    click_settle_ms: int = 1_000
 
     allowed_hosts: frozenset[str] = field(default_factory=lambda: ALLOWED_HOSTS)
 
@@ -107,6 +108,7 @@ class Settings:
             browser_executable=executable,
             nav_timeout_ms=_env_int("ICLOUD_NAV_TIMEOUT_MS", 30_000),
             signin_wait_seconds=_env_int("ICLOUD_SIGNIN_WAIT_SECONDS", 180),
+            click_settle_ms=_env_int("ICLOUD_CLICK_SETTLE_MS", 1_000),
         )
 
 

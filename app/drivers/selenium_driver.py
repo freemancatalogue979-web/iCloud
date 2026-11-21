@@ -158,3 +158,64 @@ class SeleniumDriver(BrowserDriver):
             raise RuntimeError(ERR_NOT_RUNNING)
         png = await asyncio.to_thread(self._driver.get_screenshot_as_png)
         return png
+
+    # -- interaction -------------------------------------------------------
+    async def probe_selectors(self, selectors) -> set[str]:
+        from selenium.common.exceptions import WebDriverException
+        from selenium.webdriver.common.by import By
+
+        def _probe() -> set[str]:
+            found: set[str] = set()
+            for selector in selectors:
+                for css in (part.strip() for part in selector.split(",")):
+                    if not css:
+                        continue
+                    try:
+                        elements = self._driver.find_elements(By.CSS_SELECTOR, css)
+                    except WebDriverException:
+                        continue
+                    if any(el.is_displayed() for el in elements):
+                        found.add(selector)
+                        break
+            return found
+
+        if not self._running or self._driver is None:
+            return set()
+        return await asyncio.to_thread(_probe)
+
+    async def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        if not self._running or self._driver is None:
+            return False
+
+        from selenium.common.exceptions import WebDriverException
+        from selenium.webdriver.common.by import By
+
+        def _click() -> bool:
+            for css in (part.strip() for part in selector.split(",")):
+                if not css:
+                    continue
+                try:
+                    elements = self._driver.find_elements(By.CSS_SELECTOR, css)
+                except WebDriverException:
+                    continue
+                for element in elements:
+                    if not element.is_displayed():
+                        continue
+                    try:
+                        element.click()
+                        return True
+                    except WebDriverException:
+                        # Some custom elements need a JS-level dispatch.
+                        try:
+                            self._driver.execute_script("arguments[0].click();", element)
+                            return True
+                        except WebDriverException:
+                            continue
+            return False
+
+        ok = await asyncio.to_thread(_click)
+        if ok:
+            self.ctx.log("info", "Clicked", selector=selector)
+        else:
+            self.ctx.log("warn", f"Click failed for {selector}")
+        return ok

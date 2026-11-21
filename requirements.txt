@@ -15,6 +15,9 @@ selenium==4.27.1
 # Dev / test
 pytest==8.3.4
 pytest-asyncio==0.25.0
+# Used to verify the Sign In selectors against real captured markup
+lxml==5.3.0
+cssselect==1.2.0
 
 # After installing, fetch a browser binary for Playwright:
 #     python -m playwright install --with-deps chromium

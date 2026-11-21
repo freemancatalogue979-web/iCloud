@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..events import LogBus
-from ..icloud import SELECTOR_GROUPS, classify_page, matched_groups
+from ..icloud import (
+    SELECTOR_GROUPS,
+    SIGNIN_BUTTON_SELECTORS,
+    classify_page,
+    first_present_selector,
+    matched_groups,
+)
 from ..models import LaunchResult, PageSnapshot, PageState
 
 # Structured error codes so the UI can give an actionable hint instead of a
@@ -96,6 +102,40 @@ class BrowserDriver(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...
+
+    @abstractmethod
+    async def click(self, selector: str, timeout_ms: int = 10_000) -> bool:
+        """Click the first element matching `selector`. True if it happened."""
+
+    # -- shared click helper ----------------------------------------------
+    async def click_signin_button(self, timeout_ms: int = 10_000) -> str | None:
+        """Click the landing-page Sign In button.
+
+        Probes the candidate selectors in priority order and clicks the first
+        visible one. Returns the selector that worked, or None.
+        """
+        presence = await self.probe_selectors(SIGNIN_BUTTON_SELECTORS)
+        selector = first_present_selector(SIGNIN_BUTTON_SELECTORS, presence)
+        if selector is None:
+            self.ctx.log("warn", "No Sign In button found on this page")
+            return None
+
+        self.ctx.log("step", "Clicking Sign In", selector=selector)
+        if await self.click(selector, timeout_ms=timeout_ms):
+            return selector
+
+        # The custom element can swallow a click on the host; try its button.
+        fallback = f"{selector} > button"
+        self.ctx.log("step", "Retrying click on inner button", selector=fallback)
+        if await self.click(fallback, timeout_ms=timeout_ms):
+            return fallback
+
+        self.ctx.log("error", "Sign In button found but click failed", selector=selector)
+        return None
+
+    @abstractmethod
+    async def probe_selectors(self, selectors: tuple[str, ...] | list[str]) -> set[str]:
+        """Return the subset of `selectors` that currently match a visible node."""
 
     # -- shared helpers ----------------------------------------------------
     @staticmethod
