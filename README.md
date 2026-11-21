@@ -31,19 +31,34 @@ show. A failure turns the mark red — no text anywhere on the page.
 
 The mirror is DOM streaming, not screenshots. `agent.js` is injected into
 every frame the browser loads; it captures each document once, then a
-`MutationObserver` sends only what changed:
+`MutationObserver` sends granular ops:
 
-| Patch | Meaning |
+| Op | Meaning |
 |---|---|
-| `a` | an attribute changed |
-| `t` | a text node changed |
-| `h` | a subtree's children changed — coalesced to one entry per parent |
+| `add` | a node was inserted — one op per node, with its insertion point |
+| `rm` | a node was removed |
+| `attr` | an attribute changed |
+| `text` | a text node's data changed |
+| `children` | a parent's own children rewritten, used only when bare text nodes are involved |
+| `value` | live form state — `.value` / `.checked` |
 
-Changes are debounced at 30 ms and pushed over a WebSocket, so bursts of DOM
-churn arrive as a few frames instead of hundreds. Patches are sent at any
-size: re-seeding the whole document instead would be visible as a flash, and a
-page that mutates constantly would loop on it. Re-seeds are rate-limited to one
-per 2 s and only happen when the mirror's structure genuinely drifts.
+Every node gets a stable id held in a WeakMap and written onto the serialised
+clone as `data-rb-nid`. Ops address nodes by that id, so inserting a node at the
+start of a container cannot shift its siblings' addresses. Replacing a whole
+subtree's `innerHTML` instead — the obvious shortcut — was tried and is wrong
+three ways over: one class toggle re-sends a whole menu of inline SVGs, it
+destroys scroll position and focus inside the replaced range, and index paths
+drift as soon as anything is inserted.
+
+Mutations are batched to the paint cadence with `requestAnimationFrame` and
+pushed over a WebSocket. Re-seeds are rate-limited to one per 2 s and only
+happen when the mirror's structure genuinely drifts; patches are never dropped
+in favour of one, because a full re-seed is visible as a flash.
+
+`value` is a side channel rather than a mutation: typing into an `<input>`
+changes `.value`, which is not a DOM mutation, so no `MutationObserver` will
+ever report it. Without `input`/`change` listeners a sign-in form mirrors as
+permanently empty.
 
 Nothing is page-specific: no selectors for any site's fields, and no stored
 copy of any site's markup. It mirrors whatever is loaded.
@@ -68,8 +83,8 @@ No URL matching. Frames that never answer time out after 1.2 s.
 **Shadow roots.** Web components like `<ui-button>` keep their visible markup
 in a shadow root, which `outerHTML` does not contain. They are serialised as
 declarative `<template shadowrootmode="open">`, which Chromium parses into a
-live shadow root with no scripting in the mirror. Mutation paths cross shadow
-boundaries with a `#` segment.
+live shadow root with no scripting in the mirror. Shadow roots are also
+observed, so components that re-render stay in sync.
 
 `<base>` is removed, as SingleFile's `cleanupPage()` does: a copied page does
 not have the original's base URI, and a leftover `<base href="/">` silently
@@ -82,6 +97,11 @@ URLs are rewritten to `/res?url=<original>` and the server fetches them with
 fonts. CSS bodies have their own `url()`s rewritten against the sheet's origin.
 Scripts and `on*` handlers are dropped, and frames are sandboxed to
 `allow-same-origin` only.
+
+The mutation model follows [PhantomStream](https://github.com/fullselfbrowsing/PhantomStream),
+which reaches the same conclusions from the same problem — including its
+documented bug where gating the childList branch on element nodes silently
+drops `textContent =` edits, reproduced and fixed here as the `children` op.
 
 ## Files
 

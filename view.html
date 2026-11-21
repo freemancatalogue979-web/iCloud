@@ -15,102 +15,141 @@
 
 <script>
   const mirror = document.getElementById("mirror");
-  const FRAME_SELECTOR = 'iframe, frame, object[type="text/html"][data]';
   const WIN_ID = "data-rb-frame";
+  const NID = "data-rb-nid";
 
-  // windowId -> the Document that frame was captured into.
-  const docs = new Map();
+  // windowId -> { doc, ids: Map<nodeId, Node> }
+  const frames = new Map();
 
   const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
   let ws = null;
 
-  // -------------------------------------------------------------- paths
-  // Selector segments are child indexes; "#" steps into a shadow root.
-  function resolve(doc, sel) {
-    if (!doc || !doc.body) return null;
-    if (sel === "") return doc.body;
-    let node = doc.body;
-    for (const part of sel.split("/")) {
-      if (part === "#") node = node.shadowRoot;
-      else node = node.children ? node.children[+part] : null;
-      if (!node) return null;
+  /* Ids arrive as data-rb-nid attributes, so adoption is a lookup rather than a
+   * positional zip - there is no element ordering that can drift out of step.
+   * querySelectorAll does not cross into shadow roots, so those are descended
+   * into explicitly. */
+  function adopt(root, map) {
+    if (!root) return;
+    for (const el of root.querySelectorAll("[" + NID + "]")) map.set(el.getAttribute(NID), el);
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) adopt(el.shadowRoot, map);
     }
-    return node;
   }
 
-  function applyPatch(doc, patch) {
-    for (const p of patch) {
-      const el = resolve(doc, p.sel);
-      if (!el) return false;               // structure drifted - need a resync
+  // --------------------------------------------------------------- ops
+  function applyOps(entry, ops) {
+    const { doc, ids } = entry;
+    for (const op of ops) {
+      if (op.op === "add") {
+        const parent = ids.get(op.parent);
+        if (!parent) return false;
+        const template = doc.createElement("template");
+        template.innerHTML = op.html;
+        adopt(template.content, ids);
+        const before = op.before ? ids.get(op.before) : null;
+        if (before && before.parentNode === parent) parent.insertBefore(template.content, before);
+        else parent.appendChild(template.content);
 
-      if (p.t === "a") {
-        if (p.value === null) el.removeAttribute(p.name);
-        else el.setAttribute(p.name, p.value);
-      } else if (p.t === "t") {
-        if (el.firstChild && el.firstChild.nodeType === 3) el.firstChild.data = p.value;
-        else el.textContent = p.value;
-      } else if (p.t === "h") {
-        el.innerHTML = p.html;
+      } else if (op.op === "rm") {
+        const node = ids.get(op.id);
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+        ids.delete(op.id);
+
+      } else if (op.op === "attr") {
+        const el = ids.get(op.id);
+        if (!el) return false;
+        if (op.value === null) el.removeAttribute(op.name);
+        else el.setAttribute(op.name, op.value);
+
+      } else if (op.op === "children") {
+        // The parent's own children, rewritten as a unit because bare text
+        // nodes carry no id and cannot be added or removed individually.
+        const parent = ids.get(op.parent);
+        if (!parent) return false;
+        const template = doc.createElement("template");
+        template.innerHTML = op.html;
+        adopt(template.content, ids);
+        while (parent.firstChild) parent.removeChild(parent.firstChild);
+        parent.appendChild(template.content);
+
+      } else if (op.op === "text") {
+        const parent = ids.get(op.parent);
+        if (!parent) return false;
+        const target = parent.childNodes[op.index];
+        if (target && target.nodeType === 3) target.data = op.text;
+        else parent.textContent = op.text;
+
+      } else if (op.op === "value") {
+        const el = ids.get(op.id);
+        if (!el) return false;
+        // Only write what actually changed: assigning .value on a focused field
+        // moves its caret to the end.
+        if (op.value !== undefined && el.value !== op.value) el.value = op.value;
+        if (op.checked !== undefined && el.checked !== op.checked) el.checked = op.checked;
       }
     }
     return true;
   }
 
-  // ------------------------------------------------------------- frames
-  // windowId "0.1.2": from the root document take frame 1, enter it, take 2.
-  // The agent wrote the id onto each frame element, so this is a lookup, not a
-  // guess at which iframe holds which origin.
-  function frameDoc(windowId) {
-    if (windowId === "0") return docs.get("0");
-    const parentDoc = frameDoc(windowId.slice(0, windowId.lastIndexOf(".")));
-    if (!parentDoc) return null;
-    const el = parentDoc.querySelector("[" + WIN_ID + "=\"" + windowId + "\"]");
-    return el ? el.contentDocument : null;
+  function requestResync() {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ cmd: "resync" }));
   }
 
-  // Frames arrive deepest-last in the capture list, so a parent's document
-  // always exists before its children are filled in.
-  function fillFrame(frame) {
-    const parentDoc = frame.windowId === "0" ? docs.get("0") : frameDoc(frame.windowId.slice(0, frame.windowId.lastIndexOf(".")));
-    if (!parentDoc) return false;
-    const el = parentDoc.querySelector("[" + WIN_ID + "=\"" + frame.windowId + "\"]");
-    if (!el) return false;
-    el.setAttribute("sandbox", "allow-same-origin");
-    el.onload = () => {
-      docs.set(frame.windowId, el.contentDocument);
-      if (el.contentDocument) wireInput(el.contentDocument);
-    };
-    el.srcdoc = frame.html;
-    return true;
+  // ------------------------------------------------------------- frames
+  function frameDoc(windowId) {
+    if (windowId === "0") return frames.get("0");
+    const parent = frames.get(windowId.slice(0, windowId.lastIndexOf(".")));
+    if (!parent) return null;
+    const el = parent.doc.querySelector("[" + WIN_ID + "=\"" + windowId + "\"]");
+    return el ? el.contentDocument : null;
   }
 
   let pendingFrames = [];
   let pendingTimer = null;
 
+  function fillFrame(frame) {
+    const parentEntry = frames.get(frame.windowId.slice(0, frame.windowId.lastIndexOf(".")));
+    if (!parentEntry) return false;
+    const el = parentEntry.doc.querySelector("[" + WIN_ID + "=\"" + frame.windowId + "\"]");
+    if (!el) return false;
+    el.setAttribute("sandbox", "allow-same-origin");
+    el.onload = () => {
+      if (!el.contentDocument) return;
+      const fmap = new Map();
+      adopt(el.contentDocument, fmap);
+      frames.set(frame.windowId, { doc: el.contentDocument, ids: fmap });
+      wireInput(el.contentDocument);
+    };
+    el.srcdoc = frame.html;
+    return true;
+  }
+
   function drainPending() {
     const still = [];
-    for (const frame of pendingFrames) {
-      if (!fillFrame(frame)) still.push(frame);
-    }
+    for (const frame of pendingFrames) if (!fillFrame(frame)) still.push(frame);
     pendingFrames = still;
     if (pendingFrames.length && !pendingTimer) {
       pendingTimer = setTimeout(() => { pendingTimer = null; drainPending(); }, 150);
     }
   }
 
-  function seed(frames) {
-    docs.clear();
-    const root = frames.find((f) => f.windowId === "0") || frames[0];
+  function seed(captured) {
+    frames.clear();
+    const root = captured.find((f) => f.windowId === "0") || captured[0];
     if (!root) return;
     mirror.onload = () => {
-      docs.set("0", mirror.contentDocument);
-      if (mirror.contentDocument) wireInput(mirror.contentDocument);
+      const doc = mirror.contentDocument;
+      if (!doc) return;
+      const rootMap = new Map();
+      adopt(doc, rootMap);
+      frames.set("0", { doc, ids: rootMap });
+      wireInput(doc);
       // Tell the outer page it can drop its loading state now.
       try { window.parent.postMessage({ rb: "seeded" }, "*"); } catch (e) {}
       drainPending();
     };
     mirror.srcdoc = root.html;
-    pendingFrames = frames.filter((f) => f !== root);
+    pendingFrames = captured.filter((f) => f !== root);
     if (!pendingTimer) pendingTimer = setTimeout(() => { pendingTimer = null; drainPending(); }, 150);
   }
 
@@ -157,9 +196,9 @@
       }
 
       if (msg.kind === "mut") {
-        const doc = docs.get(msg.windowId);
-        if (!doc || !doc.body) return;
-        if (!applyPatch(doc, msg.patch)) ws.send(JSON.stringify({ cmd: "resync" }));
+        const entry = frames.get(msg.windowId);
+        if (!entry || !entry.doc || !entry.doc.body) return;
+        if (!applyOps(entry, msg.ops || [])) requestResync();
       }
     };
 
