@@ -37,13 +37,18 @@
   </div>
 
 <script>
+  // Poll only while it is still working; stop as soon as it finishes.
+  const timer = setInterval(() => {
+    fetch("/status").then(r => r.json()).then(show);
+  }, 2000);
+
   fetch("/start").then(r => r.json()).then(show);
-  setInterval(() => fetch("/status").then(r => r.json()).then(show), 2000);
 
   function show(s) {
     const finished = s.status === "done" || s.status === "error";
     document.getElementById("spinner").hidden = finished;
     document.getElementById("icon").hidden = !finished;
+    if (finished) clearInterval(timer);
   }
 </script>
 </body>

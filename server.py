@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from playwright.async_api import async_playwright
 
 HERE = Path(__file__).parent
@@ -117,6 +117,16 @@ async def start():
 @app.get("/status")
 async def status():
     return state
+
+
+@app.get("/.well-known/appspecific/com.chrome.devtools.json")
+async def chrome_devtools():
+    """Chrome DevTools probes this on localhost pages.
+
+    It is not part of the app. Answering 204 keeps it out of the log instead
+    of throwing a 404 on every page load.
+    """
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
