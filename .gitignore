@@ -1,0 +1,21 @@
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Browser automation artifacts (never commit these)
+artifacts/
+.profile/
+*.png
+storage_state.json
+
+# Local config / secrets — the app must never be given Apple ID credentials
+.env

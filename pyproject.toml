@@ -1,0 +1,28 @@
+[project]
+name = "icloud-browser-console"
+version = "0.1.0"
+description = "FastAPI + HTML console that drives a real browser to icloud.com (Playwright primary, Selenium fallback)."
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "jinja2==3.1.5",
+    "pydantic==2.10.4",
+    "httpx==0.28.1",
+    "playwright==1.49.1",
+    "selenium==4.27.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.3.4", "pytest-asyncio==0.25.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

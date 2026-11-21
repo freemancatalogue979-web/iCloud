@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>☁️</text></svg>">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">☁</span>
+      <div>
+        <h1>{{ app_name }}</h1>
+        <p class="sub">FastAPI · Playwright (primary) · Selenium (fallback) · v{{ version }}</p>
+      </div>
+    </div>
+    <div class="topbar-right">
+      <span id="conn-pill" class="pill pill-dim">connecting…</span>
+      <span id="state-pill" class="pill pill-dim">idle</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- ------------------------------------------------ control panel -->
+    <section class="card">
+      <h2>Browser session</h2>
+
+      <div class="field-row">
+        <label for="driver">Driver</label>
+        <select id="driver">
+          <option value="playwright" {% if default_driver == 'playwright' %}selected{% endif %}>Playwright (recommended)</option>
+          <option value="selenium" {% if default_driver == 'selenium' %}selected{% endif %}>Selenium WebDriver</option>
+        </select>
+      </div>
+
+      <div class="field-row">
+        <label for="target">Destination</label>
+        <select id="target"></select>
+        <p class="hint">Or paste a full <code>icloud.com</code> URL below.</p>
+        <input id="custom-url" type="text" placeholder="https://www.icloud.com/photos" spellcheck="false">
+      </div>
+
+      <div class="field-row">
+        <label class="check">
+          <input id="headless" type="checkbox" {% if headless %}checked{% endif %}>
+          <span>Headless</span>
+        </label>
+        <p class="hint warn">Headed is recommended: Apple sign-in and two-factor
+          must be completed by you in the real window.</p>
+      </div>
+
+      <div class="btn-row">
+        <button id="btn-start" class="btn btn-primary">Launch &amp; go to iCloud</button>
+        <button id="btn-stop" class="btn" disabled>Stop</button>
+      </div>
+
+      <div id="banner" class="banner" hidden></div>
+    </section>
+
+    <!-- ------------------------------------------------ driver health -->
+    <section class="card">
+      <h2>Driver readiness</h2>
+      <div id="drivers" class="drivers">
+        <p class="hint">Checking…</p>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------ current page -->
+    <section class="card wide">
+      <h2>Current page</h2>
+      <dl class="facts">
+        <div><dt>State</dt><dd id="f-state">—</dd></div>
+        <div><dt>URL</dt><dd id="f-url">—</dd></div>
+        <div><dt>Title</dt><dd id="f-title">—</dd></div>
+        <div><dt>Matched</dt><dd id="f-matched">—</dd></div>
+      </dl>
+      <div class="btn-row">
+        <button id="btn-refresh" class="btn" disabled>Refresh snapshot</button>
+        <button id="btn-shot" class="btn" disabled>Screenshot</button>
+      </div>
+      <figure id="shot-wrap" class="shot" hidden>
+        <img id="shot" alt="Latest screenshot of the browser page">
+        <figcaption>Most recent capture</figcaption>
+      </figure>
+    </section>
+
+    <!-- ------------------------------------------------ quick nav -->
+    <section class="card wide">
+      <h2>Quick navigate</h2>
+      <div id="quick" class="chips"></div>
+    </section>
+
+    <!-- ------------------------------------------------ logs -->
+    <section class="card wide">
+      <div class="card-head">
+        <h2>Live log</h2>
+        <button id="btn-clear" class="btn btn-small">Clear</button>
+      </div>
+      <ol id="log" class="log" aria-live="polite"></ol>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>
+      This console drives a browser to <strong>icloud.com</strong> only. It does not
+      store, transmit, or type Apple ID credentials — sign-in is always done by a
+      person in the opened browser window.
+    </p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
