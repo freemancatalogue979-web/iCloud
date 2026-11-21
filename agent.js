@@ -4,9 +4,11 @@
  * through the Playwright binding. Nothing here is specific to any site - it
  * mirrors whatever document it happens to be running in.
  *
- * Every resource reference is rewritten to an absolute URL before it leaves,
- * because the mirror renders from a different origin and anything left
- * relative would resolve against the mirror instead of the real site.
+ * Every resource is rewritten to go back through the server's /res proxy.
+ * Pointing straight at the real origin mostly works for CSS and images, but
+ * fails for fonts (they need CORS headers) and for anything that needs the
+ * site's cookies. Routing through /res sidesteps both, and lets the server
+ * rewrite url()s inside proxied stylesheets.
  */
 (() => {
   if (window.__rbInstalled) return;
@@ -29,7 +31,7 @@
     }
   }
 
-  // ------------------------------------------------------------- URLs
+  // --------------------------------------------------------------- URLs
   function toAbsolute(value) {
     if (!value) return value;
     const trimmed = value.trim();
@@ -37,6 +39,7 @@
       trimmed.startsWith("data:") ||
       trimmed.startsWith("blob:") ||
       trimmed.startsWith("#") ||
+      trimmed.startsWith("javascript:") ||
       /^[a-z][a-z0-9+.-]*:/i.test(trimmed)
     ) {
       return value;
@@ -48,54 +51,66 @@
     }
   }
 
-  // "a.png 1x, b.png 2x" -> both resolved
-  function absolutizeSrcset(value) {
+  function proxyFor(absolute) {
+    return "/res?url=" + encodeURIComponent(absolute);
+  }
+
+  // Resolve, then route through the proxy. Non-http references are left alone.
+  function toProxy(value) {
+    const absolute = toAbsolute(value);
+    if (!/^https?:\/\//i.test(absolute)) return absolute;
+    return proxyFor(absolute);
+  }
+
+  // "a.png 1x, b.png 2x" -> both proxied
+  function proxySrcset(value) {
     return value
       .split(",")
       .map((part) => {
         const bits = part.trim().split(/\s+/);
         if (!bits[0]) return part;
-        bits[0] = toAbsolute(bits[0]);
+        bits[0] = toProxy(bits[0]);
         return bits.join(" ");
       })
       .join(", ");
   }
 
-  // url(...) inside CSS resolves against the document, not the stylesheet,
-  // so it has to be rewritten by hand.
-  function absolutizeCss(css) {
+  // url() inside CSS resolves against the document, not the stylesheet, so it
+  // has to be rewritten by hand.
+  function proxyCss(css) {
     if (!css) return css;
     return css.replace(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g, (match, quote, url) => {
-      const absolute = toAbsolute(url);
-      return absolute === url ? match : `url(${quote}${absolute}${quote})`;
+      const rewritten = toProxy(url);
+      return rewritten === url ? match : `url(${quote}${rewritten}${quote})`;
     });
   }
 
   const URL_ATTRS = [
-    ["src", toAbsolute],
-    ["href", toAbsolute],
-    ["poster", toAbsolute],
-    ["data", toAbsolute],
-    ["action", toAbsolute],
-    ["srcset", absolutizeSrcset],
+    ["src", toProxy],
+    ["href", toProxy],
+    ["poster", toProxy],
+    ["data", toProxy],
+    ["action", toProxy],
+    ["srcset", proxySrcset],
   ];
 
-  function absolutizeElement(el) {
+  function rewriteElement(el) {
+    if (!el.getAttribute) return;
     for (const [attr, fix] of URL_ATTRS) {
-      if (el.hasAttribute && el.hasAttribute(attr)) {
-        el.setAttribute(attr, fix(el.getAttribute(attr)));
-      }
+      if (el.hasAttribute(attr)) el.setAttribute(attr, fix(el.getAttribute(attr)));
     }
-    const style = el.getAttribute && el.getAttribute("style");
-    if (style) el.setAttribute("style", absolutizeCss(style));
+    const style = el.getAttribute("style");
+    if (style) el.setAttribute("style", proxyCss(style));
   }
 
-  function absolutizeTree(root) {
-    for (const el of root.querySelectorAll("style")) {
-      el.textContent = absolutizeCss(el.textContent);
+  function rewriteTree(root) {
+    if (root.querySelectorAll) {
+      for (const el of root.querySelectorAll("style")) {
+        el.textContent = proxyCss(el.textContent);
+      }
+      for (const el of root.querySelectorAll("*")) rewriteElement(el);
     }
-    absolutizeElement(root);
-    for (const el of root.querySelectorAll("*")) absolutizeElement(el);
+    rewriteElement(root);
   }
 
   // Index path from <body>. Unambiguous, and cheap to resolve on the mirror.
@@ -116,34 +131,26 @@
     // Scripts must not run twice - once here, once in the mirror.
     clone.querySelectorAll("script").forEach((n) => n.remove());
 
-    absolutizeTree(clone);
+    rewriteTree(clone);
 
-    // Belt and braces: a <base> also catches anything injected later by a
-    // patch that we did not rewrite.
-    const head = clone.querySelector("head");
-    if (head && !head.querySelector("base")) {
-      const base = document.createElement("base");
-      base.href = document.baseURI;
-      head.insertBefore(base, head.firstChild);
-    }
+    // Any <base> the site ships would point at the mirror's origin, so drop
+    // it. Everything is absolute or proxied now, so it is not needed.
+    clone.querySelectorAll("base").forEach((n) => n.remove());
 
     return "<!DOCTYPE html>\n" + clone.outerHTML;
   }
 
-  // A patched-in fragment still needs its CSS urls fixed. Element attributes
-  // are covered by the <base> tag in the mirror.
-  function absolutizeFragment(html) {
-    if (!html || html.indexOf("url(") === -1 && html.indexOf("style") === -1) {
+  // Patched-in fragments get the same treatment as the full document; there is
+  // no <base> left to lean on.
+  function rewriteFragment(html) {
+    if (!html) return html;
+    if (html.indexOf("url(") === -1 && html.indexOf("src") === -1 &&
+        html.indexOf("href") === -1 && html.indexOf("style") === -1) {
       return html;
     }
     const template = document.createElement("template");
     template.innerHTML = html;
-    for (const el of template.content.querySelectorAll("style")) {
-      el.textContent = absolutizeCss(el.textContent);
-    }
-    for (const el of template.content.querySelectorAll("[style]")) {
-      el.setAttribute("style", absolutizeCss(el.getAttribute("style")));
-    }
+    rewriteTree(template.content);
     return template.innerHTML;
   }
 
@@ -154,10 +161,15 @@
         if (sel === null) continue;
         const raw = record.target.getAttribute(record.attributeName);
         let value = raw;
-        if (record.attributeName === "style") value = absolutizeCss(raw);
-        else if (record.attributeName === "srcset") value = absolutizeSrcset(raw);
-        else if (record.attributeName === "src" || record.attributeName === "href") {
-          value = toAbsolute(raw);
+        if (record.attributeName === "style") value = proxyCss(raw);
+        else if (record.attributeName === "srcset") value = proxySrcset(raw);
+        else if (
+          record.attributeName === "src" ||
+          record.attributeName === "href" ||
+          record.attributeName === "poster" ||
+          record.attributeName === "data"
+        ) {
+          value = toProxy(raw);
         }
         pending.push({ t: "a", sel, name: record.attributeName, value });
       } else if (record.type === "characterData") {
@@ -167,9 +179,7 @@
         if (sel === null) continue;
         // Text inside a <style> block is CSS, not prose.
         const data =
-          parent.tagName === "STYLE"
-            ? absolutizeCss(record.target.data)
-            : record.target.data;
+          parent.tagName === "STYLE" ? proxyCss(record.target.data) : record.target.data;
         pending.push({ t: "t", sel, value: data });
       } else if (record.type === "childList") {
         const sel = path(record.target);
@@ -195,7 +205,7 @@
     // changed repeatedly is serialised once in its final state.
     for (const [sel, node] of dirty) {
       if (!node.isConnected) continue;
-      patch.push({ t: "h", sel, html: absolutizeFragment(node.innerHTML) });
+      patch.push({ t: "h", sel, html: rewriteFragment(node.innerHTML) });
     }
     dirty.clear();
 
@@ -230,9 +240,11 @@
   // Exposed so the URL rewriting can be exercised without a real browser.
   window.__rbInternals = {
     toAbsolute,
-    absolutizeCss,
-    absolutizeSrcset,
-    absolutizeElement,
+    toProxy,
+    proxyFor,
+    proxyCss,
+    proxySrcset,
+    rewriteElement,
   };
 
   function start() {

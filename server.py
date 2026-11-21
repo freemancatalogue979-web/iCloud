@@ -9,8 +9,10 @@ which opens a browser, loads icloud.com and clicks Sign In.
 import asyncio
 import json
 import logging
+import re
 import sys
 from pathlib import Path
+from urllib.parse import quote, urljoin
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
@@ -255,6 +257,64 @@ async def status():
 @app.get("/view")
 async def view():
     return FileResponse(HERE / "view.html", headers={"Cache-Control": "no-store"})
+
+
+# --------------------------------------------------------------------------
+# Resource proxy.
+#
+# The mirror is served from localhost, so it cannot just point at the real
+# origin: fonts need CORS headers, and anything session-scoped needs the
+# site's cookies. Fetching here through the browser context's own request
+# client solves both, and lets us rewrite url()s inside proxied stylesheets so
+# their relatives resolve against the sheet they came from.
+# --------------------------------------------------------------------------
+CSS_URL_RE = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""")
+
+
+def proxy_path(absolute: str) -> str:
+    return "/res?url=" + quote(absolute, safe="")
+
+
+def rewrite_css(css: str, base: str) -> str:
+    """Point every url() in a proxied stylesheet back through the proxy."""
+
+    def replace(match):
+        quote_char = match.group(1)
+        raw = match.group(2).strip()
+        if raw.startswith(("data:", "blob:", "#", "/res?")):
+            return match.group(0)
+        absolute = urljoin(base, raw)
+        return f'url("{proxy_path(absolute)}")'
+
+    return CSS_URL_RE.sub(replace, css)
+
+
+@app.get("/res")
+async def proxy(url: str):
+    # Validate before anything else, so this can never be pointed at a local
+    # file or an internal address.
+    if not url.startswith(("http://", "https://")):
+        return Response(status_code=400, content=b"only http(s) urls may be proxied")
+    if ctx is None:
+        return Response(status_code=503, content=b"no browser session")
+
+    try:
+        # Shares cookies with the driven browser, so authenticated assets work.
+        response = await ctx.request.get(url)
+    except Exception as exc:
+        return Response(status_code=502, content=str(exc).splitlines()[0].encode()[:300])
+
+    body = await response.body()
+    content_type = response.headers.get("content-type", "application/octet-stream")
+
+    if "text/css" in content_type.lower():
+        body = rewrite_css(body.decode(errors="replace"), url).encode("utf-8")
+
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @app.websocket("/ws")
