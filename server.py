@@ -28,7 +28,7 @@ state = {
 }
 
 pw = None
-browser = None
+ctx = None
 page = None
 
 
@@ -62,10 +62,33 @@ def pick_reason(text: str) -> str:
 
 
 async def launch():
-    """Open a persistent browser so you only sign in once."""
-    return await pw.chromium.launch_persistent_context(
-        str(HERE / "profile"), headless=False
-    )
+    """Open a real, visible browser window.
+
+    headless=False is what makes it headed. The other two arguments matter on
+    Windows: without no_viewport the page is pinned to an 800x600 box inside a
+    larger window, and without --start-maximized the window can open small or
+    behind whatever you were already looking at.
+
+    Returns (context, page).
+    """
+    args = ["--start-maximized"]
+
+    try:
+        # Persistent profile, so you sign in once instead of every run.
+        ctx = await pw.chromium.launch_persistent_context(
+            str(HERE / "profile"),
+            headless=False,
+            no_viewport=True,
+            args=args,
+        )
+    except Exception:
+        # A chrome.exe left over from a crashed run can hold the profile lock.
+        # Fall back to a throwaway profile rather than failing outright.
+        browser = await pw.chromium.launch(headless=False, args=args)
+        ctx = await browser.new_context(no_viewport=True)
+
+    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+    return ctx, page
 
 
 @app.get("/")
@@ -76,7 +99,7 @@ async def index():
 @app.get("/start")
 async def start():
     """Launch the browser, open iCloud, press Sign In."""
-    global pw, browser, page
+    global pw, ctx, page
 
     if state["status"] in ("running", "done"):
         return state
@@ -88,19 +111,18 @@ async def start():
 
         state["step"] = "launching browser"
         try:
-            browser = await launch()
+            ctx, page = await launch()
         except Exception as exc:
             # No browser downloaded yet - get it, then try once more.
             if "Executable doesn't exist" not in str(exc):
                 raise
             state["step"] = "installing browser"
             await install_chromium()
-            browser = await launch()
-
-        page = browser.pages[0] if browser.pages else await browser.new_page()
+            ctx, page = await launch()
 
         state["step"] = "opening icloud.com"
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
+        await page.bring_to_front()
 
         state["step"] = "clicking Sign In"
         await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
