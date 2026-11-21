@@ -24,9 +24,10 @@ python -m playwright install chromium
 
 ## The page
 
-`client.html` is one full-viewport `<iframe>` pointing at `/view`. Nothing
-else — no spinner, no icon, no status text, no overlay. `/view` is the live
-mirror of the real page.
+`client.html` is a full-viewport `<iframe>` pointing at `/view`, with a loading
+overlay on top: a spinner while the browser starts, the Apple mark once it is
+up, and gone entirely the moment `/view` reports it has a real document to
+show. A failure turns the mark red — no text anywhere on the page.
 
 The mirror is DOM streaming, not screenshots. `agent.js` is injected into
 every frame the browser loads; it captures each document once, then a

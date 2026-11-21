@@ -105,6 +105,8 @@
     mirror.onload = () => {
       docs.set("0", mirror.contentDocument);
       if (mirror.contentDocument) wireInput(mirror.contentDocument);
+      // Tell the outer page it can drop its loading state now.
+      try { window.parent.postMessage({ rb: "seeded" }, "*"); } catch (e) {}
       drainPending();
     };
     mirror.srcdoc = root.html;

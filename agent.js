@@ -204,6 +204,7 @@
         const orig2 = origShadowKids[i];
         const clone2 = cloneShadowKids[i];
         if (!orig2 || !clone2) continue;
+        if (orig2.nodeType === 3) continue; // text is content, keep it
         if (orig2.nodeType !== 1) { clone2.remove(); continue; }
         if (!cleanClone(clone2)) { clone2.remove(); continue; }
         walk(orig2, clone2, ids);
@@ -433,6 +434,7 @@
       const orig = originals[i];
       const cl = clones[i];
       if (!orig || !cl) continue;
+      if (orig.nodeType === 3) continue; // text is content, keep it
       if (orig.nodeType !== 1) { cl.remove(); continue; }
       if (!cleanClone(cl)) { cl.remove(); continue; }
       walk(orig, cl, ids);
