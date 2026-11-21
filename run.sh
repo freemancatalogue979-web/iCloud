@@ -42,8 +42,14 @@ case "${1:-serve}" in
       --host "${ICLOUD_HOST:-0.0.0.0}" \
       --port "${ICLOUD_PORT:-8000}"
     ;;
+  client)
+    # The single-page client: iframe + WebSocket, auto-starts on visit.
+    exec "$PY" -m uvicorn client.server:app \
+      --host "${ICLOUD_HOST:-0.0.0.0}" \
+      --port "${ICLOUD_CLIENT_PORT:-9002}"
+    ;;
   *)
-    echo "usage: $0 [serve|test|setup]" >&2
+    echo "usage: $0 [serve|client|test|setup]" >&2
     exit 2
     ;;
 esac

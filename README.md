@@ -35,6 +35,57 @@ Interactive API docs: <http://localhost:8000/docs>
 
 ---
 
+## Client server — `localhost:9002`
+
+The minimal client: **one HTML page**, an **iframe**, and a **WebSocket**.
+Visiting the page is what starts the flow.
+
+```bash
+python -m client.server          # http://localhost:9002
+# or
+./run.sh client
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /` | the single client page (iframe + WebSocket) |
+| `GET /view` | iframe content — live browser screenshot |
+| `GET /shot.png` | latest capture |
+| `GET /health` | liveness, session state, capture nonce |
+| `WS /ws` | commands in, events / status / flow steps out |
+
+### What happens on a visit
+
+```
+browser opens /  ──►  iframe loads /view
+      │
+      └─► WebSocket connects to /ws
+              │  ws.send({cmd:"start"})        ← automatic, on open
+              ▼
+        launch browser ──► goto icloud.com ──► click "Sign In"
+              │                                      │
+              ▼                                      ▼
+        {type:"flow", step, ok, detail}      {type:"flow_done", ok, steps, …}
+```
+
+Steps stream back as they happen, so the page renders the flow live. The iframe
+is same-origin (`src="/view"`), so the parent page can `postMessage` it to
+reload the screenshot without a cross-origin hop.
+
+### WebSocket protocol
+
+| Direction | Message |
+|---|---|
+| → server | `{cmd:"start"}` · `{cmd:"click_signin"}` · `{cmd:"stop"}` · `{cmd:"refresh"}` · `{cmd:"ping"}` |
+| ← server | `{type:"hello"}` · `{type:"status"}` · `{type:"event"}` · `{type:"flow"}` · `{type:"flow_done"}` · `{type:"error"}` · `{type:"pong"}` |
+
+`run_flow()` lives in `client/flow.py`, free of FastAPI concerns, so it is
+tested directly against a stub manager.
+
+Set the port with `ICLOUD_CLIENT_PORT` (default `9002`).
+
+---
+
 ## The flow
 
 | Step | What happens | Who does it |
@@ -152,6 +203,11 @@ app/
     ├── routes.py            FastAPI routers
     ├── templates/index.html
     └── static/{app.js,style.css}
+
+client/                        localhost:9002 — the minimal client
+├── server.py                single page + iframe + WebSocket
+├── flow.py                  the visit flow (pure, testable)
+└── static/{client.html,view.html}
 ```
 
 **Two seams are pure Python and heavily unit-tested**, so the safety-critical
@@ -171,12 +227,13 @@ Session states: `idle → starting → running → awaiting_signin → ready`, p
 pytest
 ```
 
-142 tests covering the allowlist (including lookalike-domain attacks), page
+169 tests covering the allowlist (including lookalike-domain attacks), page
 classification, the Sign In selectors **checked against real captured markup by
 a real CSS engine**, the event bus, the full session state machine (including
 the click-Sign-In path and its fallbacks) via an in-process fake driver, the
-FastAPI routes over `TestClient`, and **real driver launch attempts** that
-assert the structured error contract.
+FastAPI routes over `TestClient`, the visit flow against a stub manager, the
+**client WebSocket protocol end-to-end**, and **real driver launch attempts**
+that assert the structured error contract.
 
 ---
 
