@@ -138,6 +138,102 @@
     });
   }
 
+  /* ------------------------------------------------- computed styles
+   * The mirror's styling otherwise depends entirely on /res fetching the
+   * site's stylesheets, which fails silently the moment a sheet is
+   * CORS-blocked, session-scoped, or redirected - and the page renders as bare
+   * markup. Inlining resolved styles means the mirror looks right whether or
+   * not any of that arrives.
+   *
+   * Curated list, taken from PhantomStream: iterating all 300+ computed
+   * properties per element is what crushed them on heavy pages. */
+  const STYLE_DEFAULTS = {
+    display: "block", position: "static", opacity: "1", visibility: "visible",
+    overflow: "visible", transform: "none", "box-shadow": "none", "z-index": "auto",
+    float: "none", clear: "none", cursor: "auto", "pointer-events": "auto",
+    "text-align": "start", "vertical-align": "baseline", "font-style": "normal",
+    "font-variant": "normal", "text-transform": "none", "white-space": "normal",
+    "word-break": "normal", "overflow-wrap": "normal", "list-style-type": "disc",
+    "border-collapse": "separate", resize: "none",
+  };
+
+  const CURATED_PROPS = [
+    "display", "position", "top", "right", "bottom", "left", "float", "clear",
+    "box-sizing", "width", "height", "min-width", "min-height", "max-width",
+    "max-height", "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "padding-top", "padding-right", "padding-bottom", "padding-left",
+    "flex-direction", "flex-wrap", "justify-content", "align-items", "align-self",
+    "align-content", "flex-grow", "flex-shrink", "flex-basis", "order", "gap",
+    "grid-template-columns", "grid-template-rows", "grid-column", "grid-row",
+    "grid-auto-flow", "grid-gap", "column-gap", "row-gap",
+    "background-color", "background-image", "background-position",
+    "background-size", "background-repeat", "color", "opacity", "visibility",
+    "border-top-width", "border-right-width", "border-bottom-width",
+    "border-left-width", "border-top-style", "border-right-style",
+    "border-bottom-style", "border-left-style", "border-top-color",
+    "border-right-color", "border-bottom-color", "border-left-color",
+    "border-radius", "box-shadow", "outline",
+    "font-family", "font-size", "font-weight", "font-style", "line-height",
+    "letter-spacing", "word-spacing", "text-align", "text-decoration",
+    "text-transform", "text-indent", "text-overflow", "white-space",
+    "overflow", "overflow-x", "overflow-y", "transform", "transform-origin",
+    "z-index", "cursor", "pointer-events", "vertical-align", "object-fit",
+  ];
+
+  // Inherited properties: if the parent already carries the same value, the
+  // child gets it for free in the mirror too, so repeating it is pure payload.
+  const INHERITED_PROPS = new Set([
+    "color", "font-family", "font-size", "font-weight", "font-style",
+    "line-height", "letter-spacing", "word-spacing", "text-align",
+    "text-transform", "text-indent", "white-space", "word-break",
+    "overflow-wrap", "visibility", "cursor", "list-style-type",
+  ]);
+
+  const NO_OPS = new Set([
+    "0px", "normal", "none", "auto", "0s", "0px 0px", "rgba(0, 0, 0, 0)",
+    "transparent", "0% 0%", "repeat", "visible", "start", "baseline", "clip",
+    "fill", "row", "nowrap", "content-box", "separate", "50% 50%", "match-parent",
+    "static", "currentColor", "currentcolor none",
+  ]);
+
+  function computedOf(el) {
+    if (!el || !window.getComputedStyle) return null;
+    try {
+      return window.getComputedStyle(el);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function propValue(computed, prop) {
+    if (!computed) return "";
+    try {
+      return computed.getPropertyValue(prop);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function computedStyleText(el) {
+    const computed = computedOf(el);
+    if (!computed) return "";
+    const inheritedFrom = computedOf(el.parentElement);
+    const out = [];
+    for (const prop of CURATED_PROPS) {
+      const value = propValue(computed, prop);
+      if (!value) continue;
+      if (STYLE_DEFAULTS[prop] === value) continue;
+      // Skip the values that mean "nothing was set" - auto, none, normal, 0px.
+      // Without this an element carries ~1.3KB of initial values that say
+      // nothing, which is the whole payload. A property whose real default IS
+      // one of these is still skipped above by STYLE_DEFAULTS.
+      if (NO_OPS.has(value)) continue;
+      if (INHERITED_PROPS.has(prop) && propValue(inheritedFrom, prop) === value) continue;
+      out.push(prop + ":" + value);
+    }
+    return out.join(";");
+  }
+
   const URL_ATTRS = [
     ["src", toProxy],
     ["poster", toProxy],
@@ -212,6 +308,11 @@
   function walk(orig, clone, ctx) {
     clone.setAttribute(NID, ensureId(orig));
 
+    // Resolved styles, with any url() inside them routed through the proxy the
+    // same way a stylesheet's would be.
+    const computed = computedStyleText(orig);
+    if (computed) clone.setAttribute("style", proxyCss(computed));
+
     if (clone.tagName === "STYLE") {
       clone.textContent = proxyCss(orig.textContent);
     }
@@ -257,6 +358,7 @@
 
   function serialiseDocumentOf(doc, frameIds) {
     const clone = doc.documentElement.cloneNode(true);
+    cleanClone(clone);
     walk(doc.documentElement, clone, { frameIds });
     return { html: "<!DOCTYPE html>" + clone.outerHTML };
   }
@@ -591,6 +693,8 @@
     ensureId,
     serialiseDocumentOf,
     serialiseAdded,
+    serialiseChildren,
+    computedStyleText,
     WIN_ID,
     FRAME_SELECTOR,
   };

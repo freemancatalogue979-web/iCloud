@@ -90,13 +90,25 @@ observed, so components that re-render stay in sync.
 not have the original's base URI, and a leftover `<base href="/">` silently
 points every relative URL at localhost.
 
-**Resources** are the one deliberate divergence. SingleFile inlines everything
+**Resolved styles are inlined.** The mirror's styling would otherwise depend
+entirely on `/res` fetching the site's stylesheets, and that fails silently the
+moment a sheet is CORS-blocked, session-scoped or redirected — leaving bare
+markup with no explanation. Each element carries its computed style instead, so
+the page looks right whether or not any of that arrives. A curated list of ~85
+properties is used rather than all 300+: PhantomStream found iterating
+everything cost 45 s on a heavy page. No-op values (`auto`, `none`, `normal`,
+`0px`) and inherited values the parent already carries are dropped, which takes
+an element from ~1.3 KB to ~200 bytes. `url()`s inside the resolved text are
+proxied like any other.
+
+**Resources** are the other deliberate divergence. SingleFile inlines everything
 as `data:` URIs because it produces a file; this produces a live stream, so
 URLs are rewritten to `/res?url=<original>` and the server fetches them with
 `ctx.request.get`, which carries the site's cookies and gets around CORS on
 fonts. CSS bodies have their own `url()`s rewritten against the sheet's origin.
-Scripts and `on*` handlers are dropped, and frames are sandboxed to
-`allow-same-origin` only.
+`href` is split by element — proxied on `<link>`, only absolutised on `<a>`,
+since an anchor names a destination and not a resource. Scripts and `on*`
+handlers are dropped, and frames are sandboxed to `allow-same-origin` only.
 
 The mutation model follows [PhantomStream](https://github.com/fullselfbrowsing/PhantomStream),
 which reaches the same conclusions from the same problem — including its
