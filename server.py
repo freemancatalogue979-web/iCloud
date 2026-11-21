@@ -7,11 +7,12 @@ which opens a browser, loads icloud.com and clicks Sign In.
 """
 
 import asyncio
+import json
 import logging
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
@@ -54,6 +55,45 @@ class Key(BaseModel):
 pw = None
 ctx = None
 page = None
+
+# Injected into every page the browser loads. Mirrors the live DOM out to us.
+AGENT_JS = (HERE / "agent.js").read_text(encoding="utf-8")
+
+# Connected /ws viewers, each with its own queue.
+clients: set[asyncio.Queue] = set()
+last_doc: dict | None = None
+
+
+async def broadcast(message: dict):
+    for queue in list(clients):
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass  # a slow viewer drops frames rather than stalling the page
+
+
+async def on_emit(source, message):
+    """Called from inside the real page via the Playwright binding."""
+    global last_doc
+    if message.get("kind") == "doc":
+        last_doc = message
+    await broadcast(message)
+
+
+async def install_agent(context):
+    """Give every document the mirror script and a way to send it out."""
+    await context.expose_binding("__rbEmit", on_emit)
+    await context.add_init_script(AGENT_JS)
+
+
+async def request_resync():
+    """Ask the page to re-send its whole document."""
+    if page is None:
+        return
+    try:
+        await page.evaluate("() => window.__rbResync && window.__rbResync()")
+    except Exception as exc:
+        log(f"resync failed: {str(exc).splitlines()[0]}")
 
 
 # The page polls /status every 2s, which buries everything else in the console.
@@ -180,6 +220,8 @@ async def start():
 
         state["browser_open"] = True
 
+        await install_agent(ctx)
+
         log("going to icloud.com")
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
         await page.bring_to_front()
@@ -213,6 +255,43 @@ async def status():
 @app.get("/view")
 async def view():
     return FileResponse(HERE / "view.html", headers={"Cache-Control": "no-store"})
+
+
+@app.websocket("/ws")
+async def stream(websocket: WebSocket):
+    """Push DOM documents and mutation patches to the mirror."""
+    await websocket.accept()
+
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    clients.add(queue)
+
+    async def push():
+        while True:
+            message = await queue.get()
+            await websocket.send_json(message)
+
+    task = asyncio.create_task(push())
+
+    try:
+        # A viewer that joins late still gets the current document at once.
+        if last_doc is not None:
+            await websocket.send_json(last_doc)
+
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                message = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if message.get("cmd") == "resync":
+                await request_resync()
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        log(f"viewer disconnected: {str(exc).splitlines()[0]}")
+    finally:
+        task.cancel()
+        clients.discard(queue)
 
 
 @app.get("/shot.png")
