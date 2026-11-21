@@ -20,6 +20,14 @@ HERE = Path(__file__).parent
 # The Sign In button on the icloud.com landing page.
 SIGNIN_BUTTON = "ui-button.sign-in-button"
 
+# Tried in order. Bundled Chromium needs a download; Chrome and Edge are
+# usually already on the machine, so if either is there we skip it entirely.
+BROWSERS = [
+    ("bundled chromium", {}),
+    ("system chrome", {"channel": "chrome"}),
+    ("system edge", {"channel": "msedge"}),
+]
+
 app = FastAPI()
 
 state = {
@@ -50,16 +58,29 @@ def log(message):
 
 
 async def install_chromium():
-    """Download Chromium. Runs once; Playwright skips it if already present."""
-    log("installing chromium (this can take a minute)")
+    """Download Chromium, streaming the progress so a stall is visible."""
+    log("installing chromium - download progress follows")
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "playwright", "install", "chromium",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
     )
-    _, err = await proc.communicate()
+
+    chunks = []
+    while True:
+        chunk = await proc.stdout.read(1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        # Playwright draws a progress bar with \r, so pass it through raw.
+        print(chunk.decode(errors="replace"), end="", flush=True)
+
+    await proc.wait()
+    print(flush=True)
+
+    output = b"".join(chunks).decode(errors="replace")
     if proc.returncode != 0:
-        raise RuntimeError(pick_reason(err.decode(errors="replace")))
+        raise RuntimeError(pick_reason(output))
     log("chromium installed")
 
 
@@ -81,25 +102,35 @@ def pick_reason(text: str) -> str:
 
 
 async def launch():
-    """Open a real, visible browser window. Returns (context, page)."""
-    args = ["--start-maximized"]
+    """Open a visible browser window with whatever is available.
 
-    try:
-        log("launching browser (saved profile)")
-        ctx = await pw.chromium.launch_persistent_context(
-            str(HERE / "profile"),
-            headless=False,
-            no_viewport=True,
-            args=args,
-        )
-    except Exception as exc:
-        # A chrome.exe left over from a crashed run can hold the profile lock.
-        log(f"saved profile unusable ({str(exc).splitlines()[0]}), using a fresh one")
-        browser = await pw.chromium.launch(headless=False, args=args)
-        ctx = await browser.new_context(no_viewport=True)
+    Returns (context, page). Raises once every candidate has failed, with all
+    the reasons joined so the caller can tell a missing download from a
+    genuinely broken setup.
+    """
+    reasons = []
 
-    page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-    return ctx, page
+    for label, extra in BROWSERS:
+        try:
+            log(f"launching {label}")
+            ctx = await pw.chromium.launch_persistent_context(
+                str(HERE / "profile"),
+                headless=False,
+                no_viewport=True,
+                args=["--start-maximized"],
+                **extra,
+            )
+        except Exception as exc:
+            reason = str(exc).splitlines()[0]
+            log(f"{label} unavailable: {reason}")
+            reasons.append(reason)
+            continue
+
+        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        log(f"browser open ({label})")
+        return ctx, page
+
+    raise RuntimeError(" | ".join(reasons) or "no browser could be launched")
 
 
 @app.get("/")
@@ -126,13 +157,13 @@ async def start():
         try:
             ctx, page = await launch()
         except Exception as exc:
-            # No browser downloaded yet - get it, then try once more.
+            # Nothing to run yet - download Chromium, then try once more.
             if "Executable doesn't exist" not in str(exc):
                 raise
             await install_chromium()
             ctx, page = await launch()
 
-        log(f"browser open, going to icloud.com (window: {await page.title()!r})")
+        log("going to icloud.com")
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
         await page.bring_to_front()
 
