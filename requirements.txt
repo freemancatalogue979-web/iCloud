@@ -1,23 +1,3 @@
-# iCloud Browser Console — Python 3.11+
-#
-# Core web stack
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-jinja2==3.1.5
-pydantic==2.10.4
-httpx==0.28.1
-
-# Browser automation. Playwright is the primary driver; Selenium is the
-# fallback. Install both so either can be selected at runtime.
-playwright==1.49.1
-selenium==4.27.1
-
-# Dev / test
-pytest==8.3.4
-pytest-asyncio==0.25.0
-# Used to verify the Sign In selectors against real captured markup
-lxml==5.3.0
-cssselect==1.2.0
-
-# After installing, fetch a browser binary for Playwright:
-#     python -m playwright install --with-deps chromium
+fastapi
+uvicorn
+playwright
