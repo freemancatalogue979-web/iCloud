@@ -15,6 +15,8 @@ selectable from the UI at launch time.
 
 ## Quickstart
 
+### Linux / macOS
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -29,7 +31,45 @@ python -m app.main
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Open <http://localhost:8000>. Press **Launch & go to iCloud**.
+Or use the launcher, which creates the venv for you on first run:
+
+```bash
+./run.sh            # console on :8000
+./run.sh client     # single-page client on :9002
+./run.sh test       # test suite
+./run.sh setup      # venv + dependencies only
+```
+
+### Windows
+
+Double-click `run.bat`, or from `cmd` / PowerShell:
+
+```bat
+run.bat            rem console on :8000
+run.bat client     rem single-page client on :9002
+run.bat test       rem test suite
+run.bat setup      rem venv + dependencies only
+```
+
+The first run creates `.venv` and installs everything, then tells you the one
+remaining step:
+
+```bat
+.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Note that on Windows you use the command above **as-is** — the `--with-deps`
+flag installs Linux system libraries and is not needed (and not supported) on
+Windows.
+
+Requirements: Python 3.11+ on `PATH` (`run.bat` tries the `py -3` launcher
+first, then a bare `python`). Ports can be overridden with `ICLOUD_PORT` and
+`ICLOUD_CLIENT_PORT`.
+
+---
+
+Open <http://localhost:8000> for the console, or <http://localhost:9002> for the
+single-page client.
 
 Interactive API docs: <http://localhost:8000/docs>
 
