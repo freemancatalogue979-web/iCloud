@@ -131,14 +131,15 @@ _READ = """() => {
     let field = '';
     let before = '';
     let after = '';
+    const all_fields = document.querySelectorAll('input, select, textarea');
+    for (const f of all_fields) {
+      if (!f.id) continue;
+      if (f.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        field = f.id;
+      }
+    }
     let node = el;
     while (node) {
-      if (!field && node.previousElementSibling) {
-        const fields = node.previousElementSibling.querySelectorAll
-          ? node.previousElementSibling.querySelectorAll('input, select, textarea')
-          : [];
-        if (fields.length) field = fields[fields.length - 1].id || '';
-      }
       if (!before && node.previousElementSibling && node.previousElementSibling.id) {
         before = node.previousElementSibling.id;
       }

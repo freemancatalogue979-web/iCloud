@@ -242,6 +242,13 @@ class FakeSocket {
     said && said.style.color === "rgb(215, 0, 21)" &&
       said.style.fontSize === "12px",
     said && said.getAttribute("style"));
+  check("...and it sits by the field it is about",
+    said && said.previousElementSibling &&
+      (said.previousElementSibling.id === "account" ||
+        said.previousElementSibling.contains &&
+          !!said.previousElementSibling.querySelector("#account")),
+    said && said.previousElementSibling &&
+      said.previousElementSibling.outerHTML.slice(0, 120));
 
   // When the browser stops saying it, the capture stops saying it too.
   sock.receive({

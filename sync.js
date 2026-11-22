@@ -455,7 +455,23 @@
     }
 
     spot.parent.insertBefore(el, spot.next || null);
+    makeRoom(el);
     return el;
+  }
+
+  // The capture's content area was given a height for the message that was
+  // not there when it was taken - the message is the reason the area has
+  // that height, and without it the message lands on top of what is below.
+  function makeRoom(el) {
+    var area = el.closest ? el.closest(".signin-content") : null;
+    if (!area) return;
+    try {
+      var height = area.getBoundingClientRect().height;
+      if (!height) return;
+      area.style.minHeight = height + 28 + "px";
+    } catch (err) {
+      /* the area is not laid out; leave it alone */
+    }
   }
 
   // Where the message goes: under the field it is about, the way the
@@ -466,9 +482,21 @@
     if (message.field) {
       var field = findById(message.field);
       if (field) {
+        // The message goes on the line above the row of small print - the
+        // way the browser puts it, and where there is room for it.
+        var content = field.closest ? field.closest(".signin-content") : null;
+        var footer = content ? content.querySelector(".signin-content__footer") : null;
+        if (content && footer && footer.parentNode === content) {
+          return { parent: content, next: footer };
+        }
+
         var wrapper = field.closest ? field.closest(".form-cell-wrapper") : null;
-        var parent = wrapper || field.parentNode;
-        if (parent) return { parent: parent, next: null };
+        if (wrapper && wrapper.parentNode) {
+          return { parent: wrapper.parentNode, next: wrapper.nextSibling };
+        }
+        if (field.parentNode) {
+          return { parent: field.parentNode, next: field.nextSibling };
+        }
       }
     }
 
