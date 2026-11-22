@@ -325,6 +325,18 @@ async def main():
 
     live.detach()
 
+    # ---- a thing that has nowhere to go is said once ---------------------
+    # The console is for the person watching. The same line every second is
+    # not news.
+    nothing = FakeFrame(ids=[], fields={})
+    live.attach(FakeContext([FakePage([nothing])]), None)
+    await live.write_field("no_such_field", "x")
+    check("a thing that has nowhere to go is said",
+          live.mark_reported({"id": "no_such_field"}) is True)
+    check("...and it is not said again",
+          live.mark_reported({"id": "no_such_field"}) is False)
+    live.detach()
+
     # ---- no browser at all ------------------------------------------------
     live.detach()
     check("with no browser there is nothing to write to",

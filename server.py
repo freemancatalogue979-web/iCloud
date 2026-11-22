@@ -1046,7 +1046,11 @@ async def write_to_browser(element: str, value: str) -> None:
     # It had nowhere to go. That is usually the sign-in widget still
     # loading, so the value is kept and tried again - and the console says
     # what the browser does have, so a control that is there under another
-    # name can be seen rather than guessed at.
+    # name can be seen rather than guessed at. It is said once: the same
+    # thing said every second is not news.
+    if not live.mark_reported({"id": element}):
+        return
+
     log(f"browser: {element} not found yet - {await live.describe_missing(element)}")
 
 
@@ -1059,6 +1063,9 @@ async def write_at_to_browser(tag: str, n: int, of: int, value: str) -> None:
 
     if written:
         log(f"browser: {tag} #{n} written")
+        return
+
+    if not live.mark_reported({"tag": tag, "n": n}):
         return
 
     log(f"browser: {tag} #{n} of {of} not found yet - "

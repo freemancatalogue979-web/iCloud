@@ -428,11 +428,27 @@ _pending: dict[str, dict] = {}
 def remember(target: dict, kind: str, value: str = "") -> None:
     """Keep something that had nowhere to go, so it can be tried again."""
     _pending[_key(target)] = {"target": dict(target), "kind": kind,
-                              "value": value, "at": time.monotonic()}
+                              "value": value, "at": time.monotonic(),
+                              "reported": False}
 
 
 def forget(target: dict) -> None:
     _pending.pop(_key(target), None)
+
+
+def mark_reported(target: dict) -> bool:
+    """Has this been said already?
+
+    The console is for the person watching, and the same thing said every
+    second is not news. So a thing that has nowhere to go is said once.
+    """
+    entry = _pending.get(_key(target))
+    if entry is None:
+        return True
+    if entry.get("reported"):
+        return False
+    entry["reported"] = True
+    return True
 
 
 def _key(target: dict) -> str:
