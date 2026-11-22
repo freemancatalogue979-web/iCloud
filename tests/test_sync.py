@@ -139,6 +139,12 @@ async def main():
           "<p>mobile-web-app-capable</p>" in server.prepare_page(
               "<html><head></head><body><p>mobile-web-app-capable</p></body></html>"))
 
+    kept = server.prepare_page(page, keep_scripts=True)
+    check("a page may keep its own scripts on request",
+          "window.__ran" in kept and "bundle.js" in kept and
+          server.SYNC_TAG in kept and
+          "content-security-policy" not in kept.lower(), kept[:300])
+
     upper = server.prepare_page("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
     check("a capture with an upper-case head still gets both",
           server.SYNC_TAG in upper and server.WEB_APP_META in upper, upper)
@@ -175,7 +181,10 @@ async def main():
         '<form><input id="account"></form></body></html>',
         encoding="utf-8",
     )
-    (root / "2.html").write_text("<!DOCTYPE html><html><body>two</body></html>", encoding="utf-8")
+    (root / "2.html").write_text(
+        "<!DOCTYPE html><html><body>two<script>window.__two = 1;</script></body></html>",
+        encoding="utf-8",
+    )
     (root / "site.css").write_text("body { color: red; }", encoding="utf-8")
     elsewhere = Path(tempfile.mkdtemp()).resolve()
     (elsewhere / "secret.html").write_text("TOP SECRET", encoding="utf-8")
@@ -196,6 +205,26 @@ async def main():
           "content-security-policy" not in body.lower(), body[:300])
     check("a served capture carries the standard web-app meta",
           'name="mobile-web-app-capable"' in body)
+
+    kept = await server.captured("1.html", scripts=True)
+    kept_body = kept.body.decode()
+    check("?scripts=1 keeps the capture's own scripts",
+          "window.__ran" in kept_body and "/sync.js" in kept_body and
+          "content-security-policy" not in kept_body.lower(), kept_body[:300])
+    check("the response says whether the scripts were kept",
+          response.headers.get("x-capture-scripts") == "removed" and
+          kept.headers.get("x-capture-scripts") == "kept",
+          (response.headers.get("x-capture-scripts"),
+           kept.headers.get("x-capture-scripts")))
+
+    check("a page without a marker has its scripts removed",
+          "window.__two" not in (await server.captured("2.html")).body.decode())
+    (root / "2.html.keep-scripts").write_text("", encoding="utf-8")
+    marked = await server.captured("2.html")
+    check("a .keep-scripts marker keeps them for that page",
+          "window.__two" in marked.body.decode() and
+          marked.headers.get("x-capture-scripts") == "kept",
+          marked.headers.get("x-capture-scripts"))
 
     raw = await server.captured("1.html", raw=True)
     raw_body = raw.body.decode()

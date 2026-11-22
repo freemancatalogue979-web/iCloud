@@ -74,8 +74,21 @@ page = None
 
 # What a captured page gets on the way out. None of it is written into the
 # file on disk: the file stays exactly what was captured, and these are put in
-# as it is served.
+# as it is served. There is no write path for src/ at all.
 SYNC_TAG = '<script src="/sync.js"></script>'
+
+# A capture's own scripts are removed by default (see prepare_page). A page
+# that needs them back can ask for them in three ways:
+#
+#   touch src/1.html.keep-scripts     this page only
+#   ICLOUD_KEEP_SCRIPTS=1             every page
+#   /src/1.html?scripts=1             one request, for trying it out
+#
+# Keeping them is a trade: the site's JavaScript was written against the live
+# site, so on a copy it can blank the captured markup, navigate away or open a
+# dialog - but a page whose styling or content was built by script may need it.
+KEEP_SCRIPTS = os.environ.get("ICLOUD_KEEP_SCRIPTS") == "1"
+SCRIPTS_MARKER = ".keep-scripts"
 
 # Apple's standalone meta predates the standard one. Chrome warns about a page
 # that has only the apple-prefixed name, so both are served.
@@ -348,12 +361,18 @@ def _insert_once(page_html: str, tag: str, present: re.Pattern, after_head: bool
     return tag + page_html
 
 
-def prepare_page(page_html: str) -> str:
+def keep_scripts_for(target: Path) -> bool:
+    """Whether this page's own scripts are served (marker file wins)."""
+    return KEEP_SCRIPTS or target.with_name(target.name + SCRIPTS_MARKER).exists()
+
+
+def prepare_page(page_html: str, keep_scripts: bool = False) -> str:
     """A captured page, made fit to serve.
 
     Idempotent, so a file that was prepared once is not prepared again.
     """
-    page_html = _SCRIPT.sub(_keep_sync, page_html)
+    if not keep_scripts:
+        page_html = _SCRIPT.sub(_keep_sync, page_html)
     page_html = _META_TAG.sub(_drop_csp_meta, page_html)
     page_html = _insert_once(page_html, WEB_APP_META, _WEB_APP_PRESENT, after_head=True)
     page_html = _insert_once(page_html, SYNC_TAG, _SYNC_PRESENT)
@@ -439,12 +458,13 @@ def missing_page(path: str, folder: Path) -> str:
 
 @app.get("/src")
 @app.get("/src/{path:path}")
-async def captured(path: str = "", raw: bool = False):
+async def captured(path: str = "", raw: bool = False, scripts: bool | None = None):
     """Serve a captured page (with the sync engine) or one of its assets.
 
     ``?raw=1`` serves the file untouched - no engine, scripts and CSP
     included - which is the thing to open when a served page does not look
-    like the file it came from.
+    like the file it came from. ``?scripts=1`` keeps the capture's own
+    scripts for one request.
     """
     folder = SRC
     path = path.lstrip("/")
@@ -469,7 +489,14 @@ async def captured(path: str = "", raw: bool = False):
 
     if target.suffix.lower() in _HTML_SUFFIXES:
         source = target.read_text(encoding="utf-8", errors="replace")
-        return HTMLResponse(source if raw else prepare_page(source), headers=NO_STORE)
+        if raw:
+            return HTMLResponse(source, headers=NO_STORE)
+
+        keep = keep_scripts_for(target) if scripts is None else scripts
+        return HTMLResponse(
+            prepare_page(source, keep_scripts=keep),
+            headers={**NO_STORE, "X-Capture-Scripts": "kept" if keep else "removed"},
+        )
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(

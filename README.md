@@ -171,6 +171,20 @@ written back into `src/` — those files are the captures.
   open dialogs. Nothing it does can work here anyway, because there is no
   backend behind the copy. The tags are dropped; the markup is not touched.
   The only script left is `/sync.js`.
+
+  A page that needs them back can say so, three ways:
+
+  | | |
+  |---|---|
+  | `touch src/1.html.keep-scripts` | that page only, permanent (marker file) |
+  | `ICLOUD_KEEP_SCRIPTS=1 python server.py` | every page |
+  | `/src/1.html?scripts=1` | one request, for trying it out |
+
+  Keeping them is a trade, not a fix: the site's JS runs against a copy and
+  may blank the captured markup again. The CSP is still removed either way
+  (the scripts are useless if it is not), and the engine is still added. The
+  `X-Capture-Scripts` response header says `kept` or `removed` for the page
+  being looked at.
 - **The capture's Content-Security-Policy is removed.** A policy captured from
   the site was written for the site's origin. Served from here it blocks
   `/sync.js` (leaving a dead file), the socket, and Chrome's own request to
@@ -183,7 +197,8 @@ written back into `src/` — those files are the captures.
   about.
 - **`?raw=1` serves the file untouched** — no engine, scripts and CSP
   included. It is the thing to open when a served page does not look like the
-  file it came from.
+  file it came from. `?scripts=1` and the `.keep-scripts` marker are the
+  switch for the scripts alone.
 
 The removals happen in that order — scripts first — because a capture can
 contain `</head>` or a `<meta>` inside a script string, and an edit made
@@ -195,12 +210,19 @@ on reload.
 
 ### If a capture does not look like the page
 
-Open it with `?raw=1`. If that looks right and the prepared page does not, the
-difference is one of the transformations above. If both look wrong, the
-capture itself is missing something — usually the site's CSS: a page that
-points at stylesheets which were never saved renders as bare markup, and a
-page whose layout came from a script that is now (correctly) not running
-renders as whatever the capture saw at the moment it was taken.
+There are three versions of the same file to compare, cheapest first:
+
+| URL | What it is |
+|---|---|
+| `/src/1.html?raw=1` | the file, byte for byte — nothing added, nothing removed |
+| `/src/1.html?scripts=1` | prepared, but the capture's own scripts left in |
+| `/src/1.html` | prepared, scripts removed |
+
+If raw looks right and the prepared page does not, the difference is one of
+the transformations above — and `?scripts=1` says whether the scripts were
+the one. If all three look wrong, the capture itself is missing something,
+usually the site's CSS: a page that points at stylesheets which were never
+saved renders as bare markup.
 
 The console is the other place to look. A served capture that has no scripts
 left will not log anything about the site it came from; if something is still
