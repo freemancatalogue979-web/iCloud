@@ -246,7 +246,9 @@ the captures: `src/flow.json`.
     {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html",
      "live": true},
     {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
-     "live": true, "wait": true}
+     "live": true, "wait": true,
+     "until": {"heading": "Two-Factor Authentication"},
+     "edits": {"account_name_text_field": "/src/1.html"}}
   ]
 }
 ```
@@ -256,6 +258,11 @@ control that was pressed (`"*"` for any control on that page), `go` is the
 capture the app moves to, `live` says whether the press also happens in the
 browser, and `wait` says that the app moves on when the *browser* has, not
 when the button was pressed.
+
+`until` names the page the browser has to be showing before the app moves
+on — `"heading": "Two-Factor Authentication"` — and `edits` says where a
+capture goes when a field on it is changed: editing the address on the
+password step takes the capture back to the address, the way iCloud does it.
 
 **Everyone moves, including the viewer that pressed.** A button press is not
 a link, so nothing else would take the viewer that pressed it to the next
@@ -274,9 +281,13 @@ that comes with them is:
 
 | Capture | What it is | Pressing Continue |
 |---|---|---|
-| `1.html` | the sign-in form | moves the app to `4.html` and presses Continue in the browser |
-| `4.html` | the sign-in form, with "remember me" | presses Continue in the browser, and moves the app to `2.html` **when the browser has taken the details** — if they are wrong, the app stays here and says what is wrong |
+| `1.html` | the address step | moves the app to `4.html` and presses Continue in the browser |
+| `4.html` | the password step, with "remember me" | presses Continue in the browser, and moves the app to `2.html` **when the browser has taken the details** — if they are wrong, the app stays here and says what is wrong |
 | `2.html` | the verification code step | — |
+
+Editing the address on `4.html` takes the capture back to `1.html`, and the
+password goes with it: the address is a different one, so the password that
+went with the old one is of no use. That is what iCloud does.
 
 ## What stays in sync
 
@@ -493,6 +504,29 @@ for the right password.
 
 A complaint that is *hidden* is not a complaint — the widget keeps the
 element there and hides it when there is nothing wrong.
+
+## The end of the road is iCloud
+
+The code was good: the browser is in iCloud, the sign-in form is gone, and
+there is nothing left in the captures for that person to do. So the app
+takes them to icloud.com — and the captures are closed to them: any capture
+they try to open is answered with a redirect to icloud.com instead of the
+page.
+
+The browser is told by the same reading everything else is told by: the
+sign-in form is gone and the address is icloud.com. A browser that is still
+on Apple's sign-in frame, or still showing the form, is not through.
+
+## A letter that is taken away is taken away with a key
+
+The person pressed backspace, so the letter that is gone is taken away with
+the same key, one at a time — the cursor goes where the letter was first.
+Emptying the field and typing it all again would be a different thing
+altogether as far as the widget is concerned, and the widget is what is
+being watched: it is trying to work out what the address is.
+
+So `me@mail.com` with the `m` taken away is `e@mail.com` in the browser,
+not `me@mail.com` again.
 
 ## "Keep me signed in" is always on
 

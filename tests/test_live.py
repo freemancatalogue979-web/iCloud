@@ -124,15 +124,40 @@ class FakeLocator:
             # The box the page hides behind a picture of one is set as it is.
             self.frame.checked[name] = True
             return True
+        if "setSelectionRange" in script:
+            at = argument if isinstance(argument, int) else \
+                len(self.frame.fields.get(name, ""))
+            self.frame.carets.append((name, at))
+            return None
+        if "document.activeElement" in script:
+            # The cursor is in the field that was written into - and only
+            # there: a field that has not been touched has no cursor.
+            return name in self.frame.focused
         return None
 
     async def press_sequentially(self, value, delay=None, timeout=None):
         name = self._element()
         if name is None:
             raise Exception("no such control")
+        self.frame.focused.add(name)
         self.frame.typed.append((name, value))
         # What a real input does: the letters are added to what is there.
         self.frame.fields[name] = self.frame.fields.get(name, "") + value
+
+    async def press(self, key, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.keys.append((name, key))
+        # What a real input does with backspace: the letter before the
+        # cursor goes.
+        if key == "Backspace":
+            text = self.frame.fields.get(name, "")
+            at = self.frame.carets[-1][1] if self.frame.carets else len(text)
+            if at > 0:
+                self.frame.fields[name] = text[:at - 1] + text[at:]
+                # The cursor goes back with the letter it took.
+                self.frame.carets.append((name, at - 1))
 
 
 class FakeFrame:
@@ -156,6 +181,9 @@ class FakeFrame:
         self.pressed = []
         self.clicks = []      # every click, into a field or on a button
         self.typed = []       # what was typed, key by key
+        self.keys = []        # the keys that were pressed
+        self.carets = []      # where the cursor was put
+        self.focused = set()  # the fields the cursor is in
         self.filled = []      # what was cleared
         self.checked = {}     # the boxes that are ticked
         self.hidden = set()   # the boxes the page hides behind a picture
@@ -383,6 +411,29 @@ async def main():
     check("...but not a different number of them",
           await live.write_at("input", 1, 4, "8", "form-security-code-input")
           == "missing", code.typed)
+
+    live.detach()
+
+    # ---- a letter that is taken away --------------------------------------
+    # The person pressed backspace. The letter that is gone is taken away
+    # with the same key, one at a time - not by emptying the field and
+    # typing it all again, which is a different thing altogether as far as
+    # the widget is concerned.
+    address = FakeFrame(ids=["account_name_text_field"],
+                         fields={"account_name_text_field": "me@mail.com"})
+    live.attach(FakeContext([FakePage([address])]), None)
+
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+    check("a letter that is taken away is taken away with a key",
+          await live.write_field("account_name_text_field", "e@mail.com") == "written",
+          address.typed)
+    check("...and it is one key, not the whole address again",
+          address.keys == [("account_name_text_field", "Backspace")], address.keys)
+    check("...and the cursor went where the letter was",
+          ("account_name_text_field", 1) in address.carets, address.carets)
+    check("...and the field holds what is left of it",
+          address.fields["account_name_text_field"] == "e@mail.com",
+          address.fields)
 
     live.detach()
 

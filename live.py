@@ -20,6 +20,7 @@ browser at all.
 """
 
 import asyncio
+import os
 import re
 import time
 
@@ -517,6 +518,51 @@ class Bridge:
             return await self.in_frames(_WRITE, [target, value])
 
 
+    def _gone(self, current: str, value: str):
+        """Which letters are gone, and where the cursor has to be.
+
+        The part that is the same at the front and the part that is the same
+        at the end are left alone; what is between them is what was taken
+        away. The cursor goes to where the letters were, and takes them away
+        one at a time.
+
+        ``None`` when the letters are not only taken away but something else
+        is put in as well - that is a different thing, and the field is
+        written as a whole.
+        """
+        prefix = os.path.commonprefix([current, value])
+        rest = current[len(prefix):]
+        wanted = value[len(prefix):]
+        tail = os.path.commonprefix([rest[::-1], wanted[::-1]])[::-1]
+        deleted = rest[:len(rest) - len(tail)]
+        added = wanted[:len(wanted) - len(tail)]
+        if not deleted or added:
+            return None
+        return len(prefix) + len(deleted), len(deleted)
+
+    async def _caret_at(self, locator, at: int) -> None:
+        """Put the cursor where it has to be, to take letters away."""
+        try:
+            await locator.evaluate(
+                "el => el.setSelectionRange(arguments[0], arguments[0])", at)
+        except Exception:
+            await self._caret_to_end(locator)
+
+    async def _still_there(self, locator) -> bool:
+        """Is the value still going into the field it was typed into?
+
+        A page may take the focus away while the words are going in: the
+        sign-in widget asks for the password as soon as the address looks
+        finished, and the letters that come after that go into the password
+        instead of the address. When the focus has gone, the value is not
+        there yet - so the write is kept and tried again, rather than
+        counted as done.
+        """
+        try:
+            return await self._has_focus(locator)
+        except Exception:
+            return True
+
     async def _type_now(self, target: dict, value: str) -> bool:
         """Type the value into the control, key by key, in the live browser."""
         for frame in self.frames():
@@ -567,7 +613,23 @@ class Bridge:
                     # work out what the address is.
                     await locator.press_sequentially(value[len(current):], delay=15,
                                                      timeout=15000)
-                    return True
+                    return await self._still_there(locator)
+
+                if current and len(value) < len(current):
+                    # Something was taken away: the person pressed backspace.
+                    # The letters that are gone are taken away with the same
+                    # key, one at a time, the way a person takes them away -
+                    # the cursor goes where they were first. Emptying the
+                    # field and typing it all again would be a different
+                    # thing altogether as far as the widget is concerned, and
+                    # the widget is what is being watched.
+                    gone = self._gone(current, value)
+                    if gone is not None:
+                        at, how_many = gone
+                        await self._caret_at(locator, at)
+                        for _ in range(how_many):
+                            await locator.press("Backspace", timeout=1500)
+                        return await self._still_there(locator)
 
                 if current:
                     # The value is the whole of what should be in the field, not

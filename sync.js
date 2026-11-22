@@ -348,6 +348,16 @@
     // the session stay the same thing.
     if (el.id) {
       send({ t: "field", id: el.id, value: now.value, checked: now.checked });
+      // The person has changed a field that had something in it. That is an
+      // edit, and what an edit means is the flow's business: editing the
+      // address on the password step takes the capture back to the address,
+      // the way iCloud does it. The first word typed into an empty field is
+      // not an edit - there was nothing to edit. It is sent when the word is
+      // whole, so the capture is not taken away from under somebody who is
+      // still typing.
+      if (open && open.value) {
+        send({ t: "edit", id: el.id, value: now.value, page: location.pathname });
+      }
       return;
     }
 

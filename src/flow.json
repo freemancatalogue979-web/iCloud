@@ -14,6 +14,9 @@
       "wait": true,
       "until": {
         "heading": "Two-Factor Authentication"
+      },
+      "edits": {
+        "account_name_text_field": "/src/1.html"
       }
     }
   ]

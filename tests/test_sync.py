@@ -740,7 +740,88 @@ async def main():
     check("...and it stops waiting",
           session.waiting is None, session.waiting)
 
-    # ---- "keep me signed in" ----------------------------------------------
+    # ---- editing the address ---------------------------------------------
+    # The password step: the address can be edited there, and when it is,
+    # the capture goes back to the address - the way iCloud does it. The
+    # flow says which field that is.
+    (flow_root / "flow.json").write_text(json.dumps({
+        "steps": [
+            {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+             "live": True, "wait": True,
+             "edits": {"account_name_text_field": "/src/1.html"}},
+        ]
+    }), encoding="utf-8")
+
+    check("the flow says what editing a field leads to",
+          server.edit_go("/src/4.html", "account_name_text_field") == "/src/1.html",
+          server.edit_go("/src/4.html", "account_name_text_field"))
+    check("...and says nothing about a field it does not name",
+          server.edit_go("/src/4.html", "password_text_field") == "",
+          server.edit_go("/src/4.html", "password_text_field"))
+    check("...nor about a page it does not know",
+          server.edit_go("/src/1.html", "account_name_text_field") == "",
+          server.edit_go("/src/1.html", "account_name_text_field"))
+
+    session.hub.page = "/src/4.html"
+    count = len(alice.sent)
+    bob.feed({"t": "edit", "id": "account_name_text_field",
+              "value": "e@mail.com", "page": "/src/4.html"})
+    await settle()
+    check("editing the address takes the capture back to the address",
+          session.hub.page == "/src/1.html", session.hub.page)
+    check("...and the other viewer goes with it",
+          alice.sent[-1] == {"t": "nav", "page": "/src/1.html"}, alice.sent[-1:])
+
+    # A field the flow does not name changes nothing.
+    session.hub.page = "/src/4.html"
+    bob.feed({"t": "edit", "id": "password_text_field",
+              "value": "another", "page": "/src/4.html"})
+    await settle()
+    check("editing a field the flow does not name changes nothing",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # ---- the end of the road ----------------------------------------------
+    # The code was good: the browser is in iCloud and the sign-in form is
+    # gone. Then the person is sent to iCloud, and the captures are closed
+    # to them.
+    check("a browser still on the sign-in form is not signed in",
+          server.browser_is_signed_in({
+              "url": "https://idmsa.apple.com/signin",
+              "fields": {"account_name_text_field": {"value": "x"}}}) is False)
+    check("...and a browser on iCloud with the form still there is not either",
+          server.browser_is_signed_in({
+              "url": "https://www.icloud.com/",
+              "fields": {"password_text_field": {"value": "x"}}}) is False)
+    check("...but a browser in iCloud with the form gone has signed in",
+          server.browser_is_signed_in({
+              "url": "https://www.icloud.com/",
+              "fields": {"code": {"value": ""}}}) is True)
+    check("...and a browser nowhere is not signed in",
+          server.browser_is_signed_in({"url": "", "fields": {}}) is False)
+
+    session.hub.page = "/src/2.html"
+    count = len(alice.sent)
+    session.hub.go_to_icloud()
+    await settle()
+    check("a person who has finished is sent to iCloud",
+          alice.sent[-1] == {"t": "nav", "page": server.ICLOUD}, alice.sent[-1:])
+    check("...and the session knows they have finished",
+          session.hub.finished is True)
+
+    # The captures are closed to them: a capture opened now is not served,
+    # it is a way back to iCloud.
+    answer = await server.captured(make_session_request("the-tests"), "1.html")
+    check("a capture for somebody who has finished is sent to iCloud",
+          answer.status_code in (301, 302, 307, 308) and
+          answer.headers.get("location") == server.ICLOUD,
+          (answer.status_code, answer.headers.get("location")))
+
+    # ...and there is no going back to a capture.
+    session.hub.navigate("/src/1.html")
+    check("...and there is no going back to a capture",
+          session.hub.page == server.ICLOUD, session.hub.page)
+
+    # "keep me signed in" ----------------------------------------------
     # The box is ticked in the browser, every time - but a box that is
     # already ticked is not looked at again: the browser is not asked about
     # it every half second, and a click on a ticked box unticks it.

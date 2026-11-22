@@ -125,6 +125,23 @@ class FakeSocket {
   check("an unchanged field is not sent again", sock.ofType("value").length === before,
     JSON.stringify(sock.sent.slice(before)));
 
+  // A field that is changed is also reported as an edit. What that means
+  // is the flow's business: editing the address on the password step takes
+  // the capture back to the address, the way iCloud does it.
+  const editsBefore = sock.ofType("edit").length;
+  account.value = "someone@example.co";
+  account.dispatchEvent(new win.Event("input", { bubbles: true }));
+  check("an edit is not sent mid-word", sock.ofType("edit").length === editsBefore,
+    JSON.stringify(sock.ofType("edit")));
+  await sleep(120);
+  const edits = sock.ofType("edit");
+  const edit = edits[edits.length - 1] || {};
+  check("a field that is changed is reported as an edit",
+    edit.id === "account" && edit.value === "someone@example.co" &&
+    edit.page === "/src/1.html", JSON.stringify(edit));
+  check("...and one change is one edit", edits.length === editsBefore + 1,
+    JSON.stringify(edits));
+
   // ---- one-shot controls ------------------------------------------------
   const remember = doc.getElementById("remember");
   remember.checked = true;

