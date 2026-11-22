@@ -159,6 +159,20 @@ cleanly when none is installed:
   `ctx.request.get`, that `url()`s in a real stylesheet are rewritten (quoted
   and unquoted), that the cache serves rewritten bytes, that `<base>` does not
   leak into the mirror, and that the mirrored `url()` serves the real image.
+- `test_server_flow.py` — runs `start()` itself, the function `/` triggers.
+  Substitutes only a headless context (a visible window needs a display) and a
+  route handler answering `icloud.com` (no outbound access here);
+  `install_agent`, `on_emit`, `broadcast`, `/ws`, `/click`, `/keys` and
+  `request_resync` are the shipped code. It verifies the run reaches `done`,
+  that Sign In was clicked in the page, that the capture reaches a real browser
+  client over a real WebSocket, that a live change arrives as granular ops
+  addressed by ids from that capture, that a `resync` request yields a fresh
+  capture, that `/click` lands on the right element at the right coordinates,
+  and that `/keys` types into the focused field.
+
+What remains unverified, and why: the real `https://www.icloud.com/` load and
+the real visible window. This sandbox has no route to Apple and no display
+server, so those two are exercised only through the substitutions above.
 
 To run them, point `CHROME_PATH` at any Chromium:
 
@@ -168,10 +182,17 @@ CHROME_PATH="/path/to/chrome" npm test
 
 After `python -m playwright install chromium` they are found automatically.
 
-The suites are not decorative. Each was mutation-checked: removing the
-`shadowrootmode` attribute, the text-node childList guard, the CSS `url()`
-rewrite, the `<base>` filter, or the mis-indexed-`text` refusal makes the
-matching assertion fail.
+The suites are not decorative. Each was mutation-checked rather than trusted:
+removing the `shadowrootmode` attribute, the text-node childList guard, the CSS
+`url()` rewrite, the `<base>` filter, the mis-indexed-`text` refusal, the
+`broadcast` of mutation ops, or the coordinates in `/click` each makes the
+matching assertion fail. Where a mutation check did *not* fail, the test was
+wrong and was fixed. One is worth recording: editing a text node with
+`li.firstChild.nodeValue = x` emits a **characterData** record, while
+`li.textContent = x` emits a **childList** record whose added and removed nodes
+are text nodes. Those are different code paths, and only the second one was
+broken when the mirror stopped updating - so a suite that tests the first tells
+you nothing about the second. Both are now pinned separately.
 
 **A correction worth recording.** `test-browser-semantics.js` was written on the
 claim that calling `requestAnimationFrame` with no receiver throws `Illegal
