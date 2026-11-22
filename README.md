@@ -218,17 +218,19 @@ the captures: `src/flow.json`.
 ```json
 {
   "steps": [
-    {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html"},
+    {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html",
+     "live": true},
     {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
-     "live": true}
+     "live": true, "wait": true}
   ]
 }
 ```
 
 `page` is the capture the press happened on, `press` is the id of the
 control that was pressed (`"*"` for any control on that page), `go` is the
-capture the app moves to, and `live` says whether the press also happens in
-the browser.
+capture the app moves to, `live` says whether the press also happens in the
+browser, and `wait` says that the app moves on when the *browser* has, not
+when the button was pressed.
 
 **Everyone moves, including the viewer that pressed.** A button press is not
 a link, so nothing else would take the viewer that pressed it to the next
@@ -247,8 +249,8 @@ that comes with them is:
 
 | Capture | What it is | Pressing Continue |
 |---|---|---|
-| `1.html` | the sign-in form | moves the app to `4.html`; the browser is left alone |
-| `4.html` | the sign-in form, with "remember me" | moves the app to `2.html` and presses Continue in the browser |
+| `1.html` | the sign-in form | moves the app to `4.html` and presses Continue in the browser |
+| `4.html` | the sign-in form, with "remember me" | presses Continue in the browser, and moves the app to `2.html` **when the browser has taken the details** — if they are wrong, the app stays here and says what is wrong |
 | `2.html` | the verification code step | — |
 
 ## What stays in sync
@@ -380,6 +382,34 @@ of a captured file have the same shape, which is all the name has to survive.
 
 A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 `hello` again when it does.
+
+## Who the browser belongs to
+
+Every visitor gets their own browser, their own profile and their own
+capture. Two people using the app at the same time do not share a session,
+do not share a page, and never see each other's typing.
+
+The visitor is named by a cookie — a name, not a secret — and the name is
+also the name of their profile: `profiles/<name>/` is that browser's
+memory. It is what makes the session a session: the cookies, the "trust
+this device" answer, the half-typed address are all still there when they
+come back, because it is the same browser with the same profile.
+
+The browser is opened when the visitor asks for it (`/start`), and shut
+down a quarter of an hour after they have gone away. The profile is kept
+either way — that is the session.
+
+## The app does not move on until the browser has
+
+A step in the flow can say `"wait": true`, and then the capture does not
+move to the next one because a button was pressed — it moves when the
+browser has taken the details and gone on to the next step. Until then the
+capture stays where it is, and what the browser says about the details —
+*"Check the account information you entered and try again."* — is shown on
+it.
+
+A person who has typed the wrong password should not be carried off to the
+next page as if they had not.
 
 ## Console output
 

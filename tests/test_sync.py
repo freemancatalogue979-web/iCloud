@@ -47,11 +47,14 @@ async def settle():
 
 
 class FakeWebSocket:
-    def __init__(self, host="127.0.0.1:8000"):
+    def __init__(self, host="127.0.0.1:8000", session="the-tests"):
         self.incoming: asyncio.Queue = asyncio.Queue()
         self.sent: list[dict] = []
         self.accepted = False
         self.headers = {"host": host}
+        # The visitor this socket belongs to: the cookie says whose
+        # browser this is.
+        self.cookies = {server.SESSION_COOKIE: session}
 
     async def accept(self):
         self.accepted = True
@@ -79,6 +82,13 @@ async def open_viewer():
     return websocket, task
 
 
+def make_session_request(session="the-tests"):
+    """A request that belongs to a visitor."""
+    return Request({"type": "http", "method": "GET", "path": "/",
+                    "headers": [(b"cookie", f"{server.SESSION_COOKIE}={session}".encode())]},
+                   None)
+
+
 def make_request(payload):
     body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
     done = False
@@ -90,7 +100,9 @@ def make_request(payload):
         done = True
         return {"type": "http.request", "body": body, "more_body": False}
 
-    return Request({"type": "http", "method": "POST", "path": "/nav", "headers": []}, receive)
+    return Request({"type": "http", "method": "POST", "path": "/nav",
+                    "headers": [(b"cookie", f"{server.SESSION_COOKIE}=the-tests".encode())]},
+                   receive)
 
 
 async def main():
@@ -282,7 +294,7 @@ async def main():
 
     server.SRC = root
 
-    response = await server.captured("1.html")
+    response = await server.captured(make_session_request(), "1.html")
     body = response.body.decode()
     check("a captured page is served as HTML", response.status_code == 200 and
           response.media_type.startswith("text/html"), response.status_code)
@@ -302,47 +314,66 @@ async def main():
           "default-src 'none'" in body and
           'name="mobile-web-app-capable"' not in body, body[:300])
 
-    asset = await server.captured("site.css")
+    asset = await server.captured(make_session_request(), "site.css")
     check("an asset is served with its type",
           asset.status_code == 200 and asset.media_type == "text/css" and
           asset.body == b"body { color: red; }", asset.media_type)
 
-    listing = await server.captured("")
+    listing = await server.captured(make_session_request(), "")
     check("the folder lists the captures",
           listing.status_code == 200 and "1.html" in listing.body.decode() and
           "2.html" in listing.body.decode())
 
-    missing = await server.captured("nope.html")
+    missing = await server.captured(make_session_request(), "nope.html")
     check("a missing capture says where to put it",
           missing.status_code == 404 and "src/nope.html" in missing.body.decode() and
           "/sync.js" not in missing.body.decode(), missing.status_code)
 
-    traversal = await server.captured("../" + elsewhere.name + "/secret.html")
+    traversal = await server.captured(make_session_request(), "../" + elsewhere.name + "/secret.html")
     leaked = traversal.body.decode()
     check("nothing outside src/ can be read",
           traversal.status_code == 404 and "TOP SECRET" not in leaked, traversal.status_code)
 
-    client = await server.index()
+    request = make_session_request()
+    client = await server.index(request)
     check("/ serves the launcher while the browser is idle",
           str(client.path).endswith("client.html"), client.path)
 
-    live = await server.status()
+    session = server.session_for(request.cookies.get(server.SESSION_COOKIE))
+    live = await server.status(request)
     check("status names the page the app should open",
-          live.get("page") == server.hub.page, live)
+          live.get("page") == session.hub.page, live)
 
-    server.state["status"] = "done"
-    redirect = await server.index()
+    session.state["status"] = "done"
+    redirect = await server.index(request)
     check("/ becomes the capture once Sign In has been clicked",
           redirect.status_code == 307 and
-          redirect.headers.get("location") == server.hub.page,
+          redirect.headers.get("location") == session.hub.page,
           (redirect.status_code, redirect.headers.get("location")))
-    server.state["status"] = "idle"
+    session.state["status"] = "idle"
+
+    # ---- every visitor gets their own browser ---------------------------
+    one = server.session_for("visitor-one")
+    two = server.session_for("visitor-two")
+    check("two visitors have two sessions",
+          one is not two and one.id != two.id)
+    check("two visitors have two browsers",
+          one.bridge is not two.bridge and one.hub is not two.hub)
+    check("two visitors do not share a page",
+          one.hub is not two.hub)
+    one.hub.navigate("/src/4.html", everyone=True)
+    check("...and one cannot move the other",
+          two.hub.page != "/src/4.html", two.hub.page)
+    check("a visitor's browser keeps its own profile",
+          one.profile() != two.profile() and
+          one.profile().name == one.id, one.profile())
 
     engine = await server.sync_js()
     check("/sync.js serves the engine", str(engine.path).endswith("sync.js"), engine.path)
 
     # ---- the hub is the shared state -------------------------------------
-    server.hub = server.Hub()
+    session = server.session_for('the-tests')
+    session.hub = server.Hub()
     alice, alice_task = await open_viewer()
     check("a new viewer is told what to show",
           alice.sent and alice.sent[0] == {"t": "state", "page": "/src/1.html", "values": {}},
@@ -359,8 +390,8 @@ async def main():
     check("the viewer that typed it is not echoed",
           all(m.get("t") != "value" for m in bob.sent), bob.sent)
     check("the server keeps the value",
-          server.hub.values.get("#account") ==
-          {"value": "someone@example.com", "checked": False}, server.hub.values)
+          session.hub.values.get("#account") ==
+          {"value": "someone@example.com", "checked": False}, session.hub.values)
 
     carol, carol_task = await open_viewer()
     joined = carol.sent[0] if carol.sent else {}
@@ -372,8 +403,8 @@ async def main():
     bob.feed({"t": "value", "key": "#remember", "value": "on", "checked": True})
     await settle()
     check("a checkbox state is kept",
-          server.hub.values.get("#remember") == {"value": "on", "checked": True},
-          server.hub.values.get("#remember"))
+          session.hub.values.get("#remember") == {"value": "on", "checked": True},
+          session.hub.values.get("#remember"))
 
     # ---- clicks are relayed, not replayed --------------------------------
     count = len(alice.sent)
@@ -394,24 +425,24 @@ async def main():
     await settle()
     check("a page change reaches the other viewers",
           alice.sent[count:] == [{"t": "nav", "page": "/src/2.html"}], alice.sent[count:])
-    check("the server follows the page", server.hub.page == "/src/2.html", server.hub.page)
+    check("the server follows the page", session.hub.page == "/src/2.html", session.hub.page)
     check("form state belongs to the page it was typed on",
-          server.hub.values == {}, server.hub.values)
+          session.hub.values == {}, session.hub.values)
 
     count = len(alice.sent)
     bob.feed({"t": "nav", "page": "https://example.com/"})
     bob.feed({"t": "nav", "page": "/src/../server.py"})
     await settle()
     check("an off-site or unsafe page is not followed",
-          server.hub.page == "/src/2.html" and len(alice.sent) == count,
-          (server.hub.page, alice.sent[count:]))
+          session.hub.page == "/src/2.html" and len(alice.sent) == count,
+          (session.hub.page, alice.sent[count:]))
 
     # ---- the sendBeacon path --------------------------------------------
     response = await server.nav(make_request({"page": "/src/1.html"}))
     await settle()
     check("a beacon drives the same navigation",
-          response.status_code == 204 and server.hub.page == "/src/1.html",
-          (response.status_code, server.hub.page))
+          response.status_code == 204 and session.hub.page == "/src/1.html",
+          (response.status_code, session.hub.page))
 
     bad = await server.nav(make_request(b"not json"))
     check("a malformed beacon is refused", bad.status_code == 400, bad.status_code)
@@ -422,7 +453,7 @@ async def main():
               "from": "http://localhost:9002/src/1.html"})
     await settle()
     check("a hello after following a link moves the hub",
-          server.hub.page == "/src/3.html", server.hub.page)
+          session.hub.page == "/src/3.html", session.hub.page)
     check("...and the other viewers follow",
           alice.sent[count:] == [{"t": "nav", "page": "/src/3.html"}], alice.sent[count:])
     check("the viewer that arrived is told where it is",
@@ -432,8 +463,8 @@ async def main():
     bob.drop()
     await settle()
     check("a viewer that leaves is forgotten",
-          bob not in server.hub.viewers and len(server.hub.viewers) == 2,
-          len(server.hub.viewers))
+          bob not in session.hub.viewers and len(session.hub.viewers) == 2,
+          len(session.hub.viewers))
     check("the socket loop finishes when the viewer goes",
           bob_task.done(), bob_task.done())
 
@@ -469,8 +500,9 @@ async def main():
     check("a step is not found for another capture",
           server.flow_step("/src/3.html", "sign-in") is None)
 
-    server.hub = server.Hub()
-    server.hub.page = "/src/1.html"
+    session = server.session_for('the-tests')
+    session.hub = server.Hub()
+    session.hub.page = "/src/1.html"
     alice, alice_task = await open_viewer()
     bob, bob_task = await open_viewer()
 
@@ -478,7 +510,7 @@ async def main():
     bob.feed({"t": "press", "id": "sign-in", "page": "/src/1.html"})
     await settle()
     check("a press the flow mentions moves the app to the next capture",
-          server.hub.page == "/src/4.html", server.hub.page)
+          session.hub.page == "/src/4.html", session.hub.page)
     check("...and the viewer that pressed it moves too",
           alice.sent[count:] == [{"t": "nav", "page": "/src/4.html"}],
           alice.sent[count:])
@@ -490,8 +522,65 @@ async def main():
     bob.feed({"t": "press", "id": "create-link", "page": "/src/4.html"})
     await settle()
     check("a press the flow does not mention does not move the app",
-          server.hub.page == "/src/4.html" and len(alice.sent) == count,
-          (server.hub.page, alice.sent[count:]))
+          session.hub.page == "/src/4.html" and len(alice.sent) == count,
+          (session.hub.page, alice.sent[count:]))
+
+    # ---- a step that waits for the browser ------------------------------
+    # The app does not move on because a button was pressed: it moves when
+    # the browser has taken the details and gone on to the next step. Until
+    # then the capture stays where it is, and what the browser says about
+    # the details is shown on it.
+    (flow_root / "flow.json").write_text(json.dumps({
+        "steps": [
+            {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+             "live": True, "wait": True},
+        ]
+    }), encoding="utf-8")
+
+    session.hub.page = "/src/4.html"
+    session.hub.browser = {"url": "https://idmsa.apple.com/signin",
+                           "title": "Sign in to your Apple Account",
+                           "fields": {"account_name_text_field": {"value": "x"},
+                                      "password_text_field": {"value": "x"}}}
+    count = len(alice.sent)
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/4.html"})
+    await settle()
+    check("a step that waits does not move the app on the press alone",
+          session.hub.page == "/src/4.html", session.hub.page)
+    check("...and the app is waiting for the browser",
+          bool(session.waiting), session.waiting)
+
+    # The browser says no: the form is still there, and the field that was
+    # pressed is still there.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/signin",
+        "fields": {"account_name_text_field": {"value": "x"},
+                   "password_text_field": {"value": "x"}},
+    })
+    check("...and it stays where it is while the browser has not moved on",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # The browser has moved on: the form is gone.
+    await server.check_waiting(session, {"url": "https://idmsa.apple.com/verify",
+                                         "fields": {}})
+    check("...and it moves on when the browser has moved on",
+          session.hub.page == "/src/2.html", session.hub.page)
+    check("...and it stops waiting",
+          session.waiting is None, session.waiting)
+
+    # ---- every visitor gets their own browser ---------------------------
+    one = server.session_for("visitor-one")
+    two = server.session_for("visitor-two")
+    check("two visitors have two browsers",
+          one.bridge is not two.bridge and one.hub is not two.hub)
+    check("two visitors do not share a page",
+          one.hub.page != two.hub.page or one.hub is not two.hub)
+    one.hub.navigate("/src/4.html", everyone=True)
+    check("...and one cannot move the other",
+          two.hub.page != "/src/4.html", two.hub.page)
+    check("a visitor's browser keeps its own profile",
+          one.profile() != two.profile() and one.profile().name == one.id,
+          one.profile())
 
     # No flow file, no flow.
     (flow_root / "flow.json").unlink()

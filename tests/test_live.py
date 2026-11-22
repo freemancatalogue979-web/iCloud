@@ -486,16 +486,20 @@ async def main():
     # of reaching the browser, and that is the flow's business (and
     # test_sync.py's).
     server.SRC = Path(tempfile.mkdtemp()).resolve()
-    server.hub = server.Hub()
+    session = server.session_for('the-tests')
+    session.hub = server.Hub()
     form = FakeFrame(
         ids=["account_name_text_field", "sign-in"],
         fields={"account_name_text_field": ""},
         url="https://idmsa.apple.com/signin",
     )
-    live.attach(FakeContext([FakePage([form])]), None)
+    # The bridge the capture talks to is the one belonging to the visitor
+    # whose capture this is.
+    session.bridge.attach(FakeContext([FakePage([form])]), None)
 
     class FakeWebSocket:
         def __init__(self):
+            self.cookies = {server.SESSION_COOKIE: "the-tests"}
             self.incoming = asyncio.Queue()
             self.sent = []
             self.accepted = False
@@ -546,7 +550,7 @@ async def main():
           (form.typed, form.clicks))
 
     # ---- the browser state reaches the viewers ----------------------------
-    server.hub.browser = {"url": "https://idmsa.apple.com/signin",
+    session.hub.browser = {"url": "https://idmsa.apple.com/signin",
                           "title": "Sign in to your Apple Account",
                           "fields": {"account_name_text_field": {"value": "someone@example.com",
                                                                  "checked": False}}}

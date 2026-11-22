@@ -111,7 +111,9 @@ the cursor at the end of what is already there.
 And what the browser says, the capture says: when the details are wrong,
 the complaint — *"Check the account information you entered and try
 again."* — shows in the capture too, in the browser's own words, with the
-browser's own link and colours.
+browser's own link and colours. And the capture does not move on to the
+next step until the browser has taken the details: a wrong password leaves
+you where you are, to be told what is wrong.
 
 So a capture is not a copy you work in — it is the controls for the session
 the browser holds. What it cannot do is show a page it has no capture of.

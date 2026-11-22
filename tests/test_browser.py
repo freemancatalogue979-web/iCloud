@@ -236,7 +236,10 @@ async def main():
         fields={"account_name_text_field": "", "password_text_field": ""},
         url="https://idmsa.apple.com/signin",
     )
-    live.attach(FakeContext([FakePage([frame])]), None)
+    # The bridge the capture talks to is the one belonging to the visitor
+    # whose capture this is.
+    session = server.session_for("the-browser-test")
+    session.bridge.attach(FakeContext([FakePage([frame])]), None)
 
     executable = browser_path()
     if not executable or not Path(executable).exists():
@@ -264,6 +267,14 @@ async def main():
         console = []
         page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
         page.on("pageerror", lambda e: console.append(f"pageerror: {e}"))
+
+        # The visitor this page belongs to: the cookie says whose browser
+        # this is, and the capture is that visitor's.
+        await page.context.add_cookies([{
+            "name": server.SESSION_COOKIE,
+            "value": "the-browser-test",
+            "url": f"http://127.0.0.1:{port}",
+        }])
 
         await page.goto(f"http://127.0.0.1:{port}/src/1.html", wait_until="load")
         await page.wait_for_timeout(1500)
