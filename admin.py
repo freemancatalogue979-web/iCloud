@@ -526,13 +526,12 @@ def build_router() -> APIRouter:
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
         server = _server()
-        session = server.SESSIONS.get(sid)
-        if session is None:
-            return _denied("there is no such session", status=404)
+        if not known_client(sid):
+            return _denied("there is no such client", status=404)
         if not store.export_allowed(sid) and server.visitor_of(request) != sid:
-            return _denied("this session has not been allowed to be exported")
-        cookies = await _cookies_of(session)
-        return {"session": session.id, "cookies": cookie_editor(cookies)}
+            return _denied("this client has not been allowed to be exported")
+        cookies = await cookies_of(sid)
+        return {"session": sid, "cookies": cookie_editor(cookies)}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):
@@ -540,9 +539,8 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
-        if sid not in server.SESSIONS:
-            return _denied("there is no such session", status=404)
+        if not known_client(sid):
+            return _denied("there is no such client", status=404)
         body = await _body(request)
         allowed = bool(body.get("allowed"))
         store.set_export(sid, allowed)
@@ -578,3 +576,25 @@ async def _cookies_of(session) -> list[dict]:
         return await context.cookies()
     except Exception:
         return []
+
+
+async def cookies_of(sid: str) -> list[dict]:
+    """The cookies of a client, whether they are here or not.
+
+    A client whose browser has been shut down still has cookies: they
+    were read while the browser was open, and they are kept with the
+    record of that client.
+    """
+    server = _server()
+    session = server.SESSIONS.get(sid)
+    if session is not None:
+        return await _cookies_of(session)
+    record = getattr(server, "GONE", {}).get(sid) or {}
+    cookies = record.get("cookies")
+    return cookies if isinstance(cookies, list) else []
+
+
+def known_client(sid: str) -> bool:
+    """Is this a client the server knows about, here or gone?"""
+    server = _server()
+    return sid in server.SESSIONS or sid in getattr(server, "GONE", {})

@@ -247,6 +247,38 @@ async def main():
     check("...and is marked as being from before",
           before[0]["status"] == "never", before)
 
+    # ---- the cookies of a client who has gone ----------------------------
+    # Their browser is closed, but their cookies were read while it was
+    # open - so the export still works, and still needs the permission.
+    server.GONE["the-admin-gone"]["cookies"] = [
+        {"domain": ".icloud.com", "name": "X-APPLE-WEBAUTH-TOKEN",
+         "value": '"v=2:t=Bw=="', "path": "/", "httpOnly": True,
+         "secure": True, "expires": None},
+    ]
+    answer = await endpoint("/admin/api/clients/{sid}/cookies")(
+        "the-admin-gone", make_request(cookies=admin_cookie))
+    check("a client who has gone has no cookies without the permission",
+          status_of(answer) == 403, status_of(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
+        "the-admin-gone",
+        make_request("POST", "/admin/api/clients/the-admin-gone/export",
+                     {"allowed": True}, cookies=admin_cookie))
+    check("a client who has gone can be allowed to be exported",
+          status_of(answer) == 200, as_json(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/cookies")(
+        "the-admin-gone", make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    check("...and then their cookies can be read",
+          len(data.get("cookies", [])) == 1 and
+          data["cookies"][0]["name"] == "X-APPLE-WEBAUTH-TOKEN", data)
+    check("...in the format Cookie Editor reads",
+          set(data["cookies"][0]) >= {"domain", "hostOnly", "httpOnly",
+                                      "name", "path", "sameSite", "secure",
+                                      "session", "storeId", "value"},
+          sorted(data["cookies"][0]))
+
     # ---- the secret in the file is read again ----------------------------
     # The secret may be put in the file while the server is running.
     late = admin.Store(scratch / "late.json")

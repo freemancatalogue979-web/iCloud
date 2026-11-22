@@ -87,6 +87,11 @@ exported when the session has been *allowed* to be exported, by name, in the
 panel — or when the request is that session's own visitor. Nobody else's
 cookies are handed out because somebody asked.
 
+A client whose browser has been shut down still has cookies: they are read
+while the browser is open, and kept with the record of that client. So the
+**Get** button in the Cookies tab works for a client who has gone as well as
+for one who is here, and the file it downloads is named after that client.
+
 The panel is one page (`admin.html`), served by the same server, with the
 font it uses served from the app as well: Space Grotesk, so the panel looks
 the same whether the machine has a network or not.

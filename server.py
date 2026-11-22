@@ -1410,6 +1410,15 @@ async def close_idle_sessions() -> None:
             "finished": bool(session.hub.finished),
             "seen": time.time(),
         }
+        # The cookies are read while the browser is still open: once it is
+        # shut, they are on disk in a way that cannot be read without the
+        # browser. A client who has gone still has cookies, and the panel
+        # can still show them.
+        try:
+            if session.ctx is not None:
+                GONE[sid]["cookies"] = await session.ctx.cookies()
+        except Exception:
+            pass
         await session.close()
         SESSIONS.pop(sid, None)
 
