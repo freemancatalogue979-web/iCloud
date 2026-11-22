@@ -89,7 +89,7 @@ def make_session_request(session="the-tests"):
                    None)
 
 
-def make_request(payload):
+def make_request(payload, session="the-tests"):
     body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
     done = False
 
@@ -100,8 +100,12 @@ def make_request(payload):
         done = True
         return {"type": "http.request", "body": body, "more_body": False}
 
+    headers = []
+    if session:
+        headers.append(
+            (b"cookie", f"{server.SESSION_COOKIE}={session}".encode()))
     return Request({"type": "http", "method": "POST", "path": "/nav",
-                    "headers": [(b"cookie", f"{server.SESSION_COOKIE}=the-tests".encode())]},
+                    "headers": headers},
                    receive)
 
 
@@ -595,6 +599,65 @@ async def main():
     for viewer in (alice, carol):
         viewer.drop()
     await asyncio.gather(alice_task, carol_task, bob_task, return_exceptions=True)
+
+    # ---- one person is one visitor --------------------------------------
+    # A header called `icloud_session` is not a cookie: the browser keeps no
+    # cookie, so every request looked like a new visitor - twenty sessions
+    # for one person, each with a browser and a profile of its own.
+    cookie = server.session_cookie("the-tests")
+    check("the cookie is a real Set-Cookie",
+          cookie.startswith(f"{server.SESSION_COOKIE}=the-tests;") and
+          "Path=/" in cookie and "Max-Age=" in cookie, cookie)
+    check("the cookie is a name, not a secret",
+          "HttpOnly" not in cookie and "Secure" not in cookie, cookie)
+
+    # The routes that only read must not make a visitor.
+    before = set(server.SESSIONS)
+    answer = await server.status(make_session_request("nobody-at-all"))
+    check("asking about a stranger makes no session",
+          set(server.SESSIONS) == before, set(server.SESSIONS) - before)
+    check("...and says there is nothing going on",
+          answer.get("status") == "idle" and answer.get("session") == "",
+          answer)
+
+    await server.nav(make_request({"page": "/src/4.html"}, session="nobody"))
+    check("a beacon from a stranger makes no session",
+          set(server.SESSIONS) == before, set(server.SESSIONS) - before)
+
+    # The same name always means the same visitor.
+    first = server.session_for("the-tests")
+    second = server.session_for("the-tests")
+    check("the same name is the same visitor", first is second, (first.id, second.id))
+    check("...and the same browser",
+          first.bridge is second.bridge and first.profile() == second.profile())
+
+    # The name can also come with the request, the way the page sends it:
+    # the page keeps the name in its own storage and says who it is.
+    named = Request({"type": "http", "method": "GET", "path": "/",
+                     "query_string": b"visitor=the-page-says-so",
+                     "headers": []}, None)
+    session = await server.index(named)
+    check("the page can say who the visitor is",
+          session.headers.get("set-cookie", "").startswith(
+              f"{server.SESSION_COOKIE}=the-page-says-so;"),
+          session.headers.get("set-cookie"))
+    check("...and the browser is that visitor's own",
+          server.session_for("the-page-says-so").profile().name ==
+          "the-page-says-so",
+          server.session_for("the-page-says-so").profile())
+    check("...and the profile is where the base branch keeps it",
+          server.session_for("the-page-says-so").profile().parent.name ==
+          "visitors", server.session_for("the-page-says-so").profile())
+
+    # The launcher says who the visitor is, in a cookie the browser keeps.
+    launcher = await server.index(make_session_request("the-tests"))
+    sent = launcher.headers.get("set-cookie", "")
+    check("the launcher sets the cookie",
+          sent.startswith(f"{server.SESSION_COOKIE}=the-tests;") and
+          "Path=/" in sent, sent)
+    check("the launcher does not make a new visitor for the same name",
+          launcher.headers.get("set-cookie", "") ==
+          server.session_cookie("the-tests"), sent)
 
 
 asyncio.run(main())

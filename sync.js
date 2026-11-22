@@ -35,6 +35,43 @@
 
   if (window.__icloudSync) return;
 
+  /* Who this visitor is.
+   *
+   * The cookie is the way the server hears about it, but a cookie is easy to
+   * lose, and the visitor's own storage is not: the name is kept in
+   * localStorage, so a person who comes back is recognised, and lands in the
+   * same session, with the same browser and the same profile.
+   *
+   * The cookie comes first - it is what the server last said - and the
+   * storage second. A new name is only made when there is neither.
+   */
+  function visitorId() {
+    var COOKIE = "icloud_session";
+    var KEY = "icloud-visitor";
+    var id = null;
+    var parts = (document.cookie || "").split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var bit = parts[i].replace(/^\s+|\s+$/g, "");
+      if (bit.indexOf(COOKIE + "=") === 0) {
+        id = bit.slice(COOKIE.length + 1);
+        break;
+      }
+    }
+    try {
+      if (!id) id = window.localStorage.getItem(KEY);
+    } catch (err) { /* storage refused; the cookie is enough */ }
+    if (!id) {
+      id = "v" + Math.random().toString(36).slice(2, 12) +
+          Date.now().toString(36);
+    }
+    try { window.localStorage.setItem(KEY, id); } catch (err) { /* ignore */ }
+    document.cookie = COOKIE + "=" + id + "; path=/; max-age=31536000; " +
+        "SameSite=Lax";
+    return id;
+  }
+
+  var VISITOR = visitorId();
+
   var OPEN = 1;
   var RETRY_MIN = 500;
   var RETRY_MAX = 5000;
@@ -206,6 +243,7 @@
         t: "hello",
         page: location.pathname,
         from: document.referrer,
+        session: VISITOR,
       }));
       var pending = queued;
       queued = [];

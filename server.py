@@ -24,6 +24,7 @@ living only in one browser tab.
 import asyncio
 import html as html_module
 import json
+import urllib.parse
 import logging
 import mimetypes
 import os
@@ -36,7 +37,8 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                             RedirectResponse, Response)
 
 import live
 
@@ -59,7 +61,7 @@ SIGNIN_BUTTON = "ui-button.sign-in-button"
 # memory: the cookies, the "trust this device" answer, the half-typed
 # address. Giving every visitor their own directory is what lets two people
 # use the app at the same time without signing in as each other.
-PROFILES = Path(os.environ.get("ICLOUD_PROFILES") or (HERE / "profiles")).resolve()
+PROFILES = Path(os.environ.get("ICLOUD_PROFILES") or (HERE / "visitors")).resolve()
 
 # The cookie that says which visitor this is. It is a name, not a secret:
 # it says whose browser this is, and nothing else.
@@ -68,6 +70,18 @@ SESSION_COOKIE = "icloud_session"
 # What a visitor's name may look like. It is a name the server made, so it
 # is checked before it is used as a folder name.
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def session_cookie(session_id: str) -> str:
+    """The cookie that says who this is.
+
+    It has to be a real ``Set-Cookie``: a header called ``icloud_session``
+    with a name in it is just a header, and the browser keeps no cookie, and
+    then every request looks like a new visitor - twenty sessions for one
+    person, each with a browser and a profile of its own.
+    """
+    return (f"{SESSION_COOKIE}={session_id}; Path=/; Max-Age=31536000; "
+            "SameSite=Lax")
 
 # How long a visitor's browser is kept open after they have gone away. The
 # profile is kept either way - that is the session - but the browser window
@@ -253,21 +267,32 @@ async def index(request: Request):
     level document means the capture is laid out as a page of its own,
     instead of being squeezed into a frame inside another document.
     """
-    session = session_for(request.cookies.get(SESSION_COOKIE))
-    if session.state["status"] == "done":
+    # A request that says who the visitor is belongs to that visitor's
+    # session. A request that says nothing belongs to nobody: the page has
+    # not named itself yet, and making a session here would give one person
+    # two - the one the page asks for, and the one the page's own request
+    # made on the way in.
+    session = session_for_named(request)
+    cookie = ({"Set-Cookie": session_cookie(session.id)}
+              if session is not None else {})
+    if session is not None and session.state["status"] == "done":
         return RedirectResponse(session.hub.page, status_code=307,
-                                headers={SESSION_COOKIE: session.id})
+                                headers=cookie)
     # no-store, so an edit to client.html shows up on refresh instead of
     # serving the browser's cached copy.
     return FileResponse(HERE / "client.html",
-                        headers={**NO_STORE, SESSION_COOKIE: session.id})
+                        headers={**NO_STORE, **cookie})
 
 
 @app.get("/start")
 async def start(request: Request):
     """Launch this visitor's browser and press Sign In."""
-    session = session_for(request.cookies.get(SESSION_COOKIE))
-    return await start_browser(session)
+    session = session_for(visitor_of(request))
+    state = await start_browser(session)
+    # The cookie says the same thing on every request from now on, so the
+    # page does not have to say it again.
+    return JSONResponse(state,
+                        headers={"Set-Cookie": session_cookie(session.id)})
 
 
 async def start_browser(session: "Session"):
@@ -327,7 +352,16 @@ async def start_browser(session: "Session"):
 
 @app.get("/status")
 async def status(request: Request):
-    session = session_for(request.cookies.get(SESSION_COOKIE))
+    """What this visitor's browser is doing.
+
+    This only reads, so it only *looks* the session up. A poll that made a
+    session of its own would give one person a new browser every two
+    seconds - which is what a poll does when the cookie is not sticking.
+    """
+    session = session_lookup(visitor_of(request))
+    if session is None:
+        return {"status": "idle", "browser_open": False, "error": "",
+                "page": None, "browser": None, "session": ""}
     return {**session.state, "page": session.hub.page,
             "browser": session.hub.browser, "session": session.id}
 
@@ -749,10 +783,12 @@ async def captured(request: Request, path: str = ""):
         # named on the way out, so that a capture opened directly is still
         # that visitor's capture - and still their browser. The stylesheets
         # and the scripts are not pages, and they are nobody's.
-        session = session_for(request.cookies.get(SESSION_COOKIE))
+        session = session_for_named(request)
         source = target.read_text(encoding="utf-8", errors="replace")
+        cookie = ({"Set-Cookie": session_cookie(session.id)}
+                  if session is not None else {})
         return HTMLResponse(with_engine(source),
-                            headers={**NO_STORE, SESSION_COOKIE: session.id})
+                            headers={**NO_STORE, **cookie})
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(
@@ -1150,6 +1186,49 @@ def new_session_id() -> str:
     return secrets.token_urlsafe(12)
 
 
+def visitor_of(request) -> str:
+    """The name this request says the visitor is.
+
+    The page keeps the name in its own storage and sends it with the
+    request; the cookie says the same thing afterwards, so the name can be
+    read either way. The cookie wins when both are there, because it is what
+    the server said last.
+    """
+    kept = request.cookies.get(SESSION_COOKIE, "")
+    if kept and SESSION_ID.match(kept):
+        return kept
+    query = request.scope.get("query_string", b"") or b""
+    named = urllib.parse.parse_qs(query.decode("utf-8", "replace")).get(
+        "visitor", [""])[0]
+    return named if SESSION_ID.match(named) else ""
+
+
+def session_for_named(request) -> Session | None:
+    """The session of the visitor this request names - if it names one.
+
+    A request that names a visitor gets that visitor's session, made if it
+    is not there yet. A request that names nobody gets nobody's session:
+    making one here would give one person two, the one the page asks for
+    and the one the page's own request made on the way in.
+    """
+    name = visitor_of(request)
+    return session_for(name) if name else None
+
+
+def session_lookup(sid: str | None) -> Session | None:
+    """The session this name belongs to, if there is one.
+
+    Looking up is not the same as making: a route that only reads what is
+    going on must not give a visitor a session of their own.
+    """
+    if not sid or not SESSION_ID.match(sid):
+        return None
+    session = SESSIONS.get(sid)
+    if session is not None:
+        session.touch()
+    return session
+
+
 def session_for(sid: str | None) -> Session:
     """The session this name belongs to, made new if there is none."""
     if not sid or not SESSION_ID.match(sid):
@@ -1448,8 +1527,10 @@ async def nav(request: Request):
         message = json.loads(await request.body() or b"{}")
     except json.JSONDecodeError:
         return Response(status_code=400)
-    session = session_for(request.cookies.get(SESSION_COOKIE))
-    session.hub.navigate(message.get("page") if isinstance(message, dict) else None)
+    session = session_lookup(visitor_of(request))
+    if session is not None:
+        session.hub.navigate(
+            message.get("page") if isinstance(message, dict) else None)
     return Response(status_code=204)
 
 

@@ -323,6 +323,36 @@ class FakeSocket {
   check("a reconnected viewer asks for the state again",
     again.t === "hello" && again.page === "/src/1.html", JSON.stringify(again));
 
+  // ---- who the visitor is ----------------------------------------------
+  // The cookie says who this is to the server; the visitor's own storage is
+  // what remembers them. A person who comes back is the same person, and
+  // so has the same session, the same browser and the same profile.
+  const who = sock.sent[0] || {};
+  check("the page says who the visitor is",
+    typeof who.session === "string" && who.session.length > 0,
+    JSON.stringify(who));
+
+  const kept = win.localStorage.getItem("icloud-visitor");
+  check("the name is kept in the visitor's own storage",
+    kept && kept === who.session, [kept, who.session]);
+  check("...and in a cookie the browser sends back",
+    (win.document.cookie || "").indexOf("icloud_session=" + who.session) >= 0,
+    win.document.cookie);
+
+  // A visitor who comes back, with the cookie gone but the name still
+  // kept, is the same visitor: the same name, the same session.
+  const returning = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/1.html",
+    runScripts: "outside-only",
+  });
+  returning.window.localStorage.setItem("icloud-visitor", kept);
+  returning.window.WebSocket = FakeSocket;
+  returning.window.eval(SYNC);
+  FakeSocket.last.onopen();
+  const back = FakeSocket.last.sent[0] || {};
+  check("a returning visitor is the same visitor",
+    back.session === kept, [back.session, kept]);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((err) => {

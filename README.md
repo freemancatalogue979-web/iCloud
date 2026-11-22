@@ -395,6 +395,22 @@ memory. It is what makes the session a session: the cookies, the "trust
 this device" answer, the half-typed address are all still there when they
 come back, because it is the same browser with the same profile.
 
+The name is kept in two places, because it is worth keeping. The cookie is
+how the server hears about it on every request; the visitor's own storage
+(`localStorage`) is how they are *remembered* — a person who comes back is
+recognised, even if the cookie has gone, and lands in the same session
+again.
+
+Two details matter more than they look:
+
+- The cookie has to be a real `Set-Cookie`. A header called
+  `icloud_session` with a name in it is only a header: the browser keeps no
+  cookie, every request looks like a new visitor, and one person becomes
+  twenty — twenty sessions, twenty browsers, twenty profiles.
+- A route that only *reads* must only look the session up. `/status` is
+  polled every two seconds; if a poll made a session of its own, it would
+  give the same person a new browser every two seconds.
+
 The browser is opened when the visitor asks for it (`/start`), and shut
 down a quarter of an hour after they have gone away. The profile is kept
 either way — that is the session.

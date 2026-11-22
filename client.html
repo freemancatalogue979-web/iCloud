@@ -41,6 +41,35 @@
   </div>
 
 <script>
+  // Who is visiting.
+  //
+  // The id is made here, once, and kept in this browser's localStorage. Every
+  // visit after that reads it back, so the same person is the same visitor -
+  // and the server gives that visitor their own browser profile, so the
+  // sign-in they did last time is still there when they come back.
+  const VISITOR_KEY = "icloud-visitor";
+
+  function newVisitor() {
+    if (window.crypto && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+    let id = "";
+    while (id.length < 32) id += Math.random().toString(36).slice(2);
+    return id.slice(0, 32);
+  }
+
+  function visitor() {
+    try {
+      const kept = localStorage.getItem(VISITOR_KEY);
+      if (kept && /^[A-Za-z0-9_-]{8,64}$/.test(kept)) return kept;
+      const made = newVisitor();
+      localStorage.setItem(VISITOR_KEY, made);
+      return made;
+    } catch (e) {
+      return "";      // no storage (private mode): a visitor without a memory
+    }
+  }
+
   // Where the app goes when the wait is over. The server knows which page
   // everyone is on, which is not always 1.html.
   let target = "/src/1.html";
@@ -56,8 +85,15 @@
   }
 
   // Visiting the page opens the browser and presses Sign In. This screen is
-  // only the wait for that.
-  fetch("/start").catch(() => {});
+  // only the wait for that. The id goes with it, so the browser that opens is
+  // this visitor's own.
+  const who = visitor();
+  // The cookie says the same thing to the server on every later request.
+  if (who) {
+    document.cookie = "icloud_session=" + who + "; path=/; max-age=31536000; " +
+        "SameSite=Lax";
+  }
+  fetch("/start" + (who ? "?visitor=" + encodeURIComponent(who) : "")).catch(() => {});
 
   function poll() {
     fetch("/status")
