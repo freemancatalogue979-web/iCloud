@@ -984,9 +984,14 @@
     queued = null;
     try {
       const frames = await capture();
+      /* The size the page was captured at. The mirror lays the capture out at
+       * this size and scales it to fit, so the page in the mirror is the page
+       * that was captured - not the same content squeezed into a different
+       * width, which puts every click in the wrong place. */
+      const viewport = { w: window.innerWidth, h: window.innerHeight };
       // A frame that does not know its windowId yet cannot be addressed by the
       // mirror; its parent asks it again once ids are assigned.
-      if (windowId && TOP) emit({ kind: "doc", windowId: "0", frames });
+      if (windowId && TOP) emit({ kind: "doc", windowId: "0", frames, viewport });
     } catch (e) {
       /* never break the page we are mirroring */
     }

@@ -564,11 +564,44 @@ async def shot():
     return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
+# The size of the page the mirror is a copy of. The browser window is opened
+# maximised, so it is whatever size the screen is - and the mirror has to
+# scale its clicks to that, not to a size guessed at build time.
+_viewport = {"w": 0, "h": 0}
+
+
+async def viewport_size():
+    """The real page's viewport, in CSS pixels."""
+    if page is None:
+        return 0, 0
+    now = time.monotonic()
+    if _viewport["w"] and now - _viewport.get("at", 0) < 2.0:
+        return _viewport["w"], _viewport["h"]
+    try:
+        size = await page.evaluate("() => [window.innerWidth, window.innerHeight]")
+    except Exception:
+        return _viewport["w"], _viewport["h"]
+    if size and size[0]:
+        _viewport.update(w=size[0], h=size[1], at=now)
+    return _viewport["w"], _viewport["h"]
+
+
 @app.post("/click")
 async def click(where: Click):
+    """A click on the mirror, as a fraction of the page.
+
+    The mirror sends a proportion of its own area rather than pixels, so the
+    click lands in the same place on the real page whatever size the browser
+    window is.
+    """
     if page is None:
         return {"ok": False, "error": "no browser"}
-    await page.mouse.click(where.x, where.y)
+    width, height = await viewport_size()
+    if not width or not height:
+        # No size to scale by: take the coordinates as they are.
+        await page.mouse.click(where.x, where.y)
+        return {"ok": True}
+    await page.mouse.click(where.x * width, where.y * height)
     return {"ok": True}
 
 

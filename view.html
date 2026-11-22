@@ -6,7 +6,14 @@
 <title>Remote view</title>
 <style>
   html, body { height:100%; margin:0; background:#fff; overflow:hidden; }
-  #mirror { width:100%; height:100%; border:0; display:block; }
+  /* The captured page is laid out at the size it was captured at, and scaled
+   * to fit. Sizing the frame to the window instead would reflow the page -
+   * and a page reflowed to a different width puts every click in the wrong
+   * place, and cuts off whatever does not fit. */
+  #mirror {
+    position:absolute; top:0; left:0;
+    border:0; display:block; transform-origin: 0 0;
+  }
 </style>
 </head>
 <body>
@@ -20,6 +27,37 @@
   const CANVAS_ATTR = "data-rb-canvas";
   const FALLBACK_ATTR = "data-rb-fallback";
   const SHADOW_SUFFIX = "/shadow";
+
+  /* The size the page was captured at, and how far it is scaled down to fit
+   * the window. The mirror shows the page at the size it was captured, so a
+   * click in the mirror is at the same place on the page as it is on the
+   * real thing. */
+  let captured = { w: 0, h: 0 };
+  let mirrorScale = 1;
+
+  function fitMirror(size) {
+    const w = (size && size.w) || 0;
+    const h = (size && size.h) || 0;
+    captured = { w: w, h: h };
+    if (!w || !h) {
+      mirror.style.width = "100%";
+      mirror.style.height = "100%";
+      mirror.style.transform = "";
+      mirrorScale = 1;
+      return;
+    }
+    const availW = window.innerWidth || mirror.clientWidth || w;
+    const availH = window.innerHeight || mirror.clientHeight || h;
+    const scale = Math.min(availW / w, availH / h) || 1;
+    mirrorScale = scale;
+    mirror.style.width = w + "px";
+    mirror.style.height = h + "px";
+    mirror.style.transform = "scale(" + scale + ")";
+  }
+
+  function mirrorMetrics() {
+    return { scale: mirrorScale, w: captured.w, h: captured.h };
+  }
 
   // windowId -> { doc, ids: Map<nodeId, Node> }
   const frames = new Map();
@@ -237,9 +275,10 @@
     }
   }
 
-  function seed(captured) {
+  function seed(capturedFrames, viewport) {
     frames.clear();
-    const root = captured.find((f) => f.windowId === "0") || captured[0];
+    fitMirror(viewport);
+    const root = capturedFrames.find((f) => f.windowId === "0") || capturedFrames[0];
     if (!root) return;
     mirror.onload = () => {
       const doc = mirror.contentDocument;
@@ -254,21 +293,50 @@
       drainPending();
     };
     mirror.srcdoc = root.html;
-    pendingFrames = captured.filter((f) => f !== root);
+    pendingFrames = capturedFrames.filter((f) => f !== root);
     if (!pendingTimer) pendingTimer = setTimeout(() => { pendingTimer = null; drainPending(); }, 150);
   }
 
   // -------------------------------------------------------------- input
+  /* Where the pointer was, in the mirror's own coordinates.
+   *
+   * A click inside a frame - the sign-in form is one - is reported by that
+   * frame, so its coordinates are relative to the frame, not to the mirror.
+   * Adding each frame's own offset as the frames are climbed out of gives
+   * the position in the mirror, which is the only frame the server knows
+   * about. Without it, a click in a nested frame lands somewhere else
+   * entirely. */
+  function pointInMirror(ev) {
+    let x = ev.clientX;
+    let y = ev.clientY;
+    let win = ev.target && ev.target.ownerDocument
+      ? ev.target.ownerDocument.defaultView
+      : null;
+    /* Each frame's own offset is added as the frames are climbed out of, so
+     * the point ends up in the captured page's coordinates - the only
+     * coordinates the server can use. */
+    while (win && win.frameElement && win.frameElement !== mirror) {
+      const r = win.frameElement.getBoundingClientRect();
+      x += r.left;
+      y += r.top;
+      win = win.parent;
+    }
+    return { x: x, y: y };
+  }
+
   function wireInput(doc) {
     const NAMED = new Set(["Enter","Tab","Backspace","Delete","Escape",
       "ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","PageUp","PageDown"]);
 
     doc.addEventListener("mousedown", (ev) => {
-      const rect = mirror.getBoundingClientRect();
-      post("/click", {
-        x: (ev.clientX - rect.left) * (1280 / rect.width),
-        y: (ev.clientY - rect.top) * (800 / rect.height),
-      });
+      /* The position as a fraction of the captured page, not as pixels. The
+       * server is driving a window of whatever size, so it has to be told
+       * where the point is in proportion and it scales it to the window it
+       * is actually driving. */
+      const pt = pointInMirror(ev);
+      const w = captured.w || mirror.getBoundingClientRect().width;
+      const h = captured.h || mirror.getBoundingClientRect().height;
+      post("/click", { x: pt.x / w, y: pt.y / h });
       ev.preventDefault();
     }, true);
 
@@ -296,7 +364,7 @@
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
 
       if (msg.kind === "doc") {
-        seed(msg.frames || []);
+        seed(msg.frames || [], msg.viewport);
         return;
       }
 

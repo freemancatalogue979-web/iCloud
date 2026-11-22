@@ -356,17 +356,23 @@ async def run():
                       after.count("doc") > kinds.count("doc"), str(after))
 
                 # ---------------------------------------- input forwarding
+                # The mirror sends a fraction of the page, so the click lands
+                # in the same place whatever size the browser window is.
+                size = await server.page.evaluate(
+                    "() => [window.innerWidth, window.innerHeight]")
                 pos = await fake_ctx.pages[0].evaluate(
                     """() => { const r = document.getElementById('field').getBoundingClientRect();
-                        return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) }; }"""
+                        return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }"""
                 )
+                pos = {"x": pos["x"] / size[0], "y": pos["y"] / size[1]}
                 r = await client.post(base + "/click", json=pos)
                 check("/click reports ok", r.json().get("ok") is True, r.text[:120])
                 await asyncio.sleep(0.3)
                 clicks = await fake_ctx.pages[0].evaluate("() => window.__clicks")
                 check("the click landed on the real page at those coordinates",
-                      any(c["id"] == "field" and abs(c["x"] - pos["x"]) < 4
-                          and abs(c["y"] - pos["y"]) < 4 for c in clicks),
+                      any(c["id"] == "field"
+                          and abs(c["x"] - pos["x"] * size[0]) < 4
+                          and abs(c["y"] - pos["y"] * size[1]) < 4 for c in clicks),
                       str(clicks) + " expected " + str(pos))
 
                 r = await client.post(base + "/keys", json={"text": "hello"})

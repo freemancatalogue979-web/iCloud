@@ -68,7 +68,7 @@ for (const suite of entries) {
     out = execFileSync(suite.cmd, [path.join(dir, suite.file)], {
       encoding: "utf8",
       // The browser suites launch Chromium, which is slow to start.
-      timeout: /^test_(real_browser|e2e|server_flow|fidelity)\.py$/.test(suite.file) ? 300000 : 120000,
+      timeout: /^test_(real_browser|e2e|server_flow|fidelity|cross_origin)\.py$/.test(suite.file) ? 300000 : 120000,
     });
   } catch (e) {
     code = e.status === undefined ? 1 : e.status;
