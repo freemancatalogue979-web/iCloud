@@ -1328,11 +1328,13 @@ async def write_at_to_browser(session: "Session", tag: str, n: int, of: int,
 
 async def press_in_browser(session: "Session", element: str) -> None:
     # "Keep me signed in" is on before the button goes down: the session is
-    # the whole point of the browser being here.
-    try:
-        await session.bridge.tick_remember_me()
-    except Exception:
-        pass
+    # the whole point of the browser being here. A box that is already
+    # ticked is left alone - clicking it would untick it.
+    if remember_me_is_off(session.hub.browser or {}):
+        try:
+            await session.bridge.tick_remember_me()
+        except Exception:
+            pass
 
     try:
         pressed = await session.bridge.press(element)
@@ -1394,19 +1396,27 @@ async def poll_browser(session: "Session") -> None:
     except Exception:
         pass
 
-    # "Keep me signed in" is on, always. It is the box on the password step,
-    # and the session is the whole point of the browser being here. It is
-    # turned on before the browser is read, so the capture is told that it
-    # is on - the capture shows what the browser thinks.
-    try:
-        await session.bridge.tick_remember_me()
-    except Exception:
-        pass
-
     try:
         state = await session.bridge.snapshot()
     except Exception:
         return
+
+    # "Keep me signed in" is on, always. It is the box on the password step,
+    # and the session is the whole point of the browser being here. It is
+    # turned on before the browser is read again, so the capture is told
+    # that it is on - the capture shows what the browser thinks.
+    #
+    # It is only touched when it is off: a box that is already ticked does
+    # not need the browser to be asked about it every half second.
+    if remember_me_is_off(state):
+        try:
+            await session.bridge.tick_remember_me()
+        except Exception:
+            pass
+        try:
+            state = await session.bridge.snapshot()
+        except Exception:
+            return
 
     # Has the browser accepted what was typed into the capture? It has
     # when the control that was pressed is gone, or when the browser is
@@ -1418,6 +1428,22 @@ async def poll_browser(session: "Session") -> None:
         return
     session.hub.browser = state
     session.hub.broadcast({"t": "browser", **state})
+
+
+def remember_me_is_off(state: dict) -> bool:
+    """Is the browser's "Keep me signed in" box there, and not ticked?
+
+    It is on the password step, and it has an id, so the browser's own
+    reading of the page says whether it is ticked. When it is, nothing has
+    to be done - and the browser is not asked about it again.
+    """
+    fields = state.get("fields") or {}
+    entry = fields.get("remember-me")
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") not in ("checkbox", "radio"):
+        return False
+    return not entry.get("checked")
 
 
 def watch_fields(fields: dict) -> list:

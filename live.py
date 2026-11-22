@@ -344,9 +344,12 @@ class Bridge:
 
         A box the page shows is clicked, the way a person ticks it. A box
         the page hides behind a picture of one is set as it is.
+
+        It does not take the lock: a box is not a value being typed, and the
+        lock is there so that two writes do not get into the same field at
+        once. A box that is already ticked does not need looking at twice.
         """
-        async with self._lock:
-            return await self._tick_remember_me()
+        return await self._tick_remember_me()
 
 
     async def _tick_remember_me(self) -> bool:

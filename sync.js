@@ -271,6 +271,46 @@
   // Form state
   // ------------------------------------------------------------------
 
+  // The verification code is six boxes with one digit in each. They are
+  // told apart by their class, because Apple gives them no id at all.
+  var CODE_BOX = "form-security-code-input";
+
+  function isCodeBox(el) {
+    var cls = el && el.className;
+    if (!cls || typeof cls !== "string") return false;
+    return cls.split(/\s+/).indexOf(CODE_BOX) >= 0;
+  }
+
+  function codeBoxes(doc) {
+    var out = [];
+    var all = (doc || document).getElementsByTagName("input");
+    for (var i = 0; i < all.length; i++) {
+      if (isCodeBox(all[i])) out.push(all[i]);
+    }
+    return out;
+  }
+
+  // The cursor moves on by itself, the way it does on Apple's page: its own
+  // note says "On entering verification code in the input fields, the focus
+  // will automatically move on to the next input fields". The capture is a
+  // picture of that page, so the script that does it is not there - so it is
+  // done for it here.
+  function moveOn(el) {
+    var boxes = codeBoxes(el.ownerDocument || document);
+    var at = -1;
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i] === el) { at = i; break; }
+    }
+    if (at < 0) return;
+
+    if (!el.value) {
+      // The box has been emptied: the cursor goes back with it.
+      if (at > 0) boxes[at - 1].focus();
+      return;
+    }
+    if (at < boxes.length - 1) boxes[at + 1].focus();
+  }
+
   function stateOf(el) {
     var tag = el.tagName;
     if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") return null;
@@ -279,7 +319,10 @@
       key: keyFor(el),
       value: "value" in el ? String(el.value) : "",
       checked: type === "checkbox" || type === "radio" ? !!el.checked : false,
-      immediate: type === "checkbox" || type === "radio" || tag === "SELECT",
+      // A digit in a code box is the whole of it: there is no word to wait
+      // for, and the browser wants it now.
+      immediate: type === "checkbox" || type === "radio" || tag === "SELECT" ||
+        isCodeBox(el),
       type: type,
     };
   }
@@ -354,11 +397,22 @@
     var now = stateOf(el);
     if (!now) return;
 
+    // A code box holds one digit. A second one replaces the first, the way
+    // the browser's own boxes do.
+    var code = isCodeBox(el);
+    if (code && el.value && el.value.length > 1) {
+      el.value = el.value.slice(-1);
+      now = stateOf(el);
+    }
+
     clearTimeout(timers.get(el));
 
     if (now.immediate) {
       // One event, one answer.
       emit(el);
+      // The cursor moves on when a digit goes in - and only then: a box that
+      // is merely left should not take the cursor back.
+      if (code && event.type === "input") moveOn(el);
       return;
     }
 

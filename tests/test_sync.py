@@ -676,6 +676,24 @@ async def main():
               "remember-me": {"value": "on", "checked": False,
                               "type": "checkbox"}}))
 
+    # ---- "keep me signed in" ----------------------------------------------
+    # The box is ticked in the browser, every time - but a box that is
+    # already ticked is not looked at again: the browser is not asked about
+    # it every half second, and a click on a ticked box unticks it.
+    check("a page with no box on it has nothing to tick",
+          server.remember_me_is_off({"fields": {}}) is False)
+    check("...and neither has a field that is not a box",
+          server.remember_me_is_off({"fields": {
+              "remember-me": {"value": "on", "type": "text"}}}) is False)
+    check("...but a box that is off has to be ticked",
+          server.remember_me_is_off({"fields": {
+              "remember-me": {"value": "on", "checked": False,
+                              "type": "checkbox"}}}) is True)
+    check("...and a box that is on does not",
+          server.remember_me_is_off({"fields": {
+              "remember-me": {"value": "on", "checked": True,
+                              "type": "checkbox"}}}) is False)
+
     # ---- every visitor gets their own browser ---------------------------
     one = server.session_for("visitor-one")
     two = server.session_for("visitor-two")

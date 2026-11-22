@@ -192,6 +192,15 @@ not, the right box cannot be told from the wrong one, and a code typed
 into the wrong box is worse than no code at all, so nothing is written and
 the console says so.
 
+**The code goes in one box at a time, and the cursor moves on.** The
+verification code is six boxes with a digit in each. Apple's own page says
+so — *"On entering verification code in the input fields, the focus will
+automatically move on to the next input fields"* — and the capture is a
+picture of that page, so the script that does it is not there. So the
+engine does it for it: a digit goes into the box it was typed in, the
+cursor moves to the next box, and an emptied box takes the cursor back
+with it. Each box holds one digit, and a second one replaces the first.
+
 **The capture is the copy; the browser is the session.** A capture holds
 the same ids as the page it was taken from, so a capture opened in the
 same browser as the session would be written into instead of the session

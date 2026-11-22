@@ -378,6 +378,72 @@ class FakeSocket {
     layoutDoc.querySelectorAll("[data-live-message]").length === 1,
     layoutDoc.querySelectorAll("[data-live-message]").length);
 
+  // ---- the verification code --------------------------------------------
+  // Six boxes, one digit each, and no ids at all - so they are named by
+  // their place. Apple's own page moves the cursor on when a digit goes
+  // in, and the capture is a picture of that page, so it has to do it too.
+  const codeDom = new JSDOM(
+    `<!DOCTYPE html><html><body>
+       <div class="sec-code-wrapper">
+         <input class="form-security-code-input" type="tel" value="">
+         <input class="form-security-code-input" type="tel" value="">
+         <input class="form-security-code-input" type="tel" value="">
+         <input class="form-security-code-input" type="tel" value="">
+         <input class="form-security-code-input" type="tel" value="">
+         <input class="form-security-code-input" type="tel" value="">
+         <input type="hidden" value="">
+       </div>
+     </body></html>`,
+    { url: "http://localhost:9002/src/2.html", runScripts: "outside-only" });
+  const codeWin = codeDom.window;
+  codeWin.WebSocket = FakeSocket;
+  codeWin.eval(SYNC);
+  FakeSocket.last.onopen();
+  const codeDoc = codeDom.window.document;
+  const codeBoxes = Array.from(
+    codeDoc.querySelectorAll(".form-security-code-input"));
+  const type = (box, value) => {
+    box.value = value;
+    box.dispatchEvent(new codeWin.Event("input", { bubbles: true }));
+  };
+
+  type(codeBoxes[0], "1");
+  check("a digit in a code box moves the cursor on",
+    codeDoc.activeElement === codeBoxes[1],
+    codeDoc.activeElement && codeDoc.activeElement.getAttribute("aria-label"));
+  check("...and the digit is sent at once",
+    FakeSocket.last.ofType("value").length === 1,
+    JSON.stringify(FakeSocket.last.ofType("value")));
+  const digit = FakeSocket.last.ofType("field")[0] || {};
+  check("...and it is named by its place, the boxes having no ids",
+    digit.id === "" && digit.tag === "input" && digit.n === 1 && digit.of === 7 &&
+    digit.value === "1", JSON.stringify(digit));
+
+  type(codeBoxes[1], "2");
+  check("the next digit goes to the next box",
+    codeDoc.activeElement === codeBoxes[2], codeDoc.activeElement);
+  const secondDigit = FakeSocket.last.ofType("field")[1] || {};
+  check("...and it is the second box that is named",
+    secondDigit.n === 2 && secondDigit.value === "2", JSON.stringify(secondDigit));
+
+  type(codeBoxes[2], "3");
+  check("...and the third",
+    FakeSocket.last.ofType("field")[2].n === 3 &&
+    FakeSocket.last.ofType("field")[2].value === "3",
+    JSON.stringify(FakeSocket.last.ofType("field")[2]));
+
+  type(codeBoxes[0], "9");
+  check("a box holds one digit only",
+    codeBoxes[0].value === "9", codeBoxes[0].value);
+  check("...and the cursor moves on from it again",
+    codeDoc.activeElement === codeBoxes[1], codeDoc.activeElement);
+
+  codeBoxes[2].focus();
+  codeBoxes[2].value = "";
+  codeBoxes[2].dispatchEvent(new codeWin.Event("input", { bubbles: true }));
+  check("an emptied box takes the cursor back with it",
+    codeDoc.activeElement === codeBoxes[1], codeDoc.activeElement);
+
   // ---- who the visitor is ----------------------------------------------
   // The cookie says who this is to the server; the visitor's own storage is
   // what remembers them. A person who comes back is the same person, and
