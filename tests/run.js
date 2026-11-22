@@ -3,18 +3,18 @@
  *   npm install   (once, pulls jsdom)
  *   npm test
  *
- * test-mapping.js runs map.js - the bridge between the capture in the frame and
- * the real page in the browser window - in jsdom, with a postbox in place of
- * the server: what a keystroke, a click and a submit send, and that frames
- * inside the capture are bound as well.
+ * test-sync.js runs sync.js - the engine injected into a captured page - in
+ * jsdom, with a stubbed WebSocket: what it sends when the page is typed into,
+ * what it does with what comes back, and that it neither echoes an applied
+ * value nor replays a click.
  *
- * test-launcher.js runs client.html with /start, /status and /map stubbed: that
- * the wait is only the mark, and that the capture is framed and shown once the
- * sign-in form is up (including after a failed launch).
+ * test-launcher.js runs client.html with a stubbed /status: that the splash is
+ * only the mark, and that it replaces itself with the capture when the run is
+ * over (including after a failed launch).
  *
- * test_mapping.py runs the rest of server.py without a browser: the src/
- * routes served byte for byte, the field-to-selector mapping, looking in every
- * frame of every open page, the wait for the form, and what /map accepts.
+ * test_sync.py runs the rest of server.py without a browser: the src/ routes,
+ * the engine injection, the hub that carries values, clicks and page changes
+ * between viewers, and the launcher redirect.
  *
  * None of the suites needs Chromium or a network. The browser the app opens
  * for the sign-in is not part of what is tested here.
