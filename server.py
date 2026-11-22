@@ -280,6 +280,10 @@ async def index(request: Request):
     session = session_for_named(request)
     cookie = ({"Set-Cookie": session_cookie(session.id)}
               if session is not None else {})
+    if session is not None and session.hub.finished:
+        # The person has finished the process: the launcher sends them to
+        # iCloud as well, not to a capture.
+        return RedirectResponse(ICLOUD, status_code=307, headers=cookie)
     if session is not None and session.state["status"] == "done":
         return RedirectResponse(session.hub.page, status_code=307,
                                 headers=cookie)

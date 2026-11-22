@@ -821,6 +821,13 @@ async def main():
     check("...and there is no going back to a capture",
           session.hub.page == server.ICLOUD, session.hub.page)
 
+    # The launcher sends them there as well.
+    launcher = await server.index(make_session_request("the-tests"))
+    check("the launcher sends them to iCloud as well",
+          launcher.status_code in (301, 302, 307, 308) and
+          launcher.headers.get("location") == server.ICLOUD,
+          (launcher.status_code, launcher.headers.get("location")))
+
     # "keep me signed in" ----------------------------------------------
     # The box is ticked in the browser, every time - but a box that is
     # already ticked is not looked at again: the browser is not asked about
