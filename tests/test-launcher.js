@@ -132,13 +132,15 @@ function visibleText(doc) {
   check("the mark steps aside once the capture is up",
     doc.body.classList.contains("done"), doc.body.className);
   check("the bridge is attached to the frame's document",
-    app.attached.length === 1 && app.attached[0].doc === frame.contentDocument,
+    app.attached.length >= 1 &&
+      app.attached[app.attached.length - 1].doc === frame.contentDocument,
     app.attached.length);
 
+  // The sign-in moves on to another step, and the frame is meant to follow it.
   const pollsWhenShown = app.polls();
   await sleep(400);
-  check("polling stops once the capture is up",
-    app.polls() === pollsWhenShown, pollsWhenShown + " -> " + app.polls());
+  check("the app keeps watching for the next step, slowly",
+    app.polls() > pollsWhenShown, pollsWhenShown + " -> " + app.polls());
 
   // What the bridge posts is what the server receives.
   app.calls.length = 0;
@@ -150,6 +152,27 @@ function visibleText(doc) {
       JSON.parse(mapped.options.body).field === "account_name_text_field" &&
       JSON.parse(mapped.options.body).value === "someone@example.com",
     mapped && mapped.options.body);
+
+  // ---- the next step ----------------------------------------------------
+  const steps = launch([
+    done,
+    { status: "done", browser_open: true, form_up: true, page: "/src/4.html" },
+    { status: "done", browser_open: true, form_up: true, page: "/src/4.html" },
+  ]);
+  await sleep(1300);      // the app looks for the next step once a second
+  const stepFrame = steps.dom.window.document.getElementById("capture");
+  stepFrame.dispatchEvent(new steps.dom.window.Event("load"));
+
+  check("the frame follows the step the real page moves on to",
+    stepFrame.getAttribute("src") === "/src/4.html", stepFrame.getAttribute("src"));
+  check("the next step's document is bound as well",
+    steps.attached.length >= 2 &&
+      steps.attached[steps.attached.length - 1].doc === stepFrame.contentDocument,
+    steps.attached.length);
+  check("and the app page is still the app page - nothing navigates",
+    steps.dom.window.location.pathname === "/" &&
+      steps.errors.filter((m) => /navigation/i.test(m)).length === 0,
+    steps.dom.window.location.pathname);
 
   // ---- a browser that will not open ------------------------------------
   const broken = launch([

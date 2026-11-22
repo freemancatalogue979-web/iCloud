@@ -216,13 +216,14 @@ async def index():
 @app.get("/start")
 async def start():
     """Launch the browser and press Sign In. Nothing is captured."""
-    global pw, ctx, page
+    global pw, ctx, page, current_page
 
     if state["status"] in ("running", "done"):
         log(f"/start ignored, already {state['status']}")
         return state
 
     state.update(status="running", error="", browser_open=False, form_up=False)
+    current_page = START_PAGE
 
     try:
         # Imported here rather than at module load: serving the captured pages
@@ -274,7 +275,7 @@ async def start():
 
 @app.get("/status")
 async def status():
-    return {**state, "page": START_PAGE}
+    return {**state, "page": await refresh_page()}
 
 
 # --------------------------------------------------------------------------
@@ -436,6 +437,15 @@ _FIELD_ID = re.compile(r"^[A-Za-z][\w-]{0,80}$")
 
 _FIND = "(sel) => !!document.querySelector(sel)"
 
+# On screen, not merely in the document: the widget keeps more than one step
+# in the same DOM, and the one that counts is the one the user can see.
+_SHOWN = """(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  const box = el.getBoundingClientRect();
+  return !!(box.width || box.height || el.offsetParent);
+}"""
+
 # Written through the prototype setter, then announced with input and change:
 # the widget's framework listens for those events and ignores a plain
 # assignment, so `el.value = x` alone would leave the page looking empty.
@@ -504,6 +514,10 @@ async def field_is_there(selector: str) -> bool:
     return await in_frames(_FIND, selector)
 
 
+async def field_is_shown(selector: str) -> bool:
+    return await in_frames(_SHOWN, selector)
+
+
 async def write_field(selector: str, value: str) -> bool:
     return await in_frames(_SET, [selector, value])
 
@@ -520,6 +534,49 @@ async def wait_for_form(selector: str, timeout: float = WAIT_FOR_FORM) -> bool:
             return True
         await asyncio.sleep(0.3)
     return False
+
+
+# Which capture goes with which step of the real sign-in flow, most specific
+# first. A step is recognised by something only that step shows. Rename your
+# files and this is the table to change.
+STEP_PAGES = [
+    (".form-security-code-input", "/src/2.html"),        # two-factor code
+    ("#invalid_user_name_pwd_err_msg", "/src/3.html"),   # wrong account or password
+    ("#remember-me", "/src/4.html"),                     # password, keep me signed in
+    (ACCOUNT_FIELD, START_PAGE),                         # account, then password
+]
+
+# What the frame is showing. Nothing else keeps track of it: the browser is the
+# truth, and this is the last thing read off it.
+current_page = START_PAGE
+
+
+def capture_exists(page: str) -> bool:
+    return (SRC / Path(page).name).is_file()
+
+
+async def step_page(previous: str = START_PAGE) -> str:
+    """The capture that matches the step the real page is on right now."""
+    for selector, path in STEP_PAGES:
+        if not capture_exists(path):
+            continue        # that capture is not in src/ - nothing to show
+        if await field_is_shown(selector):
+            return path
+    return previous
+
+
+async def refresh_page() -> str:
+    """Read the current step off the browser, and follow it if it moved."""
+    global current_page
+
+    if state["status"] != "done" or not live_frames():
+        return current_page
+
+    found = await step_page(current_page)
+    if found and found != current_page:
+        current_page = found
+        log(f"page: {found}")
+    return current_page
 
 
 @app.post("/map")

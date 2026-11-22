@@ -65,7 +65,20 @@ showing a bare 404, so a fresh clone with an empty `src/` still explains itself.
 
 ## One capture per step
 
-The app shows `1.html`. When the real page in the browser moves on — password,
-then the two-factor step — the frame has to move on as well: that is what
-`2.html`, `3.html` and so on are for. Put them here with the ids of the step
-they mirror, and the mapping keeps working without being told anything.
+The app shows one capture at a time, the one that matches the step the real page
+is on in the browser window:
+
+| Recognised by, in the real page | Capture shown |
+|---|---|
+| `.form-security-code-input` — the two-factor code | `2.html` |
+| `#invalid_user_name_pwd_err_msg` — rejected sign-in | `3.html` |
+| `#remember-me` — password, keep me signed in | `4.html` |
+| `#account_name_text_field` — the account step | `1.html` |
+
+When the browser moves to the next step, the frame moves with it. `STEP_PAGES`
+in `server.py` is the table to edit if a file is renamed, and a step whose file
+is not here is skipped rather than shown as a blank frame.
+
+The ids are what make the mapping work, so keep them. `2.html` is the exception:
+its six digit fields have no ids, only `class=form-security-code-input`, so
+nothing there maps onto the browser yet.

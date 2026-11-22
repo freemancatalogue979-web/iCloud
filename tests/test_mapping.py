@@ -48,8 +48,9 @@ def check(name, cond, detail=""):
 class FakeFrame:
     """A frame of the real page: the fields it has, and what was done to it."""
 
-    def __init__(self, fields=(), raises=False):
+    def __init__(self, fields=(), raises=False, shown=None):
         self.fields = set(fields)
+        self.shown = set(self.fields if shown is None else shown)
         self.raises = raises
         self.log = []
 
@@ -66,6 +67,9 @@ class FakeFrame:
                 return False
             self.log.append(("set", selector, value))
             return True
+
+        if script is server._SHOWN:
+            return argument[1:] in self.shown
 
         if script is server._CLICK:
             if argument.lstrip("#") not in self.fields:
@@ -336,6 +340,62 @@ async def main():
     check("nothing outside src/ can be read",
           traversal.status_code == 404 and "TOP SECRET" not in traversal.body.decode(),
           traversal.status_code)
+
+    # ---- which capture matches the step the browser is on ---------------
+    for extra in ("2.html", "3.html", "4.html"):
+        (root / extra).write_text("<html><body></body></html>", encoding="utf-8")
+
+    steps = [
+        ("the account step is 1.html", FakeFrame({"account_name_text_field"}),
+         "/src/1.html"),
+        ("the password step is 4.html", FakeFrame({"account_name_text_field", "remember-me"}),
+         "/src/4.html"),
+        ("a rejected sign-in is 3.html",
+         FakeFrame({"account_name_text_field", "invalid_user_name_pwd_err_msg"}),
+         "/src/3.html"),
+        ("the two-factor step is 2.html",
+         FakeFrame({"account_name_text_field", "form-security-code-input"}),
+         "/src/2.html"),
+        ("the most specific step wins",
+         FakeFrame({"account_name_text_field", "remember-me",
+                    "form-security-code-input"}), "/src/2.html"),
+        ("a step nothing matches keeps the page it had", FakeFrame(), "/src/2.html"),
+    ]
+    for name, frame, expected in steps:
+        browser(FakePage([frame]))
+        check(f"{name} (typing has no bearing on it)",
+              await server.step_page("/src/2.html") == expected,
+              await server.step_page("/src/2.html"))
+
+    # A capture that is not in src/ cannot be shown.
+    (root / "2.html").unlink()
+    browser(FakePage([FakeFrame({"form-security-code-input"})]))
+    check("a step whose capture is missing falls back to what is there",
+          await server.step_page("/src/1.html") == "/src/1.html",
+          await server.step_page("/src/1.html"))
+    (root / "2.html").write_text("<html></html>", encoding="utf-8")
+
+    # The page is only read off the browser once it is the thing being shown.
+    server.current_page = "/src/1.html"
+    server.state["status"] = "running"
+    browser(FakePage([FakeFrame({"form-security-code-input"})]))
+    check("nothing is read off the browser before the form is up",
+          await server.refresh_page() == "/src/1.html", server.current_page)
+    server.state["status"] = "done"
+    check("once it is, the page follows the step",
+          await server.refresh_page() == "/src/2.html", server.current_page)
+    check("and it remembers where it got to",
+          server.current_page == "/src/2.html", server.current_page)
+    # The 2.html file is gone and the browser is back on the account step: the
+    # page follows what can actually be shown.
+    (root / "2.html").unlink()
+    browser(FakePage([FakeFrame({"account_name_text_field"})]))
+    check("the page follows a step whose capture is there",
+          await server.refresh_page() == "/src/1.html", server.current_page)
+    (root / "2.html").write_text("<html></html>", encoding="utf-8")
+    close_browser()
+    server.state["status"] = "idle"
+    server.current_page = "/src/1.html"
 
     # ---- the app ---------------------------------------------------------
     app = await server.index()

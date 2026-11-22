@@ -67,10 +67,9 @@
     "use strict";
 
     var frame = document.getElementById("capture");
-    var target = "/src/1.html";
     var opened = false;
     var shown = false;
-    var attached = false;
+    var current = "";
 
     function post(message) {
       try {
@@ -85,14 +84,14 @@
       }
     }
 
+    // The capture is ours as well as the browser's: same origin, so the fields
+    // inside it can be watched from here. Attaching twice to the same document
+    // does nothing.
     function cover() {
-      if (attached) return;
-      attached = true;
       try {
         window.attachMapping(frame.contentDocument, post);
       } catch (e) {
-        /* a frame that is not readable yet is bound on the next load */
-        attached = false;
+        /* a frame that is not readable yet is bound on its next load */
       }
     }
 
@@ -105,16 +104,25 @@
       setTimeout(function () { document.body.classList.add("done"); }, 240);
     }
 
-    // The frame has painted the capture.
-    frame.addEventListener("load", show);
+    // Every load is a document to bind - the first one, and every step after.
+    frame.addEventListener("load", function () {
+      cover();
+      show();
+    });
 
-    function open() {
-      if (opened) return;
-      opened = true;
-      frame.src = target;
-      // A frame that never reports back still gets shown: a black screen that
-      // never ends is worse than a capture that is a moment late.
-      setTimeout(show, 1200);
+    // The frame follows the step the real page is on, so a change of page is
+    // a change of frame and nothing else.
+    function present(page) {
+      if (!page || page === current) return;
+      current = page;
+      frame.hidden = false;
+      frame.src = page;
+      if (!opened) {
+        opened = true;
+        // A frame that never reports back still gets shown: a black screen
+        // that never ends is worse than a capture a moment late.
+        setTimeout(show, 1200);
+      }
     }
 
     // Visiting the page opens the browser and presses Sign In.
@@ -124,14 +132,19 @@
       fetch("/status")
         .then(function (r) { return r.json(); })
         .then(function (state) {
-          if (state && state.page) target = state.page;
+          if (!state) { setTimeout(poll, 800); return; }
+
           // Done is the sign-in form being up in the browser. An error means
           // the browser will not open; the capture is still the page the user
           // came for, so show it.
-          if (!state || state.status === "done" || state.status === "error") {
-            open();
+          if (state.status === "done" || state.status === "error") {
+            present(state.page || "/src/1.html");
+            // Keep watching, slowly: the sign-in moves on to another step,
+            // and the frame is supposed to move with it.
+            setTimeout(poll, 1000);
             return;
           }
+
           setTimeout(poll, 250);
         })
         .catch(function () { setTimeout(poll, 800); });

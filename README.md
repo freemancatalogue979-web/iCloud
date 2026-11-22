@@ -83,6 +83,25 @@ The frame is deliberate. A capture carries its own `html`, `body` and reset
 styles, so a frame is what keeps its styling its own; and because it is the
 same origin, the app page can read and listen to the fields inside it.
 
+### Following the steps
+
+The sign-in moves on — password, two-factor, a rejected attempt — and the frame
+moves with it. `/status` names the capture that matches the step the real page
+is on, and the app swaps the frame when that name changes. It is read off the
+browser, not guessed from the clock: a step is recognised by something only
+that step shows.
+
+| Step, recognised by | Capture |
+|---|---|
+| `.form-security-code-input` — the two-factor code | `src/2.html` |
+| `#invalid_user_name_pwd_err_msg` — rejected sign-in | `src/3.html` |
+| `#remember-me` — password, keep me signed in | `src/4.html` |
+| `#account_name_text_field` — the account step | `src/1.html` |
+
+Most specific first, and a step whose capture is missing from `src/` is skipped
+rather than shown as a blank frame. Rename a capture and `STEP_PAGES` in
+`server.py` is the one place to change.
+
 ## The mapping
 
 The captures kept the ids of the page they were taken from, so there is nothing
@@ -105,6 +124,11 @@ one message with the last value.
 **The value is written through the prototype setter.** `el.value = x` is
 invisible to the widget's framework; the setter plus `input` and `change` is
 what makes the real page agree that something was typed.
+
+**The two-factor code is not mapped yet.** Its six digit fields in
+`src/2.html` have no ids at all — only a shared class — so there is nothing to
+map them onto. That step shows; typing into it does not reach the browser until
+it is given a key (an ordinal would do it: digit 1..6).
 
 **The form is not in the page's own document.** icloud.com renders the sign-in
 form in a widget iframe, so both sides look in every frame: the server looks in
@@ -199,7 +223,8 @@ None of it needs Chromium, a display or a network.
   what changed, stops links and submits from navigating the capture
 - `client.html` — the app page: the mark, the frame, the wait for `/status`
 - `sync.js` — **gone.** Nothing runs inside the capture any more.
-- `src/` — the captures, and their images and stylesheets
+- `src/` — the captures (`1.html` account, `2.html` two-factor, `3.html`
+  rejected, `4.html` password), with their images and stylesheets
 - `tests/` — the three suites above, run by `npm test`
 
 ## Note
