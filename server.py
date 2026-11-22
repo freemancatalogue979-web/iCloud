@@ -36,7 +36,7 @@ SIGNIN_BUTTON = "ui-button.sign-in-button"
 # a snapshot taken then is a half-built page that the mirror never recovers
 # from on its own. Once the snapshot has been taken, the DOM is kept up to
 # date by the mutation stream.
-SETTLE_SECONDS = 43
+SETTLE_SECONDS = 4
 
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.

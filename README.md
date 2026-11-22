@@ -70,7 +70,7 @@ resulting DOM changes come straight back.
 
 The mirror is built in two stages, the way the user asked for it.
 
-**The first capture is a snapshot of the page, taken 43 seconds after Sign In
+**The first capture is a snapshot of the page, taken 4 seconds after Sign In
 is pressed.** Not a stream of changes from the moment the page loaded — a
 snapshot, once the page has settled. Right after the click the sign-in form
 is still arriving: it is a navigation, and the form itself is a cross-origin
