@@ -395,11 +395,15 @@ memory. It is what makes the session a session: the cookies, the "trust
 this device" answer, the half-typed address are all still there when they
 come back, because it is the same browser with the same profile.
 
-The name is kept in two places, because it is worth keeping. The cookie is
-how the server hears about it on every request; the visitor's own storage
-(`localStorage`) is how they are *remembered* — a person who comes back is
-recognised, even if the cookie has gone, and lands in the same session
-again.
+The name is kept in two places, because it is worth keeping. The visitor's
+own storage (`localStorage`) is how they are *remembered* — a person who
+comes back is recognised, even if the cookie has gone, and lands in the
+same session again. The cookie is how the server hears about it on every
+later request, and the page says the name with the request as well
+(`/start?visitor=…`), so the two agree.
+
+The profile is kept where the base branch keeps it — `visitors/<name>/` —
+so a browser that has already signed in is not asked to sign in again.
 
 Two details matter more than they look:
 
