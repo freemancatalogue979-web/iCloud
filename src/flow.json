@@ -11,7 +11,10 @@
       "press": "sign-in",
       "go": "/src/2.html",
       "live": true,
-      "wait": true
+      "wait": true,
+      "until": {
+        "heading": "Two-Factor Authentication"
+      }
     }
   ]
 }

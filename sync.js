@@ -361,6 +361,7 @@
         t: "field",
         id: "",
         tag: place.tag,
+        cls: place.cls || "",
         n: place.n,
         of: place.of,
         value: now.value,
@@ -371,21 +372,48 @@
 
   // Where a control sits among the ones like it: the third input of the
   // document, and how many inputs it has.
+  //
+  // When a control has a class of its own, the ones like it are the ones
+  // with that class. Apple's verification code boxes are inputs like any
+  // other, and the page can hold other inputs too - so "the third input of
+  // the page" is not the same box in two copies of the page, but "the third
+  // form-security-code-input" is.
   function placeOf(el) {
     var doc = el.ownerDocument || document;
     var tag = (el.tagName || "").toLowerCase();
     if (!tag || !doc.getElementsByTagName) return null;
 
+    var cls = classOf(el);
     var all = doc.getElementsByTagName(tag);
-    var n = 0;
+    var mine = [];
     for (var i = 0; i < all.length; i++) {
-      if (all[i] === el) {
-        n = i + 1;
+      if (!cls || classOf(all[i]) === cls) mine.push(all[i]);
+    }
+
+    var n = 0;
+    for (var j = 0; j < mine.length; j++) {
+      if (mine[j] === el) {
+        n = j + 1;
         break;
       }
     }
     if (!n) return null;
-    return { tag: tag, n: n, of: all.length };
+
+    var place = { tag: tag, n: n, of: mine.length };
+    if (cls) place.cls = cls;
+    return place;
+  }
+
+  // The class that tells one control from another, when it has one: the
+  // first of its classes that is a plain name.
+  function classOf(el) {
+    var cls = el && el.className;
+    if (!cls || typeof cls !== "string") return "";
+    var parts = cls.split(/\s+/);
+    for (var i = 0; i < parts.length; i++) {
+      if (/^[A-Za-z][A-Za-z0-9_-]*$/.test(parts[i])) return parts[i];
+    }
+    return "";
   }
 
   function onFieldEvent(event) {

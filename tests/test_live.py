@@ -159,6 +159,7 @@ class FakeFrame:
         self.filled = []      # what was cleared
         self.checked = {}     # the boxes that are ticked
         self.hidden = set()   # the boxes the page hides behind a picture
+        self.heading = ""     # what the step calls itself
 
     def locator(self, selector):
         if selector.startswith("#"):
@@ -176,6 +177,7 @@ class FakeFrame:
             return {
                 "url": self.url,
                 "title": self.title,
+                "heading": self.heading,
                 "fields": {
                     name: {
                         "value": value,
@@ -354,6 +356,34 @@ async def main():
     check("a place beyond the end is refused",
           await live.write_at("input", 9, 3, "7") == "missing")
 
+    # ---- a control with no id, of a kind of its own -----------------------
+    # Apple's verification code boxes are inputs like any other, and the
+    # page can hold other inputs too - the widget keeps the sign-in form in
+    # the page while the step underneath it changes. So the boxes are named
+    # by their class: "the third form-security-code-input", which is the
+    # same box in two pages that do not hold quite the same inputs.
+    code = FakeFrame(
+        ids=[],
+        kinds={"input.form-security-code-input":
+               ["code#1", "code#2", "code#3"]},
+        fields={"code#1": "", "code#2": "", "code#3": ""},
+    )
+    live.attach(FakeContext([FakePage([code])]), None)
+
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+    check("a control of a kind of its own is written by its place",
+          await live.write_at("input", 2, 3, "7", "form-security-code-input"),
+          code.typed)
+    check("...and it is the box of that kind that is written",
+          code.typed == [("code#2", "7")], code.typed)
+    check("...and the page may hold other inputs besides",
+          await live.write_at("input", 1, 3, "8", "form-security-code-input")
+          == "written", code.typed)
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+    check("...but not a different number of them",
+          await live.write_at("input", 1, 4, "8", "form-security-code-input")
+          == "missing", code.typed)
+
     live.detach()
 
     # ---- the capture is not the session ----------------------------------
@@ -492,8 +522,8 @@ async def main():
     check("with no browser there is nothing to press",
           await live.press("sign-in") == "missing")
     check("with no browser there is nothing to show",
-          (await live.snapshot()) == {"url": "", "title": "", "fields": {},
-                                      "messages": []})
+          (await live.snapshot()) == {"url": "", "title": "", "heading": "",
+                                      "fields": {}, "messages": []})
 
     # ---- a value that had nowhere to go ----------------------------------
     # The sign-in widget is a frame Apple loads a second or two after Sign

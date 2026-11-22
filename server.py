@@ -1000,8 +1000,10 @@ class Hub:
             tag = message.get("tag")
             n = message.get("n")
             of = message.get("of")
+            cls = message.get("cls")
             if isinstance(tag, str) and isinstance(n, int) and isinstance(of, int):
-                spawn(write_at_to_browser(session, tag, n, of, value))
+                spawn(write_at_to_browser(session, tag, n, of, value,
+                                         cls if isinstance(cls, str) else ""))
 
         elif kind == "press":
             # A button pressed in a capture. What it does depends on where
@@ -1040,6 +1042,8 @@ class Hub:
                 session.waiting = {
                     "field": element,
                     "fields": watch_fields(browser.get("fields") or {}),
+                    "heading": browser.get("heading", ""),
+                    "until": step.get("until") if isinstance(step.get("until"), dict) else {},
                     "url": browser.get("url", ""),
                     "go": go,
                     "page": page,
@@ -1305,9 +1309,9 @@ async def write_to_browser(session: "Session", element: str, value: str) -> None
 
 
 async def write_at_to_browser(session: "Session", tag: str, n: int, of: int,
-                              value: str) -> None:
+                              value: str, cls: str = "") -> None:
     try:
-        written = await session.bridge.write_at(tag, n, of, value)
+        written = await session.bridge.write_at(tag, n, of, value, cls)
     except Exception as exc:
         log(f"browser write failed: {str(exc).splitlines()[0]}")
         return
@@ -1319,7 +1323,10 @@ async def write_at_to_browser(session: "Session", tag: str, n: int, of: int,
     if written == "held":
         return
 
-    if not session.bridge.mark_reported({"tag": tag, "n": n}):
+    target = {"tag": tag, "n": n}
+    if cls:
+        target["cls"] = cls
+    if not session.bridge.mark_reported(target):
         return
 
     log(f"browser: {tag} #{n} of {of} not found yet - "
@@ -1369,6 +1376,10 @@ async def press_in_browser(session: "Session", element: str) -> None:
 
     if pressed:
         log(f"browser: {element} pressed (the sign-in button)")
+        # The press has been made after all, so it is not kept and tried
+        # again: a press that keeps being retried holds the bridge for as
+        # long as it takes, and the values waiting to be typed need it.
+        session.bridge.forget({"id": element})
         return
 
     log(f"browser: {element} not found yet - "
@@ -1508,6 +1519,26 @@ async def check_waiting(session: "Session", state: dict) -> None:
         if not waiting.get("complained"):
             waiting["complained"] = True
             log("the browser is saying the details are wrong - staying here")
+        return
+
+    # What the flow says the app is waiting for. When the flow names the
+    # page the browser should go on to, that is what is waited for: the
+    # capture moves on when the browser is showing "Two-Factor
+    # Authentication", and not before.
+    #
+    # The sign-in fields are not a good enough sign of that. Apple's widget
+    # can keep the form in the page while the step underneath it changes,
+    # so a form that is still there may be a form nobody is looking at any
+    # more - and the app would sit on the sign-in page for ever.
+    until = waiting.get("until") or {}
+    wanted = until.get("heading")
+    if isinstance(wanted, str) and wanted.strip():
+        shown = str(state.get("heading") or "").strip()
+        if wanted.strip().lower() not in shown.lower():
+            return
+        log(f"the browser is showing '{shown}' - going to {waiting['go']}")
+        session.waiting = None
+        session.hub.navigate(waiting["go"], sender=None, everyone=True)
         return
 
     # The browser has moved on when the form it was showing is gone - the

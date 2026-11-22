@@ -89,6 +89,11 @@ class FakeLocator:
             raise Exception("no such control")
         return self.frame.fields.get(name, "")
 
+    async def is_visible(self):
+        # A control that is on the page is on the page: the bridge does not
+        # wait for a control that is not there to be seen.
+        return self._element() is not None
+
     async def click(self, timeout=None):
         name = self._element()
         if name is None:

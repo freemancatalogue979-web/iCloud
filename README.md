@@ -192,6 +192,15 @@ not, the right box cannot be told from the wrong one, and a code typed
 into the wrong box is worse than no code at all, so nothing is written and
 the console says so.
 
+**A control with a class of its own is named by that class.** "The third
+input of the page" is not the same box in two copies of a page that do
+not hold quite the same inputs: Apple's widget can keep the sign-in form
+in the page while the step underneath it changes, and the code boxes are
+then the seventh input of one page and the first of the other. So a
+control that has a class of its own is counted among the ones with that
+class — "the third `form-security-code-input`" — and only those are
+compared.
+
 **The code goes in one box at a time, and the cursor moves on.** The
 verification code is six boxes with a digit in each. Apple's own page says
 so — *"On entering verification code in the input fields, the focus will
@@ -455,6 +464,21 @@ complaint:
   answer, and there is no next step to go to yet.
 - **The form is gone.** The sign-in fields are not there any more, and the
   next step is there instead.
+
+A step can also name the page the browser has to be showing:
+
+```json
+{"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+ "live": true, "wait": true, "until": {"heading": "Two-Factor Authentication"}}
+```
+
+Then the capture moves on when the browser's own heading says *"Two-Factor
+Authentication"* — and not before. The sign-in fields are not a good enough
+sign of that: Apple's widget can keep the form in the page while the step
+underneath it changes, so a form that is still there may be a form nobody is
+looking at any more, and the app would sit on the sign-in page for ever. A
+complaint still comes first: it means the details are wrong, and there is no
+next step to go to yet.
 
 The fields that are watched are the ones the person filled in. A box that
 was ticked is not one of them: "Keep me signed in" is still on the page

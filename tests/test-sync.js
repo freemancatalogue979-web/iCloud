@@ -416,8 +416,10 @@ class FakeSocket {
     JSON.stringify(FakeSocket.last.ofType("value")));
   const digit = FakeSocket.last.ofType("field")[0] || {};
   check("...and it is named by its place, the boxes having no ids",
-    digit.id === "" && digit.tag === "input" && digit.n === 1 && digit.of === 7 &&
+    digit.id === "" && digit.tag === "input" && digit.n === 1 && digit.of === 6 &&
     digit.value === "1", JSON.stringify(digit));
+  check("...and by the class they share, so the hidden input does not count",
+    digit.cls === "form-security-code-input", JSON.stringify(digit));
 
   type(codeBoxes[1], "2");
   check("the next digit goes to the next box",

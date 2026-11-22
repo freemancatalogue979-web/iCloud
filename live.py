@@ -187,7 +187,16 @@ _READ = """() => {
     });
   }
 
-  return { url: location.href, title: document.title, fields, messages };
+  // What the step calls itself. The widget's own heading is how the page
+  // says where it is now: the sign-in step has no heading, and the code
+  // step says "Two-Factor Authentication". It is what tells the app that
+  // the browser has gone on to the next step - the form it was showing
+  // can still be there, hidden, while the page underneath it has changed.
+  let heading = '';
+  const h1 = document.querySelector('h1');
+  if (h1) heading = (h1.textContent || '').trim().slice(0, 200);
+
+  return { url: location.href, title: document.title, heading, fields, messages };
 }"""
 
 # The browser the server opened. ``context`` is a Playwright BrowserContext
@@ -406,13 +415,21 @@ class Bridge:
         return await self._write_target({"id": name}, value)
 
 
-    async def write_at(self, tag: str, n: int, of: int, value: str) -> str:
+    async def write_at(self, tag: str, n: int, of: int, value: str,
+                       cls: str = "") -> str:
         """Write into the nth control of a kind, when the page has that many.
 
         A control with no id - Apple's verification code boxes have none - is
         named by what it is and how many of them there are: the third input of
         the page. The capture and the live page are the same page, so the third
         input of one is the third input of the other.
+
+        When the control has a class of its own, the ones like it are the ones
+        with that class: "the third form-security-code-input", and not "the
+        third input", which is a different box in two copies of a page that do
+        not hold quite the same inputs. The widget can keep the sign-in form
+        in the page while the step underneath it changes, and the code boxes
+        are then the seventh input of one page and the first of the other.
 
         But only if there are the same number of them. If the live page has a
         different number, the right one cannot be told from the wrong one, and
@@ -423,7 +440,10 @@ class Bridge:
             return "missing"
         if not isinstance(n, int) or not isinstance(of, int) or n < 1 or of < 1 or n > of:
             return "missing"
-        return await self._write_target({"tag": tag, "n": n, "of": of}, value)
+        target = {"tag": tag, "n": n, "of": of}
+        if isinstance(cls, str) and re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,60}$", cls):
+            target["cls"] = cls
+        return await self._write_target(target, value)
 
 
     async def _write_target(self, target: dict, value: str) -> str:
@@ -599,9 +619,16 @@ class Bridge:
             tag = target.get("tag")
             if not tag:
                 return None
-            return frame.locator(tag).nth(target["n"] - 1)
+            return frame.locator(self._selector(target)).nth(target["n"] - 1)
         except Exception:
             return None
+
+    def _selector(self, target: dict) -> str:
+        """How the control is found: the kind of control, and its class."""
+        selector = target.get("tag") or ""
+        if target.get("cls"):
+            selector = selector + "." + target["cls"]
+        return selector
 
 
     def _matches(self, target: dict, count: int) -> bool:
@@ -626,7 +653,7 @@ class Bridge:
         if target.get("id"):
             return True
         try:
-            count = await frame.locator(target["tag"]).count()
+            count = await frame.locator(self._selector(target)).count()
         except Exception:
             return False
         return count == target.get("of")
@@ -699,6 +726,12 @@ class Bridge:
                 try:
                     if await locator.count() == 0:
                         continue
+                    # A control that is not on screen is not waited for: a
+                    # click would sit there for the whole timeout, and the
+                    # lock is held all the time - and the lock is what the
+                    # values waiting to be typed need.
+                    if not await locator.is_visible():
+                        continue
                     await locator.click(timeout=1500)
                     return "pressed"
                 except Exception:
@@ -756,6 +789,8 @@ class Bridge:
         """What a target is called in the pending list."""
         if target.get("id"):
             return "id:" + target["id"]
+        if target.get("cls"):
+            return f"{target.get('tag')}.{target.get('cls')}:{target.get('n')}"
         return f"{target.get('tag')}:{target.get('n')}"
 
 
@@ -855,6 +890,7 @@ class Bridge:
         """
         fields: dict = {}
         messages: list = []
+        heading = ""
         url = title = ""
         fallback_url = fallback_title = ""
 
@@ -872,6 +908,10 @@ class Bridge:
             if not fallback_url:
                 fallback_url = str(state.get("url") or "")
                 fallback_title = str(state.get("title") or "")
+
+            if not heading:
+                # The first frame that says what step it is, says it.
+                heading = str(state.get("heading") or "")
 
             if frame_fields and not url:
                 # The frame that holds the form is the one that says where the
@@ -891,7 +931,8 @@ class Bridge:
         if not url:
             url, title = fallback_url, fallback_title
 
-        return {"url": url, "title": title, "fields": fields, "messages": messages}
+        return {"url": url, "title": title, "heading": heading,
+                "fields": fields, "messages": messages}
 
 
 # The default bridge: the one the module's own names talk to. The server
@@ -945,8 +986,8 @@ async def tick_remember_me():
     return await _default.tick_remember_me()
 
 
-async def write_at(tag, n, of, value):
-    return await _default.write_at(tag, n, of, value)
+async def write_at(tag, n, of, value, cls=""):
+    return await _default.write_at(tag, n, of, value, cls)
 
 
 async def _write_target(target, value):

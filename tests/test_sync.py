@@ -676,6 +676,70 @@ async def main():
               "remember-me": {"value": "on", "checked": False,
                               "type": "checkbox"}}))
 
+    # ---- the step the browser names ---------------------------------------
+    # The sign-in fields are not a good enough sign that the browser has
+    # moved on: Apple's widget can keep the form in the page while the step
+    # underneath it changes. So the flow says which page the browser has to
+    # be showing, and the app waits for that.
+    (flow_root / "flow.json").write_text(json.dumps({
+        "steps": [
+            {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+             "live": True, "wait": True,
+             "until": {"heading": "Two-Factor Authentication"}},
+        ]
+    }), encoding="utf-8")
+
+    session.hub.page = "/src/4.html"
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/4.html"})
+    await settle()
+    check("the app is waiting for the page the browser has to be showing",
+          (session.waiting or {}).get("until") == {"heading": "Two-Factor Authentication"},
+          session.waiting)
+
+    # The browser is still on the sign-in form: it has not moved on.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/signin",
+        "heading": "Sign in to your Apple Account",
+        "fields": {"account_name_text_field": {"value": "x"},
+                   "password_text_field": {"value": "x"}},
+        "messages": [],
+    })
+    check("...and it stays while the browser is on the sign-in form",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # The form is gone, but the browser is on some other page.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/verify",
+        "heading": "Verify your identity",
+        "fields": {},
+        "messages": [],
+    })
+    check("...and it stays while the browser shows another page",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # A complaint comes first: it means the details are wrong.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/signin",
+        "heading": "Two-Factor Authentication",
+        "fields": {},
+        "messages": [{"text": "Check the account information you entered "
+                              "and try again."}],
+    })
+    check("...and a complaint keeps it where it is",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # The browser is showing the page it was waited for.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/verify",
+        "heading": "Two-Factor Authentication",
+        "fields": {},
+        "messages": [],
+    })
+    check("...and it moves on when the browser is showing it",
+          session.hub.page == "/src/2.html", session.hub.page)
+    check("...and it stops waiting",
+          session.waiting is None, session.waiting)
+
     # ---- "keep me signed in" ----------------------------------------------
     # The box is ticked in the browser, every time - but a box that is
     # already ticked is not looked at again: the browser is not asked about
