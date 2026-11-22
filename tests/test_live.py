@@ -85,12 +85,46 @@ class FakeLocator:
             raise Exception("no such control")
         self.frame.clicks.append(name)
 
+    async def is_checked(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        return bool(self.frame.checked.get(name))
+
+    async def is_visible(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        return name not in self.frame.hidden
+
+    async def check(self, timeout=None):
+        # What Playwright does with a box: it clicks it, unless it is
+        # already ticked - a click on a ticked box unticks it.
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        if not self.frame.checked.get(name):
+            self.frame.clicks.append(name)
+            self.frame.checked[name] = True
+
     async def fill(self, value, timeout=None):
         name = self._element()
         if name is None:
             raise Exception("no such control")
         self.frame.filled.append((name, value))
         self.frame.fields[name] = value
+
+    async def evaluate(self, script, argument=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        if "getAttribute('type')" in script:
+            return self.frame.types.get(name, "text")
+        if "el.checked = true" in script:
+            # The box the page hides behind a picture of one is set as it is.
+            self.frame.checked[name] = True
+            return True
+        return None
 
     async def press_sequentially(self, value, delay=None, timeout=None):
         name = self._element()
@@ -110,10 +144,11 @@ class FakeFrame:
     """
 
     def __init__(self, ids=(), fields=None, kinds=None, messages=None,
-                 url="https://www.icloud.com/", title="iCloud"):
+                 types=None, url="https://www.icloud.com/", title="iCloud"):
         self.ids = set(ids)
         self.fields = dict(fields or {})
         self.kinds = dict(kinds or {})
+        self.types = dict(types or {})
         self.url = url
         self.title = title
         self.messages = list(messages or [])
@@ -122,6 +157,8 @@ class FakeFrame:
         self.clicks = []      # every click, into a field or on a button
         self.typed = []       # what was typed, key by key
         self.filled = []      # what was cleared
+        self.checked = {}     # the boxes that are ticked
+        self.hidden = set()   # the boxes the page hides behind a picture
 
     def locator(self, selector):
         if selector.startswith("#"):
@@ -140,7 +177,11 @@ class FakeFrame:
                 "url": self.url,
                 "title": self.title,
                 "fields": {
-                    name: {"value": value, "checked": False}
+                    name: {
+                        "value": value,
+                        "checked": bool(self.checked.get(name)),
+                        "type": self.types.get(name, "text"),
+                    }
                     for name, value in self.fields.items()
                 },
                 "messages": list(self.messages),
@@ -211,6 +252,41 @@ async def main():
           form.fields["account_name_text_field"] == "", form.fields)
     check("an id that is not an id writes nothing",
           await live.write_field("a b", "x") == "missing")
+
+    # ---- "keep me signed in" ---------------------------------------------
+    # The box on the password step is always ticked: the session is the
+    # whole point of the browser being here, and a browser that forgets the
+    # sign-in is a browser that has to be signed into again.
+    form.ids.add("remember-me")
+    form.types["remember-me"] = "checkbox"
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+
+    check("'keep me signed in' is ticked, whatever the capture says",
+          await live.write_field("remember-me", "false") == "written" and
+          form.checked.get("remember-me") is True, form.checked)
+    check("...and it is ticked by clicking it, the way a person does",
+          "remember-me" in form.clicks, form.clicks)
+    check("...and it is not typed into",
+          ("remember-me", "false") not in form.typed and
+          ("remember-me", "true") not in form.typed, form.typed)
+
+    clicks = len(form.clicks)
+    check("...and a box that is already ticked is not clicked again",
+          await live.write_field("remember-me", "false") == "written" and
+          len(form.clicks) == clicks, form.clicks)
+
+    check("...and the bridge ticks it on its own, with nothing asked of it",
+          await live.tick_remember_me() is True and
+          form.checked.get("remember-me") is True, form.checked)
+
+    form.hidden.add("remember-me")
+    form.checked.pop("remember-me", None)
+    clicks = len(form.clicks)
+    check("...and a box the page hides is set rather than clicked",
+          await live.tick_remember_me() is True and
+          form.checked.get("remember-me") is True and
+          len(form.clicks) == clicks, (form.checked, form.clicks))
+    form.hidden.discard("remember-me")
 
     check("a button is pressed in the browser",
           await live.press("sign-in"), form.clicks)

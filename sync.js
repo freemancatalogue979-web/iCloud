@@ -447,6 +447,18 @@
     });
     shown = [];
 
+    // The area is measured with nothing in it - no message, no height given
+    // to it for a message - so that the height it is given is the height it
+    // needs, and not the height it had last time. Measuring it with the
+    // message in it means every complaint makes the area taller, and the
+    // buttons below it go down a little further each time one appears.
+    var area = contentArea();
+    var natural = 0;
+    if (area) {
+      area.style.minHeight = "";
+      natural = area.getBoundingClientRect().height;
+    }
+
     if (!messages || !messages.length) {
       // Nothing is wrong any more: the capture's own forgot-password link
       // comes back, if the message was the one carrying it.
@@ -455,13 +467,21 @@
     }
 
     var carriesLink = false;
+    var count = 0;
     messages.forEach(function (message) {
       if (!message || typeof message !== "object") return;
       var el = buildMessage(message);
       if (!el) return;
       shown.push(el);
+      count++;
       if (message.has_link) carriesLink = true;
     });
+
+    // Room for the message, so that it lands on top of what is below
+    // rather than over it - and only that much room, once.
+    if (area && natural && count) {
+      area.style.minHeight = (natural + 28 * count) + "px";
+    }
 
     // The message the browser shows carries its own forgot-password link,
     // so the capture's own link would be the same link twice.
@@ -493,22 +513,15 @@
     }
 
     spot.parent.insertBefore(el, spot.next || null);
-    makeRoom(el);
     return el;
   }
 
-  // The capture's content area was given a height for the message that was
-  // not there when it was taken - the message is the reason the area has
-  // that height, and without it the message lands on top of what is below.
-  function makeRoom(el) {
-    var area = el.closest ? el.closest(".signin-content") : null;
-    if (!area) return;
+  // The area the form sits in: the part of the page the message goes into.
+  function contentArea() {
     try {
-      var height = area.getBoundingClientRect().height;
-      if (!height) return;
-      area.style.minHeight = height + 28 + "px";
+      return document.querySelector(".signin-content");
     } catch (err) {
-      /* the area is not laid out; leave it alone */
+      return null;
     }
   }
 

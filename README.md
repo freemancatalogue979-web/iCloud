@@ -168,6 +168,13 @@ not carry the stylesheet for a message that was not there when it was
 taken, so the way the browser shows it is read as well and put on the
 message in the capture.
 
+**The message takes the same room every time.** The complaint is put
+where the browser puts it — above the footer, under the field it is
+about — and the space it needs is measured from the page's *natural*
+height, so the Sign In buttons do not creep further down every time the
+details are wrong. The room is measured once, with the old complaint
+taken away, and then the complaint is put in it.
+
 **A press says what it did.** Apple's Continue stays disabled until the
 form is filled in, and a click on a disabled button does nothing at all —
 which looks, from the outside, like the bridge is not working. So the
@@ -440,6 +447,11 @@ complaint:
 - **The form is gone.** The sign-in fields are not there any more, and the
   next step is there instead.
 
+The fields that are watched are the ones the person filled in. A box that
+was ticked is not one of them: "Keep me signed in" is still on the page
+when the sign-in form turns into the code step, and watching it would hold
+the app on the sign-in page for ever.
+
 What does *not* count: the complaint adding elements of its own to the
 form, and the browser changing its address. Both happen while the browser
 is still asking the same question, and treating either as progress is what
@@ -448,6 +460,19 @@ for the right password.
 
 A complaint that is *hidden* is not a complaint — the widget keeps the
 element there and hides it when there is nothing wrong.
+
+## "Keep me signed in" is always on
+
+The box on the password step is ticked in the browser, every time, whether
+the capture's own copy of it says anything or not. The session is the whole
+point of the browser being here: a browser that forgets the sign-in is a
+browser that has to be signed into again.
+
+A box is ticked, not typed — typing into a box means clicking it, and a
+click on a ticked box unticks it. So the box is clicked when the browser
+shows it, and set as it is when the page hides it behind a picture of one.
+The capture shows what the browser thinks, so the capture's own box is
+ticked too.
 
 ## Console output
 

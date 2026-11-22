@@ -323,6 +323,61 @@ class FakeSocket {
   check("a reconnected viewer asks for the state again",
     again.t === "hello" && again.page === "/src/1.html", JSON.stringify(again));
 
+  // ---- the area the message goes into ----------------------------------
+  // The complaint has room, and the room is enough - but it is the same
+  // room every time. Measuring the area with the message in it means every
+  // complaint makes it taller, and the buttons below it go down a little
+  // further each time one appears.
+  const layoutDom = new JSDOM(
+    `<!DOCTYPE html><html><body>
+       <div class="signin-content">
+         <input id="account" type="text">
+         <div class="signin-content__footer">small print</div>
+       </div>
+     </body></html>`,
+    { url: "http://localhost:9002/src/4.html", runScripts: "outside-only" });
+  const layoutWin = layoutDom.window;
+  // jsdom has no layout, so the height of the area is worked out here: it
+  // is as tall as its content, or as tall as the height it was given,
+  // whichever is more - which is how a browser does it.
+  layoutWin.Element.prototype.getBoundingClientRect = function () {
+    const min = parseFloat(this.style.minHeight || "0") || 0;
+    const height = Math.max(400, min);
+    return { height, width: 300, top: 0, left: 0, right: 300, bottom: height };
+  };
+  layoutWin.WebSocket = FakeSocket;
+  layoutWin.eval(SYNC);
+  FakeSocket.last.onopen();
+  const layoutDoc = layoutDom.window.document;
+  const area = layoutDoc.querySelector(".signin-content");
+  const complaint = {
+    text: "Check the account information you entered and try again.",
+    html: "Check the account information you entered and try again.",
+    className: "form-message",
+    style: {},
+    field: "account",
+    before: "",
+    after: "",
+    has_link: false,
+  };
+  const say = (messages) => FakeSocket.last.receive({
+    t: "browser", url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account", fields: {}, messages,
+  });
+
+  say([complaint]);
+  await sleep(50);
+  const firstHeight = area.style.minHeight;
+  say([complaint]);
+  await sleep(50);
+  const secondHeight = area.style.minHeight;
+  check("the message has room in the capture", !!firstHeight, firstHeight);
+  check("...and the room is the same every time it appears",
+    firstHeight === secondHeight, firstHeight + " -> " + secondHeight);
+  check("...and the buttons below do not go down each time",
+    layoutDoc.querySelectorAll("[data-live-message]").length === 1,
+    layoutDoc.querySelectorAll("[data-live-message]").length);
+
   // ---- who the visitor is ----------------------------------------------
   // The cookie says who this is to the server; the visitor's own storage is
   // what remembers them. A person who comes back is the same person, and

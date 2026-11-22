@@ -624,6 +624,58 @@ async def main():
     check("...and it stops waiting",
           session.waiting is None, session.waiting)
 
+    # ---- the box that stays on -------------------------------------------
+    # "Keep me signed in" is still there when the sign-in form turns into
+    # the code step. Watching every field of the form would hold the app on
+    # the sign-in page for ever - the fields the person filled in are gone,
+    # and the browser has moved on.
+    session.hub.page = "/src/4.html"
+    session.hub.browser = {"url": "https://idmsa.apple.com/signin",
+                           "title": "Sign in to your Apple Account",
+                           "fields": {
+                               "account_name_text_field": {"value": "x",
+                                                          "type": "text"},
+                               "remember-me": {"value": "on", "checked": False,
+                                               "type": "checkbox"}}}
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/4.html"})
+    await settle()
+    check("the box that stays on is not one of the fields to watch",
+          session.waiting.get("fields") == ["account_name_text_field"],
+          session.waiting)
+
+    # The form is gone and the code step has taken its place. The box is
+    # still there, and the app moves on anyway.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/verify",
+        "fields": {"remember-me": {"value": "on", "checked": True,
+                                   "type": "checkbox"},
+                   "code": {"value": "", "type": "text"}},
+        "messages": [],
+    })
+    check("...and the app moves on when the browser has moved on",
+          session.hub.page == "/src/2.html", session.hub.page)
+
+    # A box that is ticked is not a field the person filled in, so it is
+    # not watched: only the fields that were filled in are.
+    check("a ticked box is not watched for",
+          server.watch_fields({
+              "account_name_text_field": {"value": "x", "type": "text"},
+              "remember-me": {"value": "on", "checked": True,
+                              "type": "checkbox"}}) == ["account_name_text_field"],
+          server.watch_fields({
+              "account_name_text_field": {"value": "x", "type": "text"},
+              "remember-me": {"value": "on", "checked": True,
+                              "type": "checkbox"}}))
+    check("...and with nothing filled in, the fields on the page are",
+          server.watch_fields({
+              "account_name_text_field": {"value": "", "type": "text"},
+              "remember-me": {"value": "on", "checked": False,
+                              "type": "checkbox"}}) == ["account_name_text_field"],
+          server.watch_fields({
+              "account_name_text_field": {"value": "", "type": "text"},
+              "remember-me": {"value": "on", "checked": False,
+                              "type": "checkbox"}}))
+
     # ---- every visitor gets their own browser ---------------------------
     one = server.session_for("visitor-one")
     two = server.session_for("visitor-two")

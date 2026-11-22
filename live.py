@@ -111,6 +111,9 @@ _READ = """() => {
     fields[el.id] = {
       value: el.value === undefined ? '' : String(el.value).slice(0, 10000),
       checked: type === 'checkbox' || type === 'radio' ? !!el.checked : false,
+      // What kind of control it is. A box that was ticked is not a field
+      // that was filled in, and the two have to be told apart.
+      type: type,
     };
   }
 
@@ -327,6 +330,62 @@ class Bridge:
         return False
 
 
+    async def tick_remember_me(self) -> bool:
+        """Tick "Keep me signed in" in the browser, if the browser has it.
+
+        The box is on the password step, and the session is the whole point
+        of the browser being here: one that forgets the sign-in is one that
+        has to be signed into again. So it is always on, whatever the
+        capture's own copy of it says - the capture shows what the browser
+        thinks, and the browser thinks it is on.
+
+        A box is ticked, not typed. Typing into one means clicking it, and
+        a click on a ticked box unticks it.
+
+        A box the page shows is clicked, the way a person ticks it. A box
+        the page hides behind a picture of one is set as it is.
+        """
+        async with self._lock:
+            return await self._tick_remember_me()
+
+
+    async def _tick_remember_me(self) -> bool:
+        for frame in self.frames():
+            try:
+                locator = frame.locator("#remember-me")
+                if await locator.count() == 0:
+                    continue
+            except Exception:
+                continue
+
+            try:
+                if await locator.is_checked():
+                    return True
+            except Exception:
+                pass
+
+            try:
+                if await locator.is_visible():
+                    await locator.check(timeout=1500)
+                    return True
+            except Exception:
+                pass
+
+            try:
+                await locator.evaluate(
+                    """el => {
+                        if (!el) return false;
+                        el.checked = true;
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        return true;
+                    }""")
+                return True
+            except Exception:
+                continue
+        return False
+
+
     async def write_field(self, name: str, value: str) -> str:
         """Write a value into the browser, where the capture's field maps to it.
 
@@ -387,6 +446,23 @@ class Bridge:
         """
         if not isinstance(value, str):
             value = ""
+
+        # "Keep me signed in" is always on. It is the box on the password
+        # step, and the session is the whole point of the browser being
+        # here: one that forgets the sign-in is one that has to be signed
+        # into again.
+        #
+        # A box is ticked, not written: it is ticked the way a person ticks
+        # it, and the capture shows what the browser thinks, so the box in
+        # the capture is ticked too.
+        if target.get("id") == "remember-me":
+            if await self.tick_remember_me():
+                self.forget(target)
+                return "written"
+            # The widget has not loaded yet. It is kept, and tried again.
+            self.remember(target, "field", "")
+            return "missing"
+
         value = value[:MAX_VALUE]
 
         key = self._key(target)
@@ -431,6 +507,17 @@ class Bridge:
                 if not await self._same_page(frame, target):
                     continue
             except Exception:
+                continue
+
+            # A box is ticked, not typed. Typing into one means clicking it,
+            # and a click on a ticked box unticks it - so the box goes the
+            # other way round. It is written as a value instead.
+            try:
+                kind = await locator.evaluate(
+                    "el => el ? (el.getAttribute('type') || '').toLowerCase() : ''")
+            except Exception:
+                kind = ""
+            if kind in ("checkbox", "radio"):
                 continue
 
             current = None
@@ -849,6 +936,10 @@ async def in_frames(script, argument):
 
 async def write_field(name, value):
     return await _default.write_field(name, value)
+
+
+async def tick_remember_me():
+    return await _default.tick_remember_me()
 
 
 async def write_at(tag, n, of, value):
