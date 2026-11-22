@@ -61,6 +61,10 @@ class FakeLocator:
     def nth(self, index):
         return FakeLocator(self.frame, self.elements, index)
 
+    @property
+    def first(self):
+        return FakeLocator(self.frame, self.elements, 0)
+
     def _element(self):
         if self.index < len(self.elements):
             return self.elements[self.index]
@@ -105,13 +109,14 @@ class FakeFrame:
     the same way the capture names them.
     """
 
-    def __init__(self, ids=(), fields=None, kinds=None,
+    def __init__(self, ids=(), fields=None, kinds=None, messages=None,
                  url="https://www.icloud.com/", title="iCloud"):
         self.ids = set(ids)
         self.fields = dict(fields or {})
         self.kinds = dict(kinds or {})
         self.url = url
         self.title = title
+        self.messages = list(messages or [])
         self.written = []
         self.pressed = []
         self.clicks = []      # every click, into a field or on a button
@@ -138,6 +143,7 @@ class FakeFrame:
                     name: {"value": value, "checked": False}
                     for name, value in self.fields.items()
                 },
+                "messages": list(self.messages),
             }
 
         if "el.click()" in script:
@@ -198,26 +204,29 @@ async def main():
           form.typed == [("account_name_text_field", "someone@example.com")],
           form.typed)
     check("a field the browser does not have is not written",
-          not await live.write_field("no_such_field", "x"))
+          await live.write_field("no_such_field", "x") == "missing")
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
     check("a value that is not text is written as nothing",
-          await live.write_field("account_name_text_field", None) and
+          await live.write_field("account_name_text_field", None) == "written" and
           form.fields["account_name_text_field"] == "", form.fields)
     check("an id that is not an id writes nothing",
-          not await live.write_field("a b", "x"))
+          await live.write_field("a b", "x") == "missing")
 
     check("a button is pressed in the browser",
           await live.press("sign-in"), form.clicks)
     check("...with a real click, so the page takes it as a person",
           "sign-in" in form.clicks, form.clicks)
     check("a button the browser does not have is not pressed",
-          not await live.press("no_such_button"))
+          await live.press("no_such_button") == "missing")
 
     # ---- what the browser is showing -------------------------------------
     # Every frame is read, not just the first one: the sign-in form is in a
     # frame, and the document above it has no fields at all. Reading only
     # the first frame is how a capture kept a stale value that the browser
     # had already cleared.
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
     await live.write_field("account_name_text_field", "someone@example.com")
+    await live.flush_pending()
     state = await live.snapshot()
     check("the browser's url is read", state["url"] == "https://idmsa.apple.com/signin", state)
     check("the browser's title is read",
@@ -260,13 +269,14 @@ async def main():
 
     # ...but only when the page has the same number of them. If it does
     # not, the right box cannot be told from the wrong one.
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
     check("a control is not written when the page has a different number",
-          not await live.write_at("input", 3, 6, "7"), boxes.typed)
+          await live.write_at("input", 3, 6, "7") == "missing", boxes.typed)
 
     check("a place that is not a place is refused",
-          not await live.write_at("input", 0, 3, "7"))
+          await live.write_at("input", 0, 3, "7") == "missing")
     check("a place beyond the end is refused",
-          not await live.write_at("input", 9, 3, "7"))
+          await live.write_at("input", 9, 3, "7") == "missing")
 
     live.detach()
 
@@ -297,20 +307,30 @@ async def main():
     live.detach()
 
     # ---- typing on, the way a person types --------------------------------
-    # Each letter arrives on its own. The field keeps what it has, and the
-    # new letters are typed - typing the whole address again for every
-    # letter of it would make the widget see the address change from the
-    # beginning over and over.
+    # Each letter arrives on its own. The first one goes in at once - which
+    # is what puts the cursor in the field - and the rest are held back
+    # until the typing stops, and then written as one. A field that is
+    # emptied and filled again for every letter is a field the widget
+    # never gets to the end of, and a password field that is rewritten
+    # letter by letter looks broken to the person watching.
     typed_field = FakeFrame(ids=["account_name_text_field"], fields={})
     live.attach(FakeContext([FakePage([typed_field])]), None)
 
-    await live.write_field("account_name_text_field", "s")
+    first = await live.write_field("account_name_text_field", "s")
+    check("the first letter goes in at once", first == "written", first)
+    check("...and it is typed, not assigned",
+          typed_field.typed == [("account_name_text_field", "s")], typed_field.typed)
+
     await live.write_field("account_name_text_field", "so")
     await live.write_field("account_name_text_field", "som")
-    check("the letters are typed one after another, not the whole thing again",
+    check("the letters that follow are held back",
+          typed_field.typed == [("account_name_text_field", "s")], typed_field.typed)
+
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+    await live.flush_pending()
+    check("...and they go in as one, when the typing stops",
           typed_field.typed == [("account_name_text_field", "s"),
-                                ("account_name_text_field", "o"),
-                                ("account_name_text_field", "m")],
+                                ("account_name_text_field", "om")],
           typed_field.typed)
     check("...and the field ends up holding the whole address",
           typed_field.fields.get("account_name_text_field") == "som",
@@ -318,11 +338,63 @@ async def main():
 
     # A value that is not an extension of what is there is typed whole.
     typed_field.typed.clear()
+    await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
     await live.write_field("account_name_text_field", "other@example.com")
     check("a value that is not more of the same is typed whole",
           typed_field.typed == [("account_name_text_field", "other@example.com")],
           typed_field.typed)
 
+    live.detach()
+
+    # ---- what the browser is saying ---------------------------------------
+    # The browser says when the details are wrong, and the capture has to
+    # say it too.
+    saying = FakeFrame(
+        ids=["account_name_text_field"],
+        fields={},
+        messages=[{
+            "text": "Check the account information you entered and try again.",
+            "html": ("<span>Check the account information you entered and "
+                     "try again.</span>"),
+            "className": "form-message",
+            "kind": "",
+            "style": {"color": "rgb(215, 0, 21)", "fontSize": "12px"},
+            "field": "account_name_text_field",
+            "before": "",
+            "after": "",
+            "has_link": False,
+        }],
+    )
+    live.attach(FakeContext([FakePage([saying])]), None)
+    state = await live.snapshot()
+    check("what the browser is saying is read",
+          state["messages"] and
+          state["messages"][0]["text"].startswith("Check the account"),
+          state.get("messages"))
+    check("...and the way it looks comes with it",
+          state["messages"][0]["style"].get("color") == "rgb(215, 0, 21)",
+          state["messages"][0].get("style"))
+    live.detach()
+
+    # ---- a press by the way the page names it ----------------------------
+    # The sign-in button on the landing page has no id: it is a ui-button
+    # with a class. When the capture is further along than the browser,
+    # pressing Continue means taking the sign-in further, and that is what
+    # the sign-in button does.
+    class SelectorFrame(FakeFrame):
+        def locator(self, selector):
+            if selector.startswith("#"):
+                return FakeLocator(self, [selector[1:]] if selector[1:] in self.ids else [])
+            return FakeLocator(self, list(self.kinds.get(selector, [])))
+
+    landing = SelectorFrame(ids=[], kinds={"ui-button.sign-in-button": ["signin"]})
+    live.attach(FakeContext([FakePage([landing])]), None)
+    check("a control the browser has but has no id for can still be pressed",
+          await live.press_selector("ui-button.sign-in-button"))
+    check("...and it is a real click",
+          landing.clicks == ["signin"], landing.clicks)
+    check("a control the browser does not have is not pressed",
+          not await live.press_selector("ui-button.no-such-button"))
     live.detach()
 
     # ---- a thing that has nowhere to go is said once ---------------------
@@ -340,11 +412,12 @@ async def main():
     # ---- no browser at all ------------------------------------------------
     live.detach()
     check("with no browser there is nothing to write to",
-          not await live.write_field("account_name_text_field", "x"))
+          await live.write_field("account_name_text_field", "x") == "missing")
     check("with no browser there is nothing to press",
-          not await live.press("sign-in"))
+          await live.press("sign-in") == "missing")
     check("with no browser there is nothing to show",
-          (await live.snapshot()) == {"url": "", "title": "", "fields": {}})
+          (await live.snapshot()) == {"url": "", "title": "", "fields": {},
+                                      "messages": []})
 
     # ---- a value that had nowhere to go ----------------------------------
     # The sign-in widget is a frame Apple loads a second or two after Sign
@@ -355,7 +428,7 @@ async def main():
     live.attach(FakeContext([FakePage([late])]), None)
 
     check("a value with no field yet is not written",
-          not await live.write_field("account_name_text_field", "someone@example.com"))
+          await live.write_field("account_name_text_field", "someone@example.com") == "missing")
     check("...but it is kept",
           live.pending().get("id:account_name_text_field", {}).get("value")
           == "someone@example.com", live.pending())
@@ -372,7 +445,7 @@ async def main():
     # while: a button pressed long after the person pressed it is not what
     # they asked for.
     check("a press with no button yet is not pressed",
-          not await live.press("sign-in"))
+          await live.press("sign-in") == "missing")
     check("...but it is kept",
           "id:sign-in" in live.pending(), live.pending())
     late.ids.add("sign-in")

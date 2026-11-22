@@ -56,8 +56,11 @@ SIGNIN_BUTTON = "ui-button.sign-in-button"
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
 BROWSERS = [
-    ("bundled chromium", {}),
+    # System Chrome first: it is the browser the machine already has, it is
+    # the one the person is used to, and it is there without a download. The
+    # bundled Chromium is the fallback for a machine with no Chrome.
     ("system chrome", {"channel": "chrome"}),
+    ("bundled chromium", {}),
     ("system edge", {"channel": "msedge"}),
 ]
 
@@ -1039,8 +1042,12 @@ async def write_to_browser(element: str, value: str) -> None:
         log(f"browser write failed: {str(exc).splitlines()[0]}")
         return
 
-    if written:
+    if written == "written":
         log(f"browser: {element} written")
+        return
+
+    if written == "held":
+        # The person is still typing. It goes in when they stop.
         return
 
     # It had nowhere to go. That is usually the sign-in widget still
@@ -1061,8 +1068,11 @@ async def write_at_to_browser(tag: str, n: int, of: int, value: str) -> None:
         log(f"browser write failed: {str(exc).splitlines()[0]}")
         return
 
-    if written:
+    if written == "written":
         log(f"browser: {tag} #{n} written")
+        return
+
+    if written == "held":
         return
 
     if not live.mark_reported({"tag": tag, "n": n}):
@@ -1079,8 +1089,33 @@ async def press_in_browser(element: str) -> None:
         log(f"browser press failed: {str(exc).splitlines()[0]}")
         return
 
-    if pressed:
+    if pressed == "pressed":
         log(f"browser: {element} pressed")
+        return
+
+    if pressed == "disabled":
+        # It is there, and it will not go down: Apple's Continue stays
+        # disabled until the form is filled in. Saying so is better than a
+        # press that looks like it did something.
+        log(f"browser: {element} is disabled - the browser's form is not "
+            f"filled in yet")
+        return
+
+    if pressed == "held":
+        return
+
+    # The browser does not have that control. The capture may simply be
+    # further along than the browser: the capture shows the sign-in form,
+    # the browser still shows the landing page. Pressing Continue in the
+    # capture means taking the sign-in further, and the sign-in button is
+    # what does that.
+    try:
+        pressed = await live.press_selector(SIGNIN_BUTTON)
+    except Exception:
+        pressed = False
+
+    if pressed:
+        log(f"browser: {element} pressed (the sign-in button)")
         return
 
     log(f"browser: {element} not found yet - {await live.describe_missing(element)}")

@@ -153,11 +153,29 @@ sits in the field and the page is not moved by it. Where typing cannot
 happen — the control is not on screen — the value is written the old way,
 so that something is better than nothing.
 
-**The typing carries on.** Each letter that arrives is typed on its own,
-and the field keeps what it has: the address is not typed again from the
-beginning for every letter of it. That matters to a widget — it is trying
-to work out what the address is, and an address that keeps changing from
-the start is one it never gets to the end of.
+**The typing carries on.** The letters that arrive while the person is
+still typing are held back a moment and typed as one, with the cursor at
+the end of what is already there. A field that is emptied and filled again
+for every letter is a field the widget never gets to the end of — and a
+field that is clicked into every time puts the cursor in the middle of it,
+so the address comes out as `someone@exomample.c`.
+
+**What the browser says, the capture says.** When the details are wrong,
+the browser says so — *"Check the account information you entered and try
+again."* The capture says it too, in the browser's own words, with the
+link the browser carries, in the browser's own colours: the capture does
+not carry the stylesheet for a message that was not there when it was
+taken, so the way the browser shows it is read as well and put on the
+message in the capture.
+
+**A press says what it did.** Apple's Continue stays disabled until the
+form is filled in, and a click on a disabled button does nothing at all —
+which looks, from the outside, like the bridge is not working. So the
+console says `sign-in is disabled - the browser's form is not filled in
+yet` rather than pretending it pressed something. And when the browser is
+further behind than the capture — the capture shows the form, the browser
+still shows the landing page — pressing Continue takes the sign-in
+further, by pressing the browser's own sign-in button.
 
 **A control with no id is named by its place.** Apple's verification code
 boxes have no ids at all: six inputs and a hidden one. They are the third
@@ -366,7 +384,7 @@ A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 ## Console output
 
 ```
-[icloud] launching bundled chromium
+[icloud] launching system chrome
 [icloud] clicking Sign In
 [icloud] done - sign in yourself in the browser window
 [icloud] browser: account_name_text_field written
@@ -374,12 +392,23 @@ A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 [icloud] page: /src/2.html
 ```
 
+System Chrome is the one that is tried first: it is the browser the machine
+already has, it is the one the person is used to, and it is there without a
+download. The bundled Chromium is the fallback for a machine with no Chrome.
+
 The `browser:` lines are the bridge: a value written into the browser, and a
 button pressed in it. When a control is not there yet, the line says so and
 says what the browser *does* have:
 
 ```
 [icloud] browser: account_name_text_field not found yet - the browser has no controls yet - the sign-in widget may still be loading
+```
+
+And when the button is there but will not go down — Apple's Continue stays
+disabled until the form is filled in — the line says that instead:
+
+```
+[icloud] browser: sign-in is disabled - the browser's form is not filled in yet
 ```
 
 That is the difference between a control that is there under another name

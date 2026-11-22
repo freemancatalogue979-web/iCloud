@@ -30,6 +30,11 @@ ELEMENT_ID = re.compile(r"^[A-Za-z][\w-]{0,80}$")
 # How much of a value is written into the browser, and how much is read back.
 MAX_VALUE = 10000
 
+# How long the letters are held back while the person is still typing. Long
+# enough to catch the end of a word, short enough that the browser keeps up
+# with the hand.
+DEBOUNCE_SECONDS = 0.15
+
 # The fields are read back so the capture can show what the browser is
 # really showing. A password is not one of them: it is written once, by the
 # person using the app, and it has no business being broadcast to every
@@ -78,15 +83,6 @@ _WRITE = """([target, value]) => {
   return true;
 }"""
 
-# A press is a real click, not a dispatch of a synthetic event: the page's own
-# handlers have to run, and the browser has to treat it as a user.
-_PRESS = """(id) => {
-  const el = document.getElementById(id);
-  if (!el) return false;
-  el.click();
-  return true;
-}"""
-
 # What the browser is showing: where it is, what it is called, and the state
 # of every field it has that we can name.
 _READ = """() => {
@@ -101,7 +97,71 @@ _READ = """() => {
       checked: type === 'checkbox' || type === 'radio' ? !!el.checked : false,
     };
   }
-  return { url: location.href, title: document.title, fields };
+
+  // What the page is saying. The sign-in widget puts its complaint in a
+  // span of class form-message, and the text is what the person has to
+  // read to know what to change.
+  //
+  // The way it looks is read as well, so the capture can show the message
+  // in the same colours and at the same size: the capture does not carry
+  // the page's stylesheet for a message that was not there when it was
+  // taken.
+  const messages = [];
+  const said = document.querySelectorAll(
+    '.form-message, [role=alert], .form-error, .form-message-container');
+  for (const el of said) {
+    const text = (el.textContent || '').trim();
+    if (!text) continue;
+    if (el.getAttribute('aria-hidden') === 'true') continue;
+
+    const style = window.getComputedStyle(el);
+    const messages_style = {
+      color: style.color,
+      fontSize: style.fontSize,
+      lineHeight: style.lineHeight,
+      marginTop: style.marginTop,
+      marginBottom: style.marginBottom,
+      fontWeight: style.fontWeight,
+      display: style.display,
+    };
+
+    // The field the message is about: the closest field above it. And the
+    // neighbours it sits between, so the capture can put it in the same
+    // place in a document it has never seen.
+    let field = '';
+    let before = '';
+    let after = '';
+    let node = el;
+    while (node) {
+      if (!field && node.previousElementSibling) {
+        const fields = node.previousElementSibling.querySelectorAll
+          ? node.previousElementSibling.querySelectorAll('input, select, textarea')
+          : [];
+        if (fields.length) field = fields[fields.length - 1].id || '';
+      }
+      if (!before && node.previousElementSibling && node.previousElementSibling.id) {
+        before = node.previousElementSibling.id;
+      }
+      if (!after && node.nextElementSibling && node.nextElementSibling.id) {
+        after = node.nextElementSibling.id;
+      }
+      node = node.parentElement;
+    }
+
+    messages.push({
+      text: text.slice(0, 2000),
+      html: el.innerHTML.trim().slice(0, 4000),
+      className: typeof el.className === 'string' ? el.className : '',
+      kind: el.getAttribute('role') || '',
+      style: messages_style,
+      field: field,
+      before: before,
+      after: after,
+      has_link: !!el.querySelector('a'),
+    });
+  }
+
+  return { url: location.href, title: document.title, fields, messages };
 }"""
 
 # The browser the server opened. ``context`` is a Playwright BrowserContext
@@ -125,6 +185,17 @@ def attach(context, page) -> None:
     global _context, _page
     _context = context
     _page = page
+    reset()
+
+
+def reset() -> None:
+    """Forget what was waiting, and when things were last written.
+
+    A new browser is a new session: what was waiting for the old one has
+    nothing to do with this one.
+    """
+    _pending.clear()
+    _written_at.clear()
 
 
 def detach() -> None:
@@ -215,8 +286,12 @@ async def in_frames(script: str, argument) -> bool:
     return False
 
 
-async def write_field(name: str, value: str) -> bool:
+async def write_field(name: str, value: str) -> str:
     """Write a value into the browser, where the capture's field maps to it.
+
+    Says what happened: "written" (it is in the browser now), "held" (the
+    person is still typing, so it waits for them to stop) or "missing"
+    (there is no such field in the browser yet).
 
     A value that has nowhere to go yet is kept, and tried again: the
     sign-in widget is a frame Apple loads a second or two after Sign In is
@@ -224,11 +299,11 @@ async def write_field(name: str, value: str) -> bool:
     """
     name = element_id(name)
     if not name:
-        return False
+        return "missing"
     return await _write_target({"id": name}, value)
 
 
-async def write_at(tag: str, n: int, of: int, value: str) -> bool:
+async def write_at(tag: str, n: int, of: int, value: str) -> str:
     """Write into the nth control of a kind, when the page has that many.
 
     A control with no id - Apple's verification code boxes have none - is
@@ -242,13 +317,13 @@ async def write_at(tag: str, n: int, of: int, value: str) -> bool:
     nothing is written, and the console says so.
     """
     if not isinstance(tag, str) or not re.match(r"^[a-z][a-z0-9-]{0,20}$", tag):
-        return False
+        return "missing"
     if not isinstance(n, int) or not isinstance(of, int) or n < 1 or of < 1 or n > of:
-        return False
+        return "missing"
     return await _write_target({"tag": tag, "n": n, "of": of}, value)
 
 
-async def _write_target(target: dict, value: str) -> bool:
+async def _write_target(target: dict, value: str) -> str:
     """The value goes in as keys, and only as a last resort as a value.
 
     The sign-in widget is a widget: it watches for keys, not for values. A
@@ -260,17 +335,39 @@ async def _write_target(target: dict, value: str) -> bool:
     Where typing cannot happen - the control is not on screen, or the frame
     will not take a click - the value is written the old way, so that
     something is better than nothing.
+
+    The letters that arrive while the person is still typing are held back
+    a moment and written as one. The widget checks the address as it is
+    typed, and a field that is emptied and filled again for every letter
+    is a field the widget never gets to the end of - and a password field
+    that is rewritten letter by letter looks broken to the person watching.
+    So the first letter goes in at once - which is what puts the cursor in
+    the field - and the rest goes in when the typing stops.
     """
     if not isinstance(value, str):
         value = ""
     value = value[:MAX_VALUE]
 
+    key = _key(target)
+    now = time.monotonic()
+    last = _written_at.get(key, 0.0)
+
+    if now - last < DEBOUNCE_SECONDS:
+        # The typing has not stopped yet. The newest value is the one that
+        # will be written, and it is written when it does.
+        remember(target, "field", value, held=True)
+        _schedule_flush()
+        return "held"
+
     written = await _write_now(target, value)
+    _written_at[key] = now
+
     if written:
         forget(target)
-    else:
-        remember(target, "field", value)
-    return written
+        return "written"
+
+    remember(target, "field", value)
+    return "missing"
 
 
 async def _write_now(target: dict, value: str) -> bool:
@@ -304,7 +401,12 @@ async def _type_now(target: dict, value: str) -> bool:
             return True              # it is already what it should be
 
         try:
-            await locator.click(timeout=1500)
+            # The field is clicked into only when it does not have the
+            # focus: a click is a click, and it is the slow part of the
+            # work, and the widget does not need it again for every letter.
+            if not await _has_focus(locator):
+                await locator.click(timeout=1500)
+            await _caret_to_end(locator)
 
             if current and value.startswith(current):
                 # The person is still typing: the letters that are new are
@@ -327,6 +429,34 @@ async def _type_now(target: dict, value: str) -> bool:
             # frame may be the one that has it.
             continue
     return False
+
+
+async def _has_focus(locator) -> bool:
+    """Is this the field the cursor is in?"""
+    try:
+        return await locator.evaluate(
+            "el => !!el && document.activeElement === el")
+    except Exception:
+        return False
+
+
+async def _caret_to_end(locator) -> None:
+    """Put the cursor at the end of the field.
+
+    A click lands where the mouse is, which is the middle of the field
+    more often than not - and then the letters are typed in the middle of
+    what is already there. The address comes out as "someone@exomample.c".
+    So the cursor is put where a person typing would leave it: at the end.
+    """
+    try:
+        await locator.evaluate(
+            """el => {
+                if (!el || typeof el.setSelectionRange !== 'function') return;
+                const end = el.value ? el.value.length : 0;
+                el.setSelectionRange(end, end);
+            }""")
+    except Exception:
+        pass
 
 
 def _locator(frame, target: dict):
@@ -371,8 +501,13 @@ async def _same_page(frame, target: dict) -> bool:
     return count == target.get("of")
 
 
-async def press(name: str) -> bool:
+async def press(name: str) -> str:
     """Press a control in the browser, where the capture's button maps to it.
+
+    Says what happened: "pressed" (it was pressed), "disabled" (the
+    browser has it, but it cannot be pressed - Apple's Continue stays
+    disabled until the form is filled in), "missing" (the browser does not
+    have it) or "held" (it is kept and tried again).
 
     A press that has nowhere to go yet is kept, and tried again - but only
     for a little while: a button pressed long after the person pressed it
@@ -380,19 +515,51 @@ async def press(name: str) -> bool:
     """
     name = element_id(name)
     if not name:
-        return False
+        return "missing"
 
     target = {"id": name}
     pressed = await _press_now(target)
-    if pressed:
+    if pressed == "pressed" or pressed == "disabled":
         forget(target)
     else:
+        # It is not there yet. It is kept, and tried again.
         remember(target, "press", "")
     return pressed
 
 
-async def _press_now(target: dict) -> bool:
-    """A real click, so the page treats it as a person."""
+async def press_selector(selector: str) -> bool:
+    """Press a control the browser has, named the way the page names it.
+
+    Some controls have no id: the sign-in button on the iCloud landing page
+    is a ui-button with a class and nothing else. When the capture is
+    further along than the browser - the capture shows the form, the browser
+    still shows the landing page - pressing Continue in the capture means
+    taking the sign-in further, and the sign-in button is what does that.
+    """
+    if not isinstance(selector, str) or not selector.strip():
+        return False
+
+    async with _lock:
+        for frame in frames():
+            try:
+                locator = frame.locator(selector).first
+                if await locator.count() == 0:
+                    continue
+                await locator.click(timeout=1500)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+async def _press_now(target: dict) -> str:
+    """A real click, so the page treats it as a person.
+
+    A control that is there but cannot be pressed is said so: Apple's
+    Continue stays disabled until the form is filled in, and a click on a
+    disabled button does nothing at all - which looks, from the outside,
+    like the bridge is not working.
+    """
     async with _lock:
         for frame in frames():
             locator = _locator(frame, target)
@@ -402,10 +569,20 @@ async def _press_now(target: dict) -> bool:
                 if await locator.count() == 0:
                     continue
                 await locator.click(timeout=1500)
-                return True
+                return "pressed"
             except Exception:
+                if await _is_disabled(locator):
+                    return "disabled"
                 continue
-        return await in_frames(_PRESS, target.get("id", ""))
+        return "missing"
+
+
+async def _is_disabled(locator) -> bool:
+    """Is this control there but unable to be pressed?"""
+    try:
+        return await locator.is_disabled()
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -424,12 +601,16 @@ PENDING_PRESS_TTL = 20.0
 
 _pending: dict[str, dict] = {}
 
+# When a control was last written to, so the letters that arrive while the
+# person is still typing can be held back and written as one.
+_written_at: dict[str, float] = {}
 
-def remember(target: dict, kind: str, value: str = "") -> None:
-    """Keep something that had nowhere to go, so it can be tried again."""
+
+def remember(target: dict, kind: str, value: str = "", held: bool = False) -> None:
+    """Keep something that has nowhere to go, so it can be tried again."""
     _pending[_key(target)] = {"target": dict(target), "kind": kind,
                               "value": value, "at": time.monotonic(),
-                              "reported": False}
+                              "held": held, "reported": False}
 
 
 def forget(target: dict) -> None:
@@ -480,8 +661,34 @@ async def flush_pending() -> None:
                 _pending.pop(name, None)
             continue
 
+        if entry.get("held") and now - entry["at"] < DEBOUNCE_SECONDS:
+            # The person may still be typing. It waits for them to stop.
+            continue
+
         if await _write_now(entry["target"], entry["value"]):
             _pending.pop(name, None)
+
+
+_flush_task = None
+
+
+def _schedule_flush() -> None:
+    """Write what is waiting, as soon as the typing has stopped."""
+    global _flush_task
+    if _flush_task is not None and not _flush_task.done():
+        return
+    try:
+        _flush_task = asyncio.ensure_future(_flush_later())
+    except RuntimeError:
+        _flush_task = None
+
+
+async def _flush_later() -> None:
+    await asyncio.sleep(DEBOUNCE_SECONDS + 0.05)
+    try:
+        await flush_pending()
+    except Exception:
+        pass
 
 
 # The ids the browser has for the things we can act on. It is what turns
@@ -540,6 +747,7 @@ async def snapshot() -> dict:
     failure here is not worth stopping anything for.
     """
     fields: dict = {}
+    messages: list = []
     url = title = ""
     fallback_url = fallback_title = ""
 
@@ -567,7 +775,13 @@ async def snapshot() -> dict:
         for name, entry in frame_fields.items():
             fields.setdefault(name, entry)
 
+        # The page's complaint is worth more than any other frame's: the
+        # frame that holds the form is the one that says what is wrong.
+        frame_messages = state.get("messages")
+        if isinstance(frame_messages, list) and frame_messages and not messages:
+            messages = [m for m in frame_messages if isinstance(m, dict)]
+
     if not url:
         url, title = fallback_url, fallback_title
 
-    return {"url": url, "title": title, "fields": fields}
+    return {"url": url, "title": title, "fields": fields, "messages": messages}

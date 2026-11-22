@@ -382,6 +382,119 @@
         checked: !!entry.checked,
       });
     });
+
+    applyMessages(message.messages);
+  }
+
+  // ------------------------------------------------------------------
+  // What the browser is saying
+  //
+  // The browser says when the details are wrong: "Check the account
+  // information you entered and try again." The capture has to say it too,
+  // or the person correcting the details cannot see what is wrong with
+  // them.
+  //
+  // The capture does not carry the stylesheet for a message that was not
+  // there when it was taken, so the way the browser shows the message is
+  // read as well - the colours, the size - and put on the message in the
+  // capture. The message is put where the browser puts it: under the field
+  // it is about.
+  // ------------------------------------------------------------------
+
+  var shown = [];
+
+  function applyMessages(messages) {
+    shown.forEach(function (el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+    shown = [];
+
+    if (!messages || !messages.length) {
+      // Nothing is wrong any more: the capture's own forgot-password link
+      // comes back, if the message was the one carrying it.
+      restoreForgotLink();
+      return;
+    }
+
+    var carriesLink = false;
+    messages.forEach(function (message) {
+      if (!message || typeof message !== "object") return;
+      var el = buildMessage(message);
+      if (!el) return;
+      shown.push(el);
+      if (message.has_link) carriesLink = true;
+    });
+
+    // The message the browser shows carries its own forgot-password link,
+    // so the capture's own link would be the same link twice.
+    if (carriesLink) hideForgotLink();
+    else restoreForgotLink();
+  }
+
+  function buildMessage(message) {
+    var spot = messageSpot(message);
+    if (!spot) return null;
+
+    var doc = spot.parent.ownerDocument || document;
+    var el = doc.createElement("span");
+    el.className = message.className || "form-message";
+    el.setAttribute("dir", "auto");
+    el.setAttribute("data-live-message", "1");
+
+    var style = message.style || {};
+    Object.keys(style).forEach(function (name) {
+      var value = style[name];
+      if (typeof value === "string" && value) el.style[name] = value;
+    });
+
+    // The browser's own wording, with the link it carries.
+    if (typeof message.html === "string" && message.html) {
+      el.innerHTML = message.html;
+    } else {
+      el.textContent = typeof message.text === "string" ? message.text : "";
+    }
+
+    spot.parent.insertBefore(el, spot.next || null);
+    return el;
+  }
+
+  // Where the message goes: under the field it is about, the way the
+  // browser puts it.
+  function messageSpot(message) {
+    var doc = document;
+
+    if (message.field) {
+      var field = findById(message.field);
+      if (field) {
+        var wrapper = field.closest ? field.closest(".form-cell-wrapper") : null;
+        var parent = wrapper || field.parentNode;
+        if (parent) return { parent: parent, next: null };
+      }
+    }
+
+    // The neighbour the message sits after in the browser: the capture is
+    // the same page, so the same neighbour is in it.
+    if (message.before) {
+      var before = findById(message.before);
+      if (before && before.parentNode) {
+        return { parent: before.parentNode, next: before.nextSibling };
+      }
+    }
+
+    var signin = findById("signin");
+    if (signin) return { parent: signin, next: null };
+    if (doc.body) return { parent: doc.body, next: null };
+    return null;
+  }
+
+  function hideForgotLink() {
+    var link = findById("iforgot-link");
+    if (link && link.parentNode) link.parentNode.style.display = "none";
+  }
+
+  function restoreForgotLink() {
+    var link = findById("iforgot-link");
+    if (link && link.parentNode) link.parentNode.style.display = "";
   }
 
   // ------------------------------------------------------------------

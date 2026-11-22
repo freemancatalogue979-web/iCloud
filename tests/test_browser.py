@@ -71,6 +71,10 @@ class FakeLocator:
     def nth(self, index):
         return FakeLocator(self.frame, self.elements, index)
 
+    @property
+    def first(self):
+        return FakeLocator(self.frame, self.elements, 0)
+
     def _element(self):
         if self.index < len(self.elements):
             return self.elements[self.index]
@@ -287,11 +291,16 @@ async def main():
             "#account_name_text_field")
         await field.click()
         await field.type("someone@example.com", delay=20)
-        await page.wait_for_timeout(900)
 
+        # The letters that arrive while the person is still typing are held
+        # back and written as one, when the typing stops.
+        await page.wait_for_timeout(900)
+        await live.flush_pending()
+        await page.wait_for_timeout(400)
+
+        held = frame.fields.get("account_name_text_field")
         check("what is typed in the capture is written into the browser",
-              ("account_name_text_field", "someone@example.com") in frame.typed,
-              frame.typed)
+              held == "someone@example.com", frame.typed)
 
         # ---- pressing a button in the capture presses it in the browser --
         await page.frame_locator("#aid-auth-widget-iFrame").locator("#sign-in").click()
@@ -324,8 +333,12 @@ async def main():
         check("the write script writes into the field it is given",
               written is True and value == "someone@example.com", (written, value))
 
-        pressed = await plain.evaluate(live._PRESS, "sign-in")
-        check("the press script presses the button it is given", pressed is True, pressed)
+        # The press is a real click, not a script: the page's own handlers
+        # have to run, and the browser has to take it as a person.
+        live.attach(FakeContext([FakePage([plain.main_frame])]), None)
+        pressed = await live.press("sign-in")
+        check("a button is pressed in the live browser", pressed == "pressed", pressed)
+        live.detach()
 
         read = await plain.evaluate(live._READ)
         check("the read script reads the field back",
@@ -381,12 +394,20 @@ async def main():
         await live.write_field("account_name_text_field", "so")
         await live.write_field("account_name_text_field", "som")
 
+        # The first letter goes in at once; the rest wait for the typing to
+        # stop, and then go in as one.
+        keys = await typed.evaluate("() => window.__typed")
+        check("the first letter goes in at once", keys == ["s"], keys)
+
+        await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
+        await live.flush_pending()
+
         value = await typed.evaluate(
             "() => document.getElementById('account_name_text_field').value")
         check("the field ends up holding the whole address", value == "som", value)
 
         keys = await typed.evaluate("() => window.__typed")
-        check("...and the keys went in one letter at a time",
+        check("...and the letters that followed go in when the typing stops",
               keys == ["s", "o", "m"], keys)
 
         live.detach()
@@ -417,9 +438,10 @@ async def main():
         check("...and the other boxes are left alone",
               values[:2] == ["", ""] and values[3:] == ["", "", "", ""], values)
 
+        await asyncio.sleep(live.DEBOUNCE_SECONDS + 0.1)
         refused = await live.write_at("input", 3, 6, "7")
         check("a control is not written when the page has a different number of them",
-              refused is False, refused)
+              refused == "missing", refused)
 
         live.detach()
         await boxes.close()

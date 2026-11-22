@@ -204,6 +204,58 @@ class FakeSocket {
     account.value === "live@example.com" && remember.checked === true,
     account.value + " / " + remember.checked);
 
+  // ---- what the browser is saying --------------------------------------
+  // The browser says when the details are wrong. The capture has to say it
+  // too, or the person correcting the details cannot see what is wrong.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {},
+    messages: [
+      {
+        text: "Check the account information you entered and try again.",
+        html: '<span class="form-message" dir="auto">' +
+              "Check the account information you entered and try again." +
+              '<a href="https://iforgot.apple.com/password/verify/appleid" ' +
+              'target="_blank">Forgot password?</a></span>',
+        className: "form-message",
+        style: { color: "rgb(215, 0, 21)", fontSize: "12px" },
+        field: "account",
+        before: "",
+        after: "",
+        has_link: true,
+      },
+    ],
+  });
+  await sleep(50);
+  const said = doc.querySelector("[data-live-message]");
+  check("what the browser says is shown in the capture", !!said,
+    doc.body.innerHTML.slice(0, 200));
+  check("...in the browser's own words",
+    said && said.textContent.indexOf("Check the account information") !== -1,
+    said && said.textContent);
+  check("...with the link the browser carries",
+    said && !!said.querySelector("a[href*='iforgot.apple.com']"),
+    said && said.innerHTML);
+  check("...and in the browser's own colours",
+    said && said.style.color === "rgb(215, 0, 21)" &&
+      said.style.fontSize === "12px",
+    said && said.getAttribute("style"));
+
+  // When the browser stops saying it, the capture stops saying it too.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {},
+    messages: [],
+  });
+  await sleep(50);
+  check("...and it goes away when the browser stops saying it",
+    !doc.querySelector("[data-live-message]"),
+    doc.body.innerHTML.slice(0, 200));
+
   // An element with no id still has a name the server can use.
   const bare = doc.querySelector(".bare");
   const key = win.__icloudSync.keyFor(bare);
