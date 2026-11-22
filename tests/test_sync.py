@@ -106,65 +106,40 @@ async def main():
         "<script>document.body.innerHTML = '';</script>"
         '<p>hello</p><form><input id="account"></form></body></html>'
     )
-    served = server.prepare_page(page)
+    served = server.with_engine(page)
 
     check("the sync engine is injected into the head",
           server.SYNC_TAG in served and
           served.index(server.SYNC_TAG) < served.index("</head>"), served[:300])
-    check("the standard web-app meta is added",
-          'name="mobile-web-app-capable" content="yes"' in served, served[:300])
-    check("the standard meta comes before the deprecated Apple one",
-          served.index("mobile-web-app-capable") <
-          served.index("apple-mobile-web-app-capable"), served[:300])
-    check("the apple-prefixed meta is left alone",
-          'name="apple-mobile-web-app-capable"' in served)
-    check("the capture's own scripts are kept",
+    check("the sync tag is the only difference",
+          served.replace(server.SYNC_TAG, "") == page, served[:300])
+    check("the capture's own scripts are untouched",
           "window.__ran" in served and "bundle.js" in served and
           "document.body.innerHTML" in served, served)
-    check("the capture's policy is extended, not removed",
-          "content-security-policy" in served.lower() and
-          "default-src 'none'" in served and
-          "script-src 'self'" in served and
-          "connect-src 'self'" in served, served)
+    check("the capture's policy is untouched",
+          'content="default-src \'none\'"' in served, served)
+    check("no meta is added",
+          'name="mobile-web-app-capable"' not in served, served)
     check("the captured markup survives untouched",
           '<p>hello</p>' in served and 'id="account"' in served)
-    check("other metas are left alone", 'name="viewport"' in served)
     check("preparing a page twice changes nothing",
-          server.prepare_page(served) == served)
-    check("a standard meta already there is not duplicated",
-          server.prepare_page(
-              "<html><head><meta name='mobile-web-app-capable'></head></html>"
-          ).count("mobile-web-app-capable") == 1)
-    check("a mention of the meta outside a tag is not mistaken for the tag",
-          "<p>mobile-web-app-capable</p>" in server.prepare_page(
-              "<html><head></head><body><p>mobile-web-app-capable</p></body></html>"))
+          server.with_engine(served) == served)
 
-    stripped = server.prepare_page(page, strip_scripts=True)
-    check("scripts can be stripped for a page that needs it",
-          "window.__ran" not in stripped and "bundle.js" not in stripped and
-          "document.body.innerHTML" not in stripped and
-          '"step":"account"' not in stripped, stripped)
-    check("stripping scripts leaves the engine and the markup",
-          server.SYNC_TAG in stripped and
-          stripped.count("<script") == 1 and
-          '<p>hello</p>' in stripped, stripped)
+    upper = server.with_engine("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
+    check("a capture with an upper-case head still gets it",
+          server.SYNC_TAG in upper and
+          upper.replace(server.SYNC_TAG, "") == "<HTML><HEAD></HEAD><BODY></BODY></HTML>",
+          upper)
 
-    locked = server.prepare_page(
-        '<html><head><meta http-equiv="Content-Security-Policy" '
-        'content="script-src \'none\'"></head><body>x</body></html>'
-    )
-    check("a policy that pins scripts is left alone, and the engine with it",
-          "script-src 'none'" in locked and "content-security-policy" in locked.lower()
-          and server.SYNC_TAG not in locked, locked)
+    headless = server.with_engine("<html><body>x</body></html>")
+    check("a capture with no head still gets it",
+          server.SYNC_TAG in headless and
+          headless.replace(server.SYNC_TAG, "") == "<html><body>x</body></html>",
+          headless)
 
-    upper = server.prepare_page("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
-    check("a capture with an upper-case head still gets both",
-          server.SYNC_TAG in upper and server.WEB_APP_META in upper, upper)
-
-    headless = server.prepare_page("<html><body>x</body></html>")
-    check("a capture with no head still gets both",
-          server.SYNC_TAG in headless and server.WEB_APP_META in headless and
-          headless.index(server.SYNC_TAG) > headless.index("<body>"), headless)
+    bare = server.with_engine("no html wrapper at all")
+    check("a capture with no head or body still gets it",
+          bare == server.SYNC_TAG + "no html wrapper at all", bare)
 
     # ---- only captured pages may be navigated to -------------------------
     check("a captured page is a valid destination",
@@ -211,41 +186,14 @@ async def main():
           "/sync.js" in body and "Sign in to iCloud" in body and 'id="account"' in body)
     check("the captured page is not cached", response.headers.get("cache-control") == "no-store")
 
-    check("a served capture is served as captured, with the engine",
-          "window.__ran" in body and "/sync.js" in body, body[:300])
-    check("a served capture keeps its policy, extended for the engine",
-          "content-security-policy" in body.lower() and
-          "default-src 'none'" in body and "script-src 'self'" in body, body[:300])
-    check("a served capture carries the standard web-app meta",
-          'name="mobile-web-app-capable"' in body)
-    check("the response says the scripts were kept and the engine is on",
-          response.headers.get("x-capture-scripts") == "kept" and
-          response.headers.get("x-capture-sync") == "on",
-          (response.headers.get("x-capture-scripts"),
-           response.headers.get("x-capture-sync")))
-
-    static = await server.captured("1.html", static=True)
-    static_body = static.body.decode()
-    check("?static=1 strips the capture's own scripts",
-          "window.__ran" not in static_body and "/sync.js" in static_body and
-          static.headers.get("x-capture-scripts") == "stripped",
-          static_body[:300])
-
-    check("a page without a marker keeps its scripts",
-          "window.__two" in (await server.captured("2.html")).body.decode())
-    (root / "2.html.strip-scripts").write_text("", encoding="utf-8")
-    marked = await server.captured("2.html")
-    check("a .strip-scripts marker strips them for that page",
-          "window.__two" not in marked.body.decode() and
-          marked.headers.get("x-capture-scripts") == "stripped",
-          marked.headers.get("x-capture-scripts"))
-
-    raw = await server.captured("1.html", raw=True)
-    raw_body = raw.body.decode()
-    check("?raw=1 serves the file as captured",
-          "window.__ran" in raw_body and
-          "content-security-policy" in raw_body.lower() and
-          "/sync.js" not in raw_body, raw_body[:300])
+    source = (root / "1.html").read_text(encoding="utf-8")
+    check("the served page is the file, byte for byte, with the engine",
+          body == source.replace("</head>", server.SYNC_TAG + "</head>", 1),
+          body[:300])
+    check("nothing else was rewritten",
+          "window.__ran" in body and
+          'content="default-src \'none\'"' in body and
+          'name="mobile-web-app-capable"' not in body, body[:300])
 
     asset = await server.captured("site.css")
     check("an asset is served with its type",

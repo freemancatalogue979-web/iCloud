@@ -83,10 +83,8 @@ hold the page hostage either: on `error` the splash goes to the capture anyway,
 and there is a 30 s cap in case the launch hangs. Nothing is ever shown about
 it — the static capture is the point.
 
-The one thing that does change on the way out is the markup: the capture keeps
-its own `<meta name="apple-mobile-web-app-capable">`, and the standard
-`<meta name="mobile-web-app-capable" content="yes">` is added if it is missing,
-because Chrome warns about a page that has only the deprecated Apple name.
+Nothing else changes on the way out: the capture is served exactly as it was
+captured, plus the sync script (see below).
 
 ## Sign in still happens, in the real browser
 
@@ -152,9 +150,17 @@ written back into `src/` — those files are the captures.
 
 ## Serving `src/`
 
-- **HTML gets `/sync.js` injected** into its `<head>` as it is served. The file
-  on disk is untouched. A capture with no head gets the tag after `<body>`
-  instead, and a page that already has it is left alone.
+One URL, one rule: **the file, byte for byte, plus the sync script.**
+
+```html
+<script src="/sync.js"></script>
+```
+
+That tag is the only thing added — before `</head>`, or after `<body>` when the
+capture has no head, or at the top when it has neither. Nothing is removed, no
+meta is rewritten, no policy is touched, and the file on disk is never written
+to.
+
 - **Everything else is served as bytes**, with a content type from the file
   name. Keep a capture's stylesheets, scripts, images and fonts next to it.
 - **Nothing outside `src/` is reachable.** A path that resolves elsewhere is
@@ -162,65 +168,15 @@ written back into `src/` — those files are the captures.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
   empty `src/` is not a blank page.
-- **The capture is served as it was captured.** Its own scripts are kept —
-  the page that renders correctly is the one to trust. A few captures do
-  damage themselves when their JavaScript runs against a copy (Apple's
-  sign-in app can replace the form it was captured with), and for those the
-  scripts can be taken out:
-
-  | | |
-  |---|---|
-  | `touch src/1.html.strip-scripts` | that page only, permanent (marker file) |
-  | `ICLOUD_STRIP_SCRIPTS=1 python server.py` | every page |
-  | `/src/1.html?static=1` | one request, for trying it out |
-
-  The `X-Capture-Scripts` response header says `kept` or `stripped`.
-- **The capture's Content-Security-Policy is extended, not removed.** The
-  policy was written for the site's origin, and on this one it blocks
-  `/sync.js`, the socket, and Chrome's request to
-  `/.well-known/appspecific/com.chrome.devtools.json` — the
-  `default-src 'none'` violation in the console. So
-  `script-src 'self'; connect-src 'self' ws: wss:` is appended to the policy
-  and nothing else changes: whatever the capture forbade (its own scripts,
-  remote styles) stays forbidden, which is why the page looks the same as
-  `?raw=1` and not one thing more.
-
-  A policy that already pins scripts with a `script-src` of its own is left
-  alone — appending after it would be ignored and `/sync.js` would only log a
-  violation — and the engine is not added: `X-Capture-Sync: blocked`.
-- **The standard web-app meta is added** when the capture does not have it,
-  as the first thing in the head — before the deprecated Apple meta, so Chrome
-  never sees the Apple name without the standard one and has nothing to warn
-  about.
-- **`?raw=1` serves the file untouched** — no engine, no meta, no policy
-  change. It is the reference: if it renders, the served page must render the
-  same way, and now does.
 
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
 
-### If a capture does not look like the page
-
-There are three versions of the same file to compare, cheapest first:
-
-| URL | What it is |
-|---|---|
-| `/src/1.html?raw=1` | the file, byte for byte — nothing added, nothing removed |
-| `/src/1.html` | the file with the engine, the standard meta and the policy extended |
-| `/src/1.html?static=1` | the same, with the capture's own scripts taken out |
-
-The first two must look the same. If they do not, the difference is the
-engine, the meta, or the policy extension — nothing else is touched. If both
-look wrong, the capture itself is missing something, usually the site's CSS: a
-page that points at stylesheets which were never saved renders as bare markup.
-
-`?static=1` is the third thing to try when a capture damages itself: if the
-page only behaves with scripts gone, leave a `.strip-scripts` marker next to
-it and stop thinking about it.
-
-The console is the other place to look. `X-Capture-Sync: blocked` means the
-capture's policy pins scripts, so the page runs none of the engine and none of
-its own: a capture like that cannot be synced without changing its policy.
+The one thing worth knowing: a capture that carries its own
+`Content-Security-Policy` can refuse `/sync.js` and its socket. That is the
+capture's policy doing its job, and the console says so (`Refused to load…`).
+Nothing the server can do about it without editing the document, which it does
+not do.
 
 ## The socket
 
@@ -292,12 +248,9 @@ Three suites, none of which needs Chromium or a network:
   followed, a submit is cancelled, and a dropped socket reconnects and asks
   for the state again.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
-  injected once and only into HTML, the capture is otherwise served as
-  captured, its CSP is extended rather than replaced (and the engine skipped
-  when the policy pins scripts), scripts can be stripped on request, the
-  standard web-app meta is added before the Apple one, `?raw=1` serves the
-  file untouched, assets keep their type, nothing outside `src/` is readable,
-  a missing capture says so, and the hub really is the
+  injected once and only into HTML, the served page is the file byte for byte
+  with that one tag added, assets keep their type, nothing outside `src/` is
+  readable, a missing capture says so, and the hub really is the
   shared state — a value reaches the other viewer and the next one to join, a
   click is relayed but a click with no position is dropped, a link moves every
   viewer and clears form state, an off-site page is refused, a viewer that

@@ -77,25 +77,9 @@ page = None
 # as it is served. There is no write path for src/ at all.
 SYNC_TAG = '<script src="/sync.js"></script>'
 
-# A capture is served as it was captured. Its own scripts are kept, because
-# the page that renders correctly is the one to trust; a few captures do
-# misbehave when their JavaScript runs against a copy, and for those scripts
-# can be stripped:
-#
-#   touch src/1.html.strip-scripts    this page only
-#   ICLOUD_STRIP_SCRIPTS=1            every page
-#   /src/1.html?static=1              one request, for trying it out
-STRIP_SCRIPTS = os.environ.get("ICLOUD_STRIP_SCRIPTS") == "1"
-SCRIPTS_MARKER = ".strip-scripts"
-
-# Appended to a capture's own Content-Security-Policy: the engine and its
-# socket, and nothing else. Whatever the policy already forbade stays
-# forbidden, so the page renders exactly as it was captured.
-CSP_FOR_ENGINE = "script-src 'self'; connect-src 'self' ws: wss:"
-
-# Apple's standalone meta predates the standard one. Chrome warns about a page
-# that has only the apple-prefixed name, so both are served.
-WEB_APP_META = '<meta name="mobile-web-app-capable" content="yes">'
+# A capture is served exactly as it was captured. The one thing added is this
+# tag, and only this tag. Nothing is removed, no meta is rewritten, no policy
+# is touched.
 
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -289,128 +273,37 @@ async def status():
 # --------------------------------------------------------------------------
 # The captured pages
 #
-# A capture is served as it was captured. The file on disk is never written
-# to, and neither is its document: scripts, styles, metas and markup all go
-# out as they came in. Three things are added or adjusted on the way:
+# src/ is served as it is. The file on disk is never written to, and the
+# document is not rewritten: scripts, styles, metas, policy and markup all go
+# out as they came in. The one addition is /sync.js, so the page reports what
+# is done to it to the server.
 #
-#   * /sync.js, so the page reports what is done to it (see live sync).
-#   * the standard mobile-web-app-capable meta, first in the head and before
-#     the deprecated Apple one, so Chrome has nothing to warn about.
-#   * the capture's own Content-Security-Policy meta, *extended* rather than
-#     removed. "script-src 'self'; connect-src 'self' ws: wss:" is appended,
-#     which is what /sync.js and its socket need - and everything the policy
-#     already forbade (the site's scripts, remote styles, whatever) stays
-#     forbidden, so the page renders exactly as ?raw=1 does.
-#
-#     If the policy pins scripts with a script-src of its own, appending ours
-#     would be ignored and /sync.js would only add a console error. In that
-#     case the engine is left out and the capture is served exactly as it is;
-#     the X-Capture-Sync header says so.
-#
-# Stripping scripts is off by default. It exists for the captures whose own
-# JavaScript damages them when it runs against a copy - Apple's sign-in app
-# can replace the form it was captured with.
-#
-# When it is on, it happens first, before the other edits, because a capture
-# can contain "</head>" or "<meta ...>" inside a <script> string.
+# The tag goes in once: before </head>, or after <body> when the capture has
+# no head, or at the top when it has neither.
 # --------------------------------------------------------------------------
 
-_HEAD_OPEN = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 _HEAD_END = re.compile(r"</head\s*>", re.IGNORECASE)
 _BODY_OPEN = re.compile(r"<body[^>]*>", re.IGNORECASE)
-_SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTALL)
-_CSP_META = re.compile(
-    r"""<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?\s*content-security-policy)[^>]*>""",
-    re.IGNORECASE,
-)
-_CONTENT_ATTR = re.compile(
-    r"""content\s*=\s*(?P<quote>["'])(?P<policy>.*?)(?P=quote)""",
-    re.IGNORECASE | re.DOTALL,
-)
-_SCRIPT_SRC_DIRECTIVE = re.compile(r"(?:^|;)\s*script-src(?:-elem)?\s", re.IGNORECASE)
 _SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.IGNORECASE)
-_WEB_APP_PRESENT = re.compile(
-    r"""<meta\b[^>]*\bname\s*=\s*["']?mobile-web-app-capable[\s"'/>]""", re.IGNORECASE
-)
 _HTML_SUFFIXES = (".html", ".htm")
 
 
-def _keep_sync(match: re.Match) -> str:
-    # prepare_page is idempotent, so the one script that belongs here stays.
-    return match.group(0) if _SYNC_PRESENT.search(match.group(0)) else ""
-
-
-def _relax_csp(page_html: str) -> tuple[str, bool]:
-    """Let the engine through the capture's own policy, and nothing else.
-
-    Returns the page and whether the engine can run under the result.
-    """
-    can_sync = True
-
-    def edit(match: re.Match) -> str:
-        nonlocal can_sync
-        tag = match.group(0)
-        attr = _CONTENT_ATTR.search(tag)
-        if attr is None:
-            return tag
-
-        policy = attr.group("policy").strip().rstrip(";").strip()
-        if _SCRIPT_SRC_DIRECTIVE.search(policy):
-            # The capture's policy already decides scripts. Ours would be
-            # ignored after it, and the engine would only log a violation.
-            can_sync = False
-            return tag
-
-        extended = (policy + "; " if policy else "") + CSP_FOR_ENGINE
-        return tag[: attr.start("policy")] + extended + tag[attr.end("policy"):]
-
-    return _CSP_META.sub(edit, page_html), can_sync
-
-
-def _insert_once(page_html: str, tag: str, present: re.Pattern, after_head: bool = False) -> str:
-    if present.search(page_html):
+def with_engine(page_html: str) -> str:
+    """The capture with the sync engine in it, and nothing else changed."""
+    if _SYNC_PRESENT.search(page_html):
         return page_html
-
-    if after_head:
-        # First thing in the head: a browser that reads the document in order
-        # has seen the standard meta before the deprecated Apple one.
-        match = _HEAD_OPEN.search(page_html)
-        if match:
-            return page_html[: match.end()] + tag + page_html[match.end():]
 
     match = _HEAD_END.search(page_html)
     if match:
-        return page_html[: match.start()] + tag + page_html[match.start():]
+        return page_html[: match.start()] + SYNC_TAG + page_html[match.start():]
 
-    # A capture with no head still needs both. After the body tag is as good a
-    # place as any: the engine defers its DOM work until parsing is done.
+    # A capture with no head still has to run the engine. After the body tag
+    # is as good a place as any: the engine waits for the document to parse.
     match = _BODY_OPEN.search(page_html)
     if match:
-        return page_html[: match.end()] + tag + page_html[match.end():]
+        return page_html[: match.end()] + SYNC_TAG + page_html[match.end():]
 
-    return tag + page_html
-
-
-def strip_scripts_for(target: Path) -> bool:
-    """Whether this page has asked for its scripts to be taken out."""
-    return STRIP_SCRIPTS or target.with_name(target.name + SCRIPTS_MARKER).exists()
-
-
-def prepare_page(page_html: str, strip_scripts: bool = False) -> str:
-    """A captured page, made fit to serve.
-
-    Idempotent, so a file that was prepared once is not prepared again.
-    """
-    if strip_scripts:
-        page_html = _SCRIPT.sub(_keep_sync, page_html)
-
-    page_html, can_sync = _relax_csp(page_html)
-    page_html = _insert_once(page_html, WEB_APP_META, _WEB_APP_PRESENT, after_head=True)
-
-    if can_sync:
-        page_html = _insert_once(page_html, SYNC_TAG, _SYNC_PRESENT)
-
-    return page_html
+    return SYNC_TAG + page_html
 
 
 def captured_files(folder: Path) -> list[Path]:
@@ -492,13 +385,8 @@ def missing_page(path: str, folder: Path) -> str:
 
 @app.get("/src")
 @app.get("/src/{path:path}")
-async def captured(path: str = "", raw: bool = False, static: bool = False):
-    """Serve a captured page (with the sync engine) or one of its assets.
-
-    ``?raw=1`` serves the file untouched - no engine, no meta, no policy
-    change. ``?static=1`` serves this page with its own scripts stripped, for
-    a capture whose JavaScript damages it when it runs against a copy.
-    """
+async def captured(path: str = ""):
+    """Serve a captured page (with the sync engine) or one of its assets."""
     folder = SRC
     path = path.lstrip("/")
 
@@ -522,19 +410,7 @@ async def captured(path: str = "", raw: bool = False, static: bool = False):
 
     if target.suffix.lower() in _HTML_SUFFIXES:
         source = target.read_text(encoding="utf-8", errors="replace")
-        if raw:
-            return HTMLResponse(source, headers=NO_STORE)
-
-        strip = static or strip_scripts_for(target)
-        prepared = prepare_page(source, strip_scripts=strip)
-        return HTMLResponse(
-            prepared,
-            headers={
-                **NO_STORE,
-                "X-Capture-Scripts": "stripped" if strip else "kept",
-                "X-Capture-Sync": "on" if SYNC_TAG in prepared else "blocked",
-            },
-        )
+        return HTMLResponse(with_engine(source), headers=NO_STORE)
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(
