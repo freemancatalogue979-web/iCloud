@@ -22,3 +22,6 @@ storage_state.json
 
 # Node (tests only)
 node_modules/
+
+# Agent session state (not part of the project)
+.arena/
