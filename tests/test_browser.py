@@ -365,6 +365,33 @@ async def main():
         check("the write script says so when there is no such field",
               missing is False, missing)
 
+        # A control with no id, named by its place and its class: Apple's
+        # verification code boxes. The page holds other inputs as well -
+        # the sign-in form is still there - and the right box has to be
+        # found among the ones of its own class.
+        boxes = await browser.new_page()
+        await boxes.set_content(
+            '<input id=account_name_text_field type=text>'
+            '<input id=password_text_field type=password>'
+            '<input class=form-security-code-input type=tel>'
+            '<input class=form-security-code-input type=tel>'
+            '<input type=hidden>')
+        placed = await boxes.evaluate(
+            live._WRITE,
+            [{"tag": "input", "n": 2, "of": 2,
+              "cls": "form-security-code-input"}, "7"])
+        values = await boxes.evaluate(
+            "() => Array.from(document.querySelectorAll('.form-security-code-input'))"
+            ".map((e) => e.value)")
+        check("the write script finds a control by its class",
+              placed is True and values == ["", "7"], (placed, values))
+        wrong = await boxes.evaluate(
+            live._WRITE,
+            [{"tag": "input", "n": 2, "of": 2}, "7"])
+        check("...and says so when the page has more of them than there are",
+              wrong is False, wrong)
+        await boxes.close()
+
         await plain.close()
 
         # ---- the bridge, typing into a real page -------------------------

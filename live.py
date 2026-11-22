@@ -74,7 +74,12 @@ _WRITE = """([target, value]) => {
   const el = target.id
     ? document.getElementById(target.id)
     : (() => {
-        const all = document.getElementsByTagName(target.tag);
+        // A control with a class of its own is counted among the ones with
+        // that class - the same rule the bridge uses - so that a page
+        // holding other inputs of the same kind does not stop the write.
+        const all = Array.from(document.getElementsByTagName(target.tag))
+          .filter((one) => !target.cls ||
+            (one.classList && one.classList.contains(target.cls)));
         if (all.length !== target.of) return null;
         return all[target.n - 1] || null;
       })();

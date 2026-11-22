@@ -1268,6 +1268,10 @@ class Session:
             "browser_open": False,
         }
         self.seen = time.monotonic()
+        # Has the browser shown the sign-in form? It has to have, before the
+        # form being gone can mean anything: a browser that has only just
+        # opened icloud.com has no form on it yet.
+        self.saw_sign_in = False
         # What the app is waiting for: the browser to accept what was typed
         # into the capture, before the capture moves on.
         self.waiting: dict | None = None
@@ -1567,10 +1571,16 @@ async def poll_browser(session: "Session") -> None:
         except Exception:
             return
 
+    # The form is here: the browser is at the sign-in, and this is what it
+    # looks like. Remembered, because the form being gone later is what
+    # means the person is in.
+    if state.get("fields"):
+        session.saw_sign_in = True
+
     # Has the person finished? The code was good, the browser is in iCloud
     # and the sign-in form is gone. Then the app takes them there, and the
     # captures are closed to them: there is nothing left in them to do.
-    if not session.hub.finished and browser_is_signed_in(state):
+    if not session.hub.finished and browser_is_signed_in(state, session.saw_sign_in):
         session.hub.go_to_icloud()
         return
 
@@ -1586,18 +1596,26 @@ async def poll_browser(session: "Session") -> None:
     session.hub.broadcast({"t": "browser", **state})
 
 
-def browser_is_signed_in(state: dict) -> bool:
+def browser_is_signed_in(state: dict, saw_the_form: bool = False) -> bool:
     """Is the browser through the sign-in and into iCloud?
 
     The code was good: the sign-in form is gone and the browser is on iCloud
     itself. That is the end of the process, and the person is sent there.
+
+    The form has to have been there first. A browser that has only just
+    opened icloud.com is on the landing page, with no form on it yet, and
+    that is not being signed in - it is the beginning of the process, and
+    treating it as the end of it sends everybody to iCloud and signs
+    nobody in.
     """
     url = str(state.get("url") or "").lower()
     if "idmsa.apple.com" in url or "icloud.com" not in url:
         return False
     fields = state.get("fields") or {}
-    return not any(name in fields for name in
-                   ("account_name_text_field", "password_text_field"))
+    if any(name in fields for name in
+           ("account_name_text_field", "password_text_field")):
+        return False
+    return saw_the_form
 
 
 def remember_me_is_off(state: dict) -> bool:
@@ -1659,7 +1677,7 @@ async def check_waiting(session: "Session", state: dict) -> None:
     """
     # The browser is in iCloud: the code was good and the process is over.
     # There is no next capture to wait for.
-    if browser_is_signed_in(state):
+    if browser_is_signed_in(state, session.saw_sign_in):
         session.hub.go_to_icloud()
         return
 

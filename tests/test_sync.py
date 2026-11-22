@@ -832,11 +832,19 @@ async def main():
     check("...and a browser on iCloud with the form still there is not either",
           server.browser_is_signed_in({
               "url": "https://www.icloud.com/",
-              "fields": {"password_text_field": {"value": "x"}}}) is False)
+              "fields": {"password_text_field": {"value": "x"}}}, True) is False)
     check("...but a browser in iCloud with the form gone has signed in",
           server.browser_is_signed_in({
               "url": "https://www.icloud.com/",
-              "fields": {"code": {"value": ""}}}) is True)
+              "fields": {"code": {"value": ""}}}, True) is True)
+    check("...and a browser that has only just opened icloud.com has not",
+          server.browser_is_signed_in({
+              "url": "https://www.icloud.com/",
+              "fields": {}}) is False)
+    check("...because the form has to have been there first",
+          server.browser_is_signed_in({
+              "url": "https://www.icloud.com/",
+              "fields": {}}, True) is True)
     check("...and a browser nowhere is not signed in",
           server.browser_is_signed_in({"url": "", "fields": {}}) is False)
 
