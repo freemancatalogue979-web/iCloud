@@ -1,6 +1,12 @@
 /* Exercises the frame-tree protocol end to end: a parent document and a child
  * iframe, both running agent.js, talking over postMessage. This is the piece
- * that cannot be checked by serialising one document. */
+ * that cannot be checked by serialising one document.
+ *
+ * The protocol now works in one direction only. A frame cannot send a
+ * capture of its own - the mirror addresses frames by the id their parent
+ * gave them, and only the top frame's document is the one the server hears.
+ * So a frame that changes says so, and the top frame captures everything.
+ */
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
 
@@ -87,20 +93,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     tagMatch && ids.includes(tagMatch[1]),
     "tag=" + (tagMatch && tagMatch[1]) + " ids=" + JSON.stringify(ids));
 
-  // ---- mutations inside the child frame --------------------------------
+  // ---- a change inside the child frame ---------------------------------
+  // The child cannot send a capture of its own. It says that it changed, and
+  // the top frame captures everything - itself and the frame under it.
+  sent.length = 0;
+  const label = child.document.createElement("p");
+  label.textContent = "changed inside the frame";
+  child.document.body.appendChild(label);
+  await sleep(2500);
+
+  const after = sent.filter((m) => m.kind === "doc");
+  check("a change in the child produces a capture", after.length > 0,
+    "kinds: " + JSON.stringify(sent.map((m) => m.kind)));
+  const afterFrames = after.length ? after[after.length - 1].frames : [];
+  const afterChild = (afterFrames.find((f) => f.windowId === "0.0") || {}).html || "";
+  check("the capture carries the change inside the frame",
+    afterChild.includes("changed inside the frame"), afterChild.slice(0, 300));
+  check("the capture still has the parent's own content",
+    ((afterFrames.find((f) => f.windowId === "0") || {}).html || "").includes("parent"));
+
+  // ---- typing inside the child frame -----------------------------------
+  // Typing is not a DOM change, so it is not a capture. It is the one small
+  // message that stays a message of its own - and it carries the id of the
+  // frame it belongs to, so the mirror puts it in the right place.
   sent.length = 0;
   const input = child.document.getElementById("account_name_text_field");
-  input.setAttribute("value", "someone@icloud.com");
+  input.value = "someone@icloud.com";
+  input.dispatchEvent(new child.Event("input", { bubbles: true }));
   await sleep(300);
 
-  const muts = sent.filter((m) => m.kind === "mut");
-  check("child frame mutation was emitted", muts.length > 0,
+  const values = sent.filter((m) => m.kind === "value");
+  check("typing inside the frame is emitted", values.length > 0,
     "kinds: " + JSON.stringify(sent.map((m) => m.kind)));
-  check("child patch carries the child windowId",
-    muts.every((m) => m.windowId === "0.0"),
-    JSON.stringify(muts.map((m) => m.windowId)));
-  check("child patch carries the value",
-    JSON.stringify(muts).includes("someone@icloud.com"), JSON.stringify(muts));
+  check("the message carries the child windowId",
+    values.every((m) => m.windowId === "0.0"),
+    JSON.stringify(values.map((m) => m.windowId)));
+  check("the message carries the value",
+    JSON.stringify(values).includes("someone@icloud.com"), JSON.stringify(values));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

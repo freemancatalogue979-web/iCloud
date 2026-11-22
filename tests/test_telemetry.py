@@ -70,7 +70,7 @@ async def main():
     server.clients.clear()
 
     # ---- a capture is logged, with enough detail to spot a gap ----------
-    server._stats.update(muts=0, ops=0, resyncs=0, last_beat=0.0)
+    server._stats.update(captures=0, values=0, resyncs=0, last_beat=0.0)
     server.last_doc = None
 
     # Before the page has settled, nothing is captured: the first capture is
@@ -93,25 +93,27 @@ async def main():
           "capture: 2 frame(s) [0:1KB, 0.0:0KB]" in out, out.strip())
     check("last_doc retained so late viewers get the page", server.last_doc is not None)
 
-    # ---- mutations must not flood the console --------------------------
+    # ---- values must not flood the console -----------------------------
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         for _ in range(250):
-            await server.on_emit({}, {"kind": "mut", "windowId": "0",
-                                      "ops": [{"op": "attr"}, {"op": "text"}]})
+            await server.on_emit({}, {"kind": "value", "windowId": "0",
+                                      "id": "n1", "value": "x"})
     out = buf.getvalue()
-    check("250 mutations produce at most one log line", out.count("stream:") <= 1,
+    check("250 values produce at most one log line", out.count("stream:") <= 1,
           repr(out[:200]))
 
     # ---- the throttled heartbeat reports the tally, then resets --------
     server._stats["last_beat"] -= 30
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        await server.on_emit({}, {"kind": "mut", "windowId": "0", "ops": [{"op": "add"}]})
+        await server.on_emit({}, {"kind": "value", "windowId": "0",
+                                  "id": "n1", "value": "x"})
     out = buf.getvalue()
-    check("heartbeat reports updates and ops", "updates" in out and "ops" in out, out.strip())
+    check("heartbeat reports captures and values",
+          "captures" in out and "values" in out, out.strip())
     check("heartbeat reports the resync count", "resyncs" in out, out.strip())
-    check("counters reset after a heartbeat", server._stats["muts"] == 0, str(server._stats))
+    check("counters reset after a heartbeat", server._stats["values"] == 0, str(server._stats))
 
     # ---- resync counting ------------------------------------------------
     saved = server.page

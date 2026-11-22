@@ -1,36 +1,37 @@
 /* Injected into every frame of the real page by the server.
  *
- * Capture is modelled on the SingleFile extension, and the mutation stream on
- * PhantomStream (github.com/fullselfbrowsing/PhantomStream). The two ideas that
- * matter, taken from PhantomStream's src/capture/index.js:
+ * The job of this file is to say what the page looks like, now, and to say
+ * when that stops being true.
  *
- *   - Every node gets a STABLE ID held in a WeakMap, so identity survives no
- *     matter how much the tree around it moves. PhantomStream ships ids in a
- *     `nodeIds` sidecar array paralleling the HTML; here they are written onto
- *     the serialised CLONE as data-rb-nid attributes instead, because a sidecar
- *     has to line up with the order the mirror's parser happens to produce
- *     elements and a <template shadowrootmode> is consumed by Chromium but not
- *     by browsers without declarative shadow DOM - one extra element silently
- *     shifts every later id. The clone is thrown away, so the live page is
- *     still never marked up.
- *   - Mutations are granular ops - add / rm / attr / text / value - addressed by
- *     those ids, not "replace this subtree's innerHTML". Subtree replacement is
- *     both enormous (one class toggle re-sends a whole menu of inline SVGs) and
- *     lossy: it destroys scroll position, focus, transitions, and every nested
- *     frame inside the replaced range.
+ * WHAT IS SENT is a capture of the whole document, not a stream of patches.
+ * That is a deliberate trade, and it was made after the other one failed. A
+ * patch has to be addressed to exactly the right node, and addressing is the
+ * hard part: nodes come and go, ids have to survive a page that keeps moving
+ * them, and a patch that lands on the wrong node corrupts the mirror quietly
+ * instead of failing. A capture cannot be addressed wrongly - it is the page.
  *
- * Index paths were tried first and are wrong for this. Insert one node at the
- * start of a container and every sibling's path shifts, so later patches land
- * on the wrong element.
+ * So a change is a SIGNAL, not a payload. The MutationObserver says "this
+ * page changed"; the agent then waits for the dust to settle and captures the
+ * document again. A capture that comes out identical is not sent at all.
  *
- * Form state is a side channel. Typing into an <input> changes `.value`, which
- * is not a DOM mutation - MutationObserver never fires for it. PhantomStream
- * listens for input/change in the capture phase and emits a `value` op; without
- * that, a sign-in form mirrors as permanently empty.
+ * The one thing that is not a capture is a form control's value. Typing
+ * changes `.value`, which is not a DOM change, so no observer will ever
+ * report it, and it is far too frequent to want a capture for. It travels as
+ * a small message of its own - the side channel - without which a sign-in
+ * form mirrors as permanently empty.
  *
- * From SingleFile: cross-origin frames are captured by postMessaging each frame
- * and letting it serialise itself, and shadow roots are serialised so web
- * components are not hollow. <base> is removed.
+ * EVERY NODE GETS A STABLE ID, held in a WeakMap, so identity survives no
+ * matter how much the tree around it moves. The ids are written onto the
+ * serialised CLONE as data-rb-nid attributes, not shipped in an ordered
+ * sidecar: a sidecar has to line up with the order the mirror's parser
+ * happens to produce elements, and a <template shadowrootmode> is consumed by
+ * Chromium but not by browsers without declarative shadow DOM - one extra
+ * element silently shifts every later id. The clone is thrown away, so the
+ * live page is still never marked up.
+ *
+ * From SingleFile: cross-origin frames are captured by postMessaging each
+ * frame and letting it serialise itself, and shadow roots are serialised so
+ * web components are not hollow. <base> is removed.
  *
  * Resource URLs go through the server's /res proxy rather than being inlined as
  * data: URIs, because this is a live stream rather than a saved file.
@@ -61,11 +62,14 @@
    * delivered to the right place. The root's address is derived from the
    * host's, so both sides can work it out from the ids already in the
    * document without a side channel. */
-  const SHADOW_SUFFIX = "/shadow";
   let nextOwnId = 1;
   const RB = "__rb_ft_";
   const INIT_REQUEST = RB + "initRequest";
   const INIT_RESPONSE = RB + "initResponse";
+  /* A frame that has no windowId of its own yet cannot be addressed by the
+   * mirror, so it cannot ask for a capture itself. It says that it changed
+   * and lets the top frame do the asking. */
+  const REFRESH = RB + "refresh";
 
   const TOP = window === window.top;
 
@@ -94,22 +98,6 @@
    * mirror can still address every element in its document. */
   function ownId() {
     return "rbf" + nextOwnId++;
-  }
-
-  // The address of the shadow root attached to a host element.
-  function shadowIdOf(host) {
-    if (!host) return null;
-    const nid = elementToId.get(host);
-    return nid ? nid + SHADOW_SUFFIX : null;
-  }
-
-  // The address of anything a mutation can be reported against.
-  function addressOf(node) {
-    if (!node) return null;
-    if (node.nodeType === 1) return ensureId(node);
-    // A shadow root. Its host is an element and has an id of its own.
-    if (node.nodeType === 11 && node.host) return shadowIdOf(node.host);
-    return null;
   }
 
   function emit(message) {
@@ -620,60 +608,41 @@
     walkChildren(orig, clone, ctx);
   }
 
-  // frameIds defaults because walk() reads it unconditionally, and this is
-  // exported on __rbInternals where a caller may not have one.
+  /* frameIds defaults because walk() reads it unconditionally, and this is
+   * exported on __rbInternals where a caller may not have one.
+   *
+   * The head and the body are handed over separately as well as inside the
+   * whole document. The mirror is the captured page, so it has to put the
+   * parts back the way a parser would - and a parser is what gives a
+   * declarative shadow root its shadow. Cutting the parts out of the
+   * finished string instead would mean cutting them out with a regular
+   * expression, which is how the shadow content used to go missing. */
   function serialiseDocumentOf(doc, frameIds = new Map()) {
     const clone = doc.documentElement.cloneNode(true);
     cleanClone(clone);
     const ctx = { frameIds, styles: new Map() };
     walk(doc.documentElement, clone, ctx);
     injectFallback(clone, ctx.styles);
-    return { html: "<!DOCTYPE html>" + clone.outerHTML };
-  }
-
-  // One added node, with the sidecar the mirror needs to adopt it.
-  function serialiseAdded(node) {
-    const template = document.createElement("template");
-    template.content.appendChild(node.cloneNode(true));
-    const clone = template.content.firstChild;
-    const ctx = { frameIds: new Map(), styles: new Map() };
-    if (node.nodeType === 1) {
-      if (!cleanClone(clone)) return null;
-      walk(node, clone, ctx);
-    }
-    return { html: template.innerHTML, styles: styleMap(ctx.styles) };
-  }
-
-  // The snapshot for added nodes travels with the op, so the mirror can add
-  // the matching fallback rules to the sheet for whichever root the node
-  // lands in.
-  function styleMap(styles) {
-    const out = {};
-    if (!styles) return out;
-    for (const [nid, css] of styles) if (css) out[nid] = css;
-    return out;
-  }
-
-  /* All of a node's children, with their sidecar. Used when a childList change
-   * involves text nodes: those carry no id, so they cannot be added or removed
-   * individually, and leaving them alone is how "one" + "two" becomes "onetwo".
-   * Scoped to one parent's own children, not the subtree below it. */
-  function serialiseChildren(node) {
-    const template = document.createElement("template");
-    const originals = Array.from(node.childNodes);
-    for (const kid of originals) template.content.appendChild(kid.cloneNode(true));
-    const clones = Array.from(template.content.childNodes);
-    const ctx = { frameIds: new Map(), styles: new Map() };
-    for (let i = 0; i < clones.length; i++) {
-      const orig = originals[i];
-      const cl = clones[i];
-      if (!orig || !cl) continue;
-      if (orig.nodeType === 3) continue; // text is content, keep it
-      if (orig.nodeType !== 1) { cl.remove(); continue; }
-      if (!cleanClone(cl)) { cl.remove(); continue; }
-      walk(orig, cl, ctx);
-    }
-    return { html: template.innerHTML, styles: styleMap(ctx.styles) };
+    const head = clone.querySelector ? clone.querySelector("head") : null;
+    const body = clone.querySelector ? clone.querySelector("body") : null;
+    /* A site's own class on <html> and <body> is how it themes itself, so
+     * the mirror needs them to look the way the page looks. */
+    const attrs = (el, names) => {
+      const out = {};
+      if (!el) return out;
+      for (const name of names) {
+        const value = el.getAttribute(name);
+        if (value) out[name] = value;
+      }
+      return out;
+    };
+    return {
+      html: "<!DOCTYPE html>" + clone.outerHTML,
+      headHtml: head ? head.innerHTML : "",
+      bodyHtml: body ? body.innerHTML : "",
+      htmlAttrs: attrs(clone, ["class", "lang", "dir"]),
+      bodyAttrs: attrs(body, ["class", "style"]),
+    };
   }
 
   // Frame elements found by the last collectFrames(), with their windowIds.
@@ -779,6 +748,12 @@
 
   window.addEventListener("message", (event) => {
     const data = event.data;
+    if (data && data.rb === REFRESH) {
+      /* A frame under us changed. The capture has to include it, and only
+       * the top frame's capture is the one the server hears. */
+      if (TOP) markDirty(null);
+      return;
+    }
     if (!data || data.rb !== INIT_REQUEST) return;
     event.stopPropagation();
     // event.source is null in some environments (sandboxed frames, and jsdom),
@@ -786,137 +761,98 @@
     replyTo(event.source || window.parent, data.windowId);
   });
 
-  // --------------------------------------------------------- mutations
+  // --------------------------------------------------------- changes
   let observer = null;
-  let queued = null;
-  let rafId = null;
   const observedRoots = new Set();
 
   function onMutate(records) {
-    if (!queued) queued = [];
-    for (const record of records) queued.push(record);
-    // Batched to the paint cadence rather than a fixed timer, so a burst of
-    // changes lands in one frame instead of a trickle of them.
-    // Called as a method of window on purpose: lifting requestAnimationFrame
-    // off the object and calling it unbound throws "Illegal invocation" in
-    // Chromium, which would silently stop every update after the first one.
-    if (rafId === null) {
-      rafId = window.requestAnimationFrame
-        ? window.requestAnimationFrame.call(window, flush)
-        : setTimeout(flush, 16);
-    }
-  }
-
-  function flush() {
-    rafId = null;
-    /* A capture is in flight. Its document was read before these changes, so
-     * the changes still have to be delivered - but the document has to reach
-     * the mirror first, or the ops arrive for a document nobody has yet and
-     * are dropped. The batch waits here until the capture is done. */
-    if (capturing) {
-      rafId = window.requestAnimationFrame
-        ? window.requestAnimationFrame.call(window, flush)
-        : setTimeout(flush, 16);
-      return;
-    }
-    const records = queued || [];
-    queued = null;
-    if (records.length === 0) return;
-
-    const ops = [];
-    const seenAttr = new Set();
-    const addedElements = new Set();
-    // Two passes: first find the parents whose children include bare text
-    // nodes, because those have to be resynced as a unit and must not also get
-    // granular add/rm ops for the same change.
-    const textParents = new Set();
+    // The observer is only a signal that the page changed. What is sent is a
+    // fresh capture of the whole page.
+    const added = [];
     for (const record of records) {
       if (record.type !== "childList") continue;
-      for (const n of record.addedNodes) if (n.nodeType !== 1) { textParents.add(record.target); break; }
-      for (const n of record.removedNodes) if (n.nodeType !== 1) { textParents.add(record.target); break; }
+      for (const n of record.addedNodes) if (n.nodeType === 1) added.push(n);
     }
-
-    for (const record of records) {
-      if (record.type === "childList") {
-        const parentId = addressOf(record.target);
-        if (!parentId) continue;
-        if (textParents.has(record.target)) continue;
-        for (const removed of record.removedNodes) {
-          const id = removed.nodeType === 1 ? elementToId.get(removed) : null;
-          if (id) ops.push({ op: "rm", id });
-        }
-        for (const added of record.addedNodes) {
-          if (added.nodeType === 1) addedElements.add(added);
-          const made = serialiseAdded(added);
-          if (!made) continue;
-          // Insertion point: the next element sibling still in the tree. Text
-          // siblings cannot be addressed by id, so this can be off by a text
-          // node - a resync clears that.
-          const next = added.nodeType === 1 ? added.nextElementSibling : null;
-          const op = {
-            op: "add",
-            parent: parentId,
-            html: made.html,
-            before: next ? ensureId(next) : null,
-          };
-          if (made.styles && Object.keys(made.styles).length) op.styles = made.styles;
-          ops.push(op);
-        }
-      } else if (record.type === "attributes") {
-        const id = ensureId(record.target);
-        if (!id) continue;
-        if (record.attributeName === WIN_ID || record.attributeName === NID) continue;
-        const key = id + "|" + record.attributeName;
-        if (seenAttr.has(key)) continue; // last write wins
-        seenAttr.add(key);
-        ops.push({
-          op: "attr",
-          id,
-          name: record.attributeName,
-          value: record.target.getAttribute(record.attributeName),
-        });
-      } else if (record.type === "characterData") {
-        const parent = record.target.parentElement;
-        const id = parent ? ensureId(parent) : null;
-        if (!id) continue;
-        ops.push({
-          op: "text",
-          parent: id,
-          index: Array.prototype.indexOf.call(parent.childNodes, record.target),
-          text: record.target.data,
-        });
-      }
-    }
-
-    // Parents whose children include unaddressable text nodes are rewritten as
-    // a unit, read from the live DOM at flush time so a burst costs one copy.
-    for (const parent of textParents) {
-      const id = addressOf(parent);
-      if (!id) continue;
-      const made = serialiseChildren(parent);
-      const cop = { op: "children", parent: id, html: made.html };
-      if (made.styles && Object.keys(made.styles).length) cop.styles = made.styles;
-      ops.push(cop);
-    }
-
-    scanShadowRoots(addedElements);
-
-    if (ops.length === 0) return;
-    send({ kind: "mut", windowId, ops });
+    markDirty(added);
   }
 
-  /* Typing into a field changes .value, which is not a DOM mutation - no
-   * MutationObserver will ever report it. Without this side channel a sign-in
-   * form mirrors as permanently blank. */
+  /* The mirror is a captured page, not a live DOM being patched.
+   *
+   * A change to the page is answered with a fresh capture of the whole
+   * document, not with a patch. That is the honest trade. A patch has to be
+   * addressed to the right node, and addressing is the hard part: nodes come
+   * and go, ids have to survive a page that keeps moving them, and a patch
+   * that lands on the wrong node quietly corrupts the mirror instead of
+   * failing. A capture cannot be addressed wrongly - it is the page.
+   *
+   * The cost is sending the page again. On a page that is mostly still - a
+   * sign-in form - that is almost nothing, and a capture that comes out
+   * identical is not sent at all.
+   *
+   * Form state stays a side channel. Typing changes .value, which is not a
+   * DOM change, so it never triggers a capture, and it is far too frequent
+   * to want one. */
+  let dirty = false;
+  let captureTimer = null;
+  let pendingAdded = new Set();
+  let lastFingerprint = null;
+
+  // How long to wait after the last change before capturing, and the
+  // shortest gap between two captures.
+  const CAPTURE_QUIET_MS = 250;
+  const CAPTURE_MIN_GAP_MS = 700;
+
+  function markDirty(added) {
+    dirty = true;
+    if (added) for (const el of added) pendingAdded.add(el);
+    if (captureTimer) return;
+    captureTimer = setTimeout(runCapture, CAPTURE_QUIET_MS);
+  }
+
+  async function runCapture() {
+    captureTimer = null;
+    if (!dirty) return;
+    const since = Date.now() - lastDocSent;
+    if (since < CAPTURE_MIN_GAP_MS) {
+      captureTimer = setTimeout(runCapture, CAPTURE_MIN_GAP_MS - since);
+      return;
+    }
+    dirty = false;
+    const added = pendingAdded;
+    pendingAdded = new Set();
+    scanShadowRoots(added);
+    /* A frame cannot send a capture of its own: the mirror addresses frames
+     * by the id its parent gave it, and only the top frame's document is the
+     * one the server listens to. So a frame that changed says so, and the
+     * top frame captures everything - itself and every frame under it. */
+    if (!TOP) {
+      requestRefresh();
+      return;
+    }
+    await sendDocument(false);
+  }
+
+  /* Ask the top frame to capture again. The top frame is the one that can
+   * be heard; this frame can only talk to it. */
+  function requestRefresh() {
+    try {
+      (window.top || window.parent).postMessage({ rb: REFRESH }, "*");
+    } catch (e) {
+      /* no top to talk to */
+    }
+  }
+
   function onValueEvent(event) {
     const el = event.target;
     if (!el || el.nodeType !== 1) return;
     const id = ensureId(el);
     if (!id) return;
     send({
-      kind: "mut",
+      kind: "value",
       windowId,
-      ops: [{ op: "value", id, value: el.value, checked: !!el.checked }],
+      id,
+      value: el.value,
+      checked: !!el.checked,
     });
   }
 
@@ -971,17 +907,25 @@
    * for it. The capture is repeated once the running one finishes. */
   let captureAgain = false;
 
-  async function sendDocument(force) {
-    // Rate-limit re-seeds: without this a chatty page strobes the mirror.
-    const now = Date.now();
-    if (!force && lastDocSent && now - lastDocSent < RESEED_MIN_GAP) return;
+  // A hash of the whole capture. A shorter fingerprint - the length and the
+  // first few dozen characters - does not notice a change in the middle of
+  // the page, and the page would then never be sent again.
+  function hashOf(text) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h.toString(16) + ":" + text.length;
+  }
+
+  async function sendDocument(always) {
     if (capturing) {
       captureAgain = true;
       return;
     }
-    lastDocSent = now;
+    lastDocSent = Date.now();
     capturing = true;
-    queued = null;
     try {
       const frames = await capture();
       /* The size the page was captured at. The mirror lays the capture out at
@@ -989,6 +933,14 @@
        * that was captured - not the same content squeezed into a different
        * width, which puts every click in the wrong place. */
       const viewport = { w: window.innerWidth, h: window.innerHeight };
+      /* A capture that came out the same as the last one is not sent. The
+       * observer can fire for a change that does not show up in the markup,
+       * and sending the page again for nothing would make the mirror flicker
+       * for no reason at all. */
+      const fingerprint = viewport.w + "x" + viewport.h + "|" +
+        frames.map((f) => (f.windowId || "") + ":" + hashOf(f.html || "")).join("|");
+      if (!always && fingerprint === lastFingerprint) return;
+      lastFingerprint = fingerprint;
       // A frame that does not know its windowId yet cannot be addressed by the
       // mirror; its parent asks it again once ids are assigned.
       if (windowId && TOP) emit({ kind: "doc", windowId: "0", frames, viewport });
@@ -1030,8 +982,6 @@
     collectFrames,
     ensureId,
     serialiseDocumentOf,
-    serialiseAdded,
-    serialiseChildren,
     computedStyleText,
     WIN_ID,
     FRAME_SELECTOR,

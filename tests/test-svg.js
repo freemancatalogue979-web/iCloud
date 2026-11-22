@@ -3,7 +3,7 @@
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
 const AGENT = fs.readFileSync("/home/user/iCloud/agent.js", "utf8");
-const VIEW = fs.readFileSync("/home/user/iCloud/view.html", "utf8").split("<script>")[1].split("</script>")[0];
+const MIRROR = fs.readFileSync("/home/user/iCloud/mirror.js", "utf8");
 
 const PAGE = `<!DOCTYPE html><html><body>
 <ui-menu-scroll-container role="menu" style="position: relative;">
@@ -46,13 +46,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     /href="https:\/\/support\.apple\.com\/guide\/icloud\/welcome\/icloud"/.test(html));
   check("target and aria attributes kept", /target="_blank"/.test(html) && /aria-label="iCloud User Guide/.test(html));
 
-  // Round-trip through the real applier: add a second icon and check the SVG
-  // comes back in the SVG namespace rather than as inert HTML elements.
-  const mir = new JSDOM(html, { runScripts: "outside-only", url: "http://localhost:9002/view" });
-  mir.window.WebSocket = function () { this.readyState = 1; this.send = () => {}; };
-  mir.window.eval(VIEW);
-  const ids = new Map();
-  mir.window.adopt(mir.window.document, ids);
+  // Round-trip through the real mirror: show the capture, then check the
+  // SVG comes back in the SVG namespace rather than as inert HTML elements.
+  const mir = new JSDOM(
+    "<!DOCTYPE html><html><head></head><body></body></html>",
+    { runScripts: "outside-only", url: "http://localhost:9002/1.html" });
+  mir.window.fetch = () => Promise.reject(new Error("no server in a unit test"));
+  mir.window.WebSocket = function () { this.close = () => {}; };
+  mir.window.eval(MIRROR);
+  mir.window.seed([{ windowId: "0", html: html }], { w: 800, h: 600 });
 
   const parsedSvg = mir.window.document.querySelector("svg");
   check("svg is in the SVG namespace after the trip",
@@ -63,7 +65,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("path d attribute survived the trip",
     mir.window.document.querySelector("path").getAttribute("d").startsWith("M58.5449"));
 
-  // Now stream an added SVG icon into the mirror.
+  // Now add a second icon to the page. The page changes, so a new capture
+  // is taken, and the mirror shows that capture.
   const label = src.window.document.querySelector(".label");
   const newSvg = src.window.document.createElementNS("http://www.w3.org/2000/svg", "svg");
   newSvg.setAttribute("viewBox", "0 0 10 10");
@@ -71,13 +74,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   circle.setAttribute("r", "4");
   newSvg.appendChild(circle);
   label.appendChild(newSvg);
-  await sleep(250);
+  await sleep(1200);
 
-  const ops = sent.filter((m) => m.kind === "mut").flatMap((m) => m.ops || []);
-  check("added svg emitted an op", ops.length > 0, JSON.stringify(ops).slice(0, 200));
-  const entry = { doc: mir.window.document, ids };
-  const applied = mir.window.applyOps(entry, ops);
-  check("op applied cleanly", applied);
+  const docs = sent.filter((m) => m.kind === "doc");
+  check("the change produced a new capture", docs.length > 0,
+    JSON.stringify(sent.map((m) => m.kind)));
+  if (docs.length) {
+    const capture = docs[docs.length - 1];
+    mir.window.seed(capture.frames, capture.viewport);
+  }
 
   const mirrorCircle = mir.window.document.querySelector(".label circle");
   check("added svg reached the mirror", !!mirrorCircle);
@@ -87,7 +92,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("added svg kept its attributes",
     mirrorCircle && mirrorCircle.getAttribute("r") === "4");
   check("added svg is addressable by id",
-    ops.some((o) => o.op === "add") && ids.size > 0);
+    !!mirrorCircle && mirrorCircle.getAttribute("data-rb-nid") !== null);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -283,10 +283,11 @@ async def run():
                       first == "someone@icloud.com", repr(first))
 
                 # ------------------------------------ the mirror's own click
-                # The last piece: drive the real mirror UI - the /view page,
-                # the real applier, the real nested frame - and click inside
-                # the cross-origin form. The coordinates the mirror sends have
-                # to land on the field in the real browser.
+                # The last piece: drive the real client - the page the user
+                # opens, which loads the captured page as a document of its
+                # own - and click inside the cross-origin form. The
+                # coordinates the mirror sends have to land on the field in
+                # the real browser.
                 seen = []
 
                 async def grab(route):
@@ -302,21 +303,19 @@ async def run():
 
                 viewer = await real_pw.new_page()
                 await viewer.route("**/click", grab)
-                await viewer.goto(base + "/view")
-                viewport = (server.last_doc or {}).get("viewport") or {}
-                await viewer.evaluate(
-                    "(a) => window.seed(a.frames, a.viewport)",
-                    {"frames": frames, "viewport": viewport},
-                )
-                await viewer.wait_for_timeout(1200)
+                # The client page loads the captured page, and the captured
+                # page loads the cross-origin form inside it.
+                await viewer.goto(base + "/")
+                await viewer.wait_for_timeout(2500)
 
-                # The mirror, and the frame inside the mirror.
                 mirror_frame = next(
                     (f for f in viewer.frames if f.parent_frame == viewer.main_frame), None)
+                check("the client loaded the captured page as a document",
+                      mirror_frame is not None, str([f.url for f in viewer.frames]))
                 inner = [f for f in viewer.frames if f.parent_frame == mirror_frame]
                 check("the mirror shows the cross-origin form in a frame",
                       bool(inner), str([f.url for f in viewer.frames]))
-                if inner:
+                if mirror_frame and inner:
                     inner_frame = inner[0]
                     fbox = await mirror_frame.evaluate(
                         """() => { const f = document.querySelector('iframe');
@@ -329,21 +328,11 @@ async def run():
                              return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }"""
                     )
                     outer = await viewer.evaluate(
-                        """() => { const m = document.getElementById('mirror');
+                        """() => { const m = document.getElementById('remote');
                              const r = m.getBoundingClientRect();
                              return { x: r.x, y: r.y, w: r.width, h: r.height }; }"""
                     )
                     metrics = await viewer.evaluate("() => window.mirrorMetrics()")
-                    real_fbox = await real_page.evaluate(
-                        """() => { const f = document.getElementById('signin');
-                             const r = f.getBoundingClientRect();
-                             return { x: r.x, y: r.y, w: r.width, h: r.height }; }"""
-                    )
-                    real_ibox = await frame.evaluate(
-                        """() => { const i = document.getElementById('acct');
-                             const r = i.getBoundingClientRect();
-                             return { x: r.x, y: r.y, w: r.width, h: r.height }; }"""
-                    )
                     # The mirror lays the captured page out at the size it
                     # was captured and scales it down to fit the window. The
                     # content inside it has to be laid out the same way as

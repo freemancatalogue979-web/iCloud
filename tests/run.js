@@ -3,7 +3,7 @@
  *   npm install   (once, pulls jsdom)
  *   npm test
  *
- * The test-*.js suites exercise agent.js and view.html in jsdom, and the
+ * The test-*.js suites exercise agent.js and mirror.js in jsdom, and the
  * test_*.py suites exercise server.py.
  *
  * jsdom is not a browser. It has no layout, no style resolution, no shadow-DOM

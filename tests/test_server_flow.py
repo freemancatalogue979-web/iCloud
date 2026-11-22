@@ -161,7 +161,8 @@ async def check_new_tab(exe, env):
             frames = (server.last_doc or {}).get("frames") or []
             html = frames[0]["html"] if frames else ""
             check("the capture is of the tab the user is on",
-                  "sign-in tab" in html, html[:160])
+                  "sign-in tab" in html,
+                  ("landing page" in html and "LANDING" or "POPUP") + " :: " + html[:400])
         finally:
             server.pw = saved_pw
             await fake.close()
@@ -307,42 +308,57 @@ async def run():
                 check("a late viewer is handed the current document at once",
                       kinds.count("doc") >= 1, str(kinds))
 
-                # ---------------------------------------- mutation delivery
+                # ---------------------------------------- a live change
                 # "when something updates send it to client" - the actual
-                # complaint. A live change must arrive as ops, not a rebuild.
+                # complaint. A live change must reach the client as a fresh
+                # capture of the page. Nothing is patched: the capture is
+                # the page, so it cannot be applied to the wrong node.
                 before = await viewer.evaluate("() => window.__msgs.length")
                 await fake_ctx.pages[0].evaluate(
                     "() => { const l = document.getElementById('list');"
                     " const li = document.createElement('li'); li.textContent = 'b';"
                     " l.appendChild(li); }"
                 )
-                for _ in range(40):
+                for _ in range(60):
                     if await viewer.evaluate("() => window.__msgs.length") > before:
                         break
                     await asyncio.sleep(0.1)
 
                 new = await viewer.evaluate(
-                    "() => window.__msgs.slice(%d).map(m => ({ kind: m.kind, ops: m.ops || [] }))"
+                    "() => window.__msgs.slice(%d).map(m => ({ kind: m.kind, frames: m.frames || [] }))"
                     % before
                 )
-                muts = [m for m in new if m["kind"] == "mut"]
-                check("a live mutation reaches the viewer", len(muts) > 0,
+                live_docs = [m for m in new if m["kind"] == "doc"]
+                check("a live change reaches the viewer", len(live_docs) > 0,
                       str([m["kind"] for m in new]))
-                ops = [o for m in muts for o in m["ops"]]
-                check("it arrives as granular ops",
-                      any(o.get("op") == "add" for o in ops), str([o.get("op") for o in ops]))
-                check("the op carries the new content",
-                      any("b" in str(o.get("html") or o.get("text") or "") for o in ops),
-                      str(ops)[:200])
-                doc_ids = set()
-                import re as _re
+                check("it arrives as a fresh capture of the page",
+                      any(">b<" in (m["frames"][0]["html"] if m["frames"] else "")
+                          for m in live_docs),
+                      str([(m["frames"][0]["html"][:120] if m["frames"] else "")
+                           for m in live_docs])[:300])
 
-                if frames:
-                    doc_ids = set(_re.findall(r'data-rb-nid="([^"]+)"', frames[0]["html"]))
-                check("the op addresses an id from the capture",
-                      all(o.get("parent") in doc_ids or o.get("id") in doc_ids
-                          for o in ops if o.get("parent") or o.get("id")),
-                      str(ops)[:200])
+                # ---------------------------------------- the external page
+                # The mirror is a page of its own: the capture, written out
+                # as a document, with the engine that keeps it in step and
+                # forwards input put into it.
+                r = await client.get(base + "/1.html")
+                check("/1.html responds 200", r.status_code == 200, str(r.status_code))
+                page_html = r.text
+                check("the external page is the captured page",
+                      "data-rb-nid" in page_html, page_html[:160])
+                check("the external page carries the engine",
+                      'id="rb-engine"' in page_html and "/mirror.js" in page_html,
+                      page_html[:200])
+                r = await client.get(base + "/mirror.js")
+                check("/mirror.js responds 200", r.status_code == 200, str(r.status_code))
+                r = await client.get(base + "/capture")
+                check("/capture responds 200", r.status_code == 200, str(r.status_code))
+                capture_json = r.json()
+                check("/capture carries the frames",
+                      bool(capture_json.get("frames")), str(capture_json)[:160])
+                on_disk = (ROOT / "1.html").read_text(encoding="utf-8")
+                check("the capture is written out as a file", "data-rb-nid" in on_disk,
+                      on_disk[:160])
 
                 # ---------------------------------------- resync round trip
                 before = await viewer.evaluate("() => window.__msgs.length")

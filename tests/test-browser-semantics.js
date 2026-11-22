@@ -1,15 +1,15 @@
-/* Strict-receiver discipline for requestAnimationFrame.
+/* The capture scheduler.
  *
- * CORRECTION: this suite was written on the belief that Chromium throws
- * "Illegal invocation" when requestAnimationFrame is called with no receiver.
- * Measured against real Chromium 153.0.8010.0, it does not - the unbound call
- * is accepted. So the strict stub below encodes a rule stricter than any
- * browser actually enforces, not a real divergence.
+ * A change to the page is answered with a fresh capture of the whole page,
+ * not with a patch. So the thing worth pinning is not "an op was produced"
+ * but "a change produced a new capture, the new capture has the change in
+ * it, and the scheduler re-arms for the next change".
  *
- * It is kept because calling a Window method as a method of Window is correct
- * regardless, and because the suite also verifies the scheduler re-arms for
- * later mutations, which is a real behaviour worth pinning. It is not evidence
- * of a bug that was fixed.
+ * The strict requestAnimationFrame stub is kept here from the old suite:
+ * Chromium does NOT throw "Illegal invocation" for an unbound call (measured
+ * against real Chromium 153.0.8010.0), so it encodes a rule stricter than
+ * any browser enforces and is not evidence of a bug that was fixed. It is
+ * harmless, and it keeps the agent's scheduling honest about its receiver.
  */
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
@@ -27,8 +27,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   );
   const win = dom.window;
 
-  // Chromium throws when a Window method is called without the Window as its
-  // receiver. jsdom does not care, which is how this class of bug ships.
   const realRaf = win.requestAnimationFrame.bind(win);
   let unboundCalls = 0;
   Object.defineProperty(win, "requestAnimationFrame", {
@@ -54,24 +52,38 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   sent.length = 0;
   win.document.getElementById("s").textContent = "two";
-  await sleep(300);
+  await sleep(1200);
 
   check("requestAnimationFrame is never called unbound", unboundCalls === 0,
     unboundCalls + " unbound call(s) - Chromium would throw Illegal invocation");
 
-  const ops = sent.filter((m) => m.kind === "mut").flatMap((m) => m.ops || []);
-  check("mutations still stream under strict rAF", ops.length > 0,
-    "no mut messages - the update stream is dead");
-  check("the edit actually arrived",
-    JSON.stringify(ops).includes("two"), JSON.stringify(ops).slice(0, 200));
+  const docs = sent.filter((m) => m.kind === "doc");
+  check("a change produces a new capture", docs.length > 0,
+    "no doc message - the update path is dead");
+  const html = docs.length ? (docs[docs.length - 1].frames || [])[0].html : "";
+  check("the new capture has the change in it",
+    html.includes("two"), html.slice(0, 200));
+
+  // A capture that comes out the same is not sent again: the observer can
+  // fire for a change that does not show up in the markup, and sending the
+  // page again for nothing would make the mirror flicker.
+  sent.length = 0;
+  win.document.getElementById("s").setAttribute("data-x", "1");
+  await sleep(1200);
+  const again = sent.filter((m) => m.kind === "doc");
+  check("a change that shows up in the markup produces a capture",
+    again.length > 0, "no doc message");
 
   // A second burst, to be sure the scheduler re-arms rather than working once.
   sent.length = 0;
   win.document.getElementById("s").textContent = "three";
-  await sleep(300);
-  check("scheduler re-arms for later mutations",
-    sent.some((m) => m.kind === "mut"),
-    "only the first mutation after load was delivered");
+  await sleep(1200);
+  const third = sent.filter((m) => m.kind === "doc");
+  check("scheduler re-arms for later changes", third.length > 0,
+    "only the first change after load was delivered");
+  const thirdHtml = third.length ? (third[third.length - 1].frames || [])[0].html : "";
+  check("the later capture has the later change in it",
+    thirdHtml.includes("three"), thirdHtml.slice(0, 200));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import quote, urljoin
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from playwright.async_api import async_playwright
 from pydantic import BaseModel
 
@@ -88,6 +88,50 @@ AGENT_JS = (HERE / "agent.js").read_text(encoding="utf-8")
 clients: set[asyncio.Queue] = set()
 last_doc: dict | None = None
 
+# The external page. The capture is written out as a real HTML file, and
+# that file is what the client loads - the mirror is the captured page
+# itself, not a picture of it inside a frame.
+MIRROR_FILE = HERE / "1.html"
+
+# The engine that runs inside the captured page: it keeps the page in step
+# with the real browser and forwards clicks and keystrokes back to it.
+ENGINE_TAG = '<script id="rb-engine" src="/mirror.js"></script>'
+
+
+def mirror_page(doc: dict | None) -> str:
+    """The captured page, with the mirror engine put into its head.
+
+    The engine is injected here rather than written into the file, so the
+    file on disk is the capture itself and the served page is the capture
+    plus the one script that makes it live.
+    """
+    frames = (doc or {}).get("frames") or []
+    top = next((f for f in frames if f.get("windowId") == "0"), None)
+    if top is None and frames:
+        top = frames[0]
+    html = (top or {}).get("html") or ""
+    if not html:
+        html = "<!DOCTYPE html><html><head></head><body></body></html>"
+    if "</head>" in html:
+        return html.replace("</head>", ENGINE_TAG + "</head>", 1)
+    if "<body" in html:
+        cut = html.index(">", html.index("<body")) + 1
+        return html[:cut] + ENGINE_TAG + html[cut:]
+    return ENGINE_TAG + html
+
+
+def write_mirror_file(doc: dict | None) -> None:
+    """Keep 1.html on disk equal to the capture that is on screen."""
+    page = mirror_page(doc)
+    try:
+        if MIRROR_FILE.exists() and MIRROR_FILE.read_text(encoding="utf-8") == page:
+            return
+        MIRROR_FILE.write_text(page, encoding="utf-8")
+    except OSError:
+        # The file is a convenience, not the product. A read-only directory
+        # must not stop the mirror.
+        pass
+
 # Frame identity is the agent's job, not the server's. Each frame is told its
 # windowId by its parent over postMessage, the way SingleFile does it, and puts
 # that id on every message. The server just relays.
@@ -105,7 +149,7 @@ async def broadcast(message: dict):
 # working one: the console shows only HTTP lines, and "the mirror is blank" and
 # "the mirror is stale" need different fixes. All of it is throttled, because a
 # live page mutates constantly and a log line per change buries everything.
-_stats = {"ops": 0, "muts": 0, "resyncs": 0, "last_beat": 0.0}
+_stats = {"captures": 0, "values": 0, "resyncs": 0, "last_beat": 0.0}
 
 
 def _describe(frames) -> str:
@@ -119,6 +163,22 @@ def _describe(frames) -> str:
     return f"{len(frames)} frame(s) [{', '.join(parts)}]"
 
 
+def source_page(source):
+    """The page a binding call came from, or None.
+
+    Playwright hands the binding a source that names the page, the frame and
+    the context - but how it hands it over has changed: it used to be an
+    object with attributes, and it is a dict now. Asking an attribute of a
+    dict answers None every time, which is how the check below used to let
+    every tab in the context speak for the mirror.
+    """
+    if source is None:
+        return None
+    if isinstance(source, dict):
+        return source.get("page")
+    return getattr(source, "page", None)
+
+
 async def on_emit(source, message):
     """Called from inside the real page via the Playwright binding."""
     global last_doc
@@ -128,8 +188,8 @@ async def on_emit(source, message):
     # same context has its own agent and sends a document of its own under
     # the same windowId.
     if page is not None:
-        source_page = getattr(source, "page", None)
-        if source_page is not None and source_page is not page:
+        spoke = source_page(source)
+        if spoke is not None and spoke is not page:
             return
 
     deliver = True
@@ -141,10 +201,14 @@ async def on_emit(source, message):
             return
         last_doc = message
         frames = message.get("frames") or []
+        _stats["captures"] += 1
+        write_mirror_file(message)
         log(f"capture: {_describe(frames)}")
-    elif kind == "mut":
-        _stats["muts"] += 1
-        _stats["ops"] += len(message.get("ops") or [])
+    elif kind == "value":
+        # The one thing that is not a change to the page: a form control's
+        # live value. It is a message of its own, and it only means anything
+        # once there is a capture to put it on.
+        _stats["values"] += 1
         if not _capture_ready:
             # Nothing to apply them to. The snapshot taken at the end of the
             # settle window already contains these changes.
@@ -154,13 +218,13 @@ async def on_emit(source, message):
         await broadcast(message)
 
     now = time.monotonic()
-    if now - _stats["last_beat"] >= 10.0 and _stats["muts"]:
+    if now - _stats["last_beat"] >= 10.0 and (_stats["captures"] or _stats["values"]):
         elapsed = now - _stats["last_beat"] if _stats["last_beat"] else 10.0
         log(
-            f"stream: {_stats['muts']} updates, {_stats['ops']} ops, "
+            f"stream: {_stats['captures']} captures, {_stats['values']} values, "
             f"{_stats['resyncs']} resyncs in {elapsed:.0f}s"
         )
-        _stats.update(muts=0, ops=0, resyncs=0, last_beat=now)
+        _stats.update(captures=0, values=0, resyncs=0, last_beat=now)
 
 
 async def install_agent(context):
@@ -392,9 +456,38 @@ async def status():
 # and no copy of any site's markup - the client sees the live screenshot and
 # its clicks and keystrokes land on whatever actually has focus.
 # --------------------------------------------------------------------------
-@app.get("/view")
-async def view():
-    return FileResponse(HERE / "view.html", headers={"Cache-Control": "no-store"})
+@app.get("/1.html")
+async def mirror_page_route():
+    """The captured page, as a document of its own.
+
+    This is the file the client loads. It is the capture - the page as the
+    real browser is showing it - with the engine that keeps it in step and
+    forwards input added to it.
+    """
+    return Response(
+        content=mirror_page(last_doc),
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/mirror.js")
+async def mirror_js():
+    """The engine that runs inside the captured page."""
+    return FileResponse(
+        HERE / "mirror.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/capture")
+async def capture_route():
+    """The capture as it stands, for a mirror that has just loaded."""
+    return JSONResponse(
+        last_doc or {},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # --------------------------------------------------------------------------

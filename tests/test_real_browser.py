@@ -23,7 +23,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 AGENT_JS = (ROOT / "agent.js").read_text(encoding="utf-8")
-VIEW_HTML = (ROOT / "view.html").read_text(encoding="utf-8")
+MIRROR_JS = (ROOT / "mirror.js").read_text(encoding="utf-8")
+
+# The mirror is the captured page itself, with the engine that keeps it in
+# step with the real browser put into its head - which is what the server
+# does when it writes the capture out.
+MIRROR_PAGE = (
+    "<!DOCTYPE html><html><head><script>" + MIRROR_JS + "</script>"
+    "</head><body></body></html>"
+)
 
 passed = 0
 failed = 0
@@ -157,36 +165,26 @@ async def run():
 
         # ------------------------------------------------ mirror page
         mirror = await context.new_page()
-        # view.html opens a WebSocket on load; stub it so we drive the applier
-        # directly instead of needing the server in the loop.
+        # The mirror opens a WebSocket on load; stub it so we drive the
+        # mirror directly instead of needing the server in the loop.
         await mirror.add_init_script(
             "class _WS { constructor(){ this.readyState = 1; } send(){} close(){} }"
             "window.WebSocket = _WS;"
         )
-        await mirror.set_content(VIEW_HTML)
+        await mirror.set_content(MIRROR_PAGE)
         await mirror.wait_for_timeout(200)
 
-        # Load the captured document into the mirror the way view.html does.
+        # Show the capture in the mirror, the way the server's page does.
         await mirror.evaluate(
-            """(frame) => {
-                 const holder = document.createElement('div');
-                 document.body.appendChild(holder);
-                 const f = document.createElement('iframe');
-                 f.setAttribute('sandbox', 'allow-same-origin');
-                 document.body.appendChild(f);
-                 f.srcdoc = frame.html;
-                 window.__mirrorFrame = f;
-               }""",
-            frame,
+            "(a) => window.seed(a.frames, a.viewport)",
+            {"frames": doc["frames"], "viewport": doc.get("viewport")},
         )
         await mirror.wait_for_timeout(400)
 
         # Did the engine turn the declarative template into a real shadow root?
         shadow_info = await mirror.evaluate(
             """() => {
-                 const f = window.__mirrorFrame;
-                 const d = f.contentDocument;
-                 const host = d && d.getElementById('host');
+                 const host = document.getElementById('host');
                  if (!host) return { host: false };
                  const sr = host.shadowRoot;
                  return {
@@ -208,9 +206,8 @@ async def run():
         # Styles actually applied, not just present as text.
         applied = await mirror.evaluate(
             """() => {
-                 const d = window.__mirrorFrame.contentDocument;
-                 const box = d.getElementById('box');
-                 const cs = d.defaultView.getComputedStyle(box);
+                 const box = document.getElementById('box');
+                 const cs = getComputedStyle(box);
                  return {
                    bg: cs.backgroundColor,
                    width: cs.width,
@@ -230,9 +227,8 @@ async def run():
         # SVG kept its namespace across the trip.
         svg_ns = await mirror.evaluate(
             """() => {
-                 const d = window.__mirrorFrame.contentDocument;
-                 const s = d.getElementById('svg');
-                 const c = d.getElementById('c');
+                 const s = document.getElementById('svg');
+                 const c = document.getElementById('c');
                  return { svg: s && s.namespaceURI, circle: c && c.namespaceURI };
                }"""
         )
@@ -241,34 +237,30 @@ async def run():
         check("svg child namespace preserved",
               svg_ns["circle"] == "http://www.w3.org/2000/svg", str(svg_ns))
 
-        # ------------------------------------------------ live mutation
+        # ------------------------------------------------ live change
+        # A change on the page is answered with a fresh capture of the whole
+        # page. The mirror shows that capture, so it cannot drift out of step
+        # with the page and it cannot be patched onto the wrong node.
         messages.clear()
         await src.evaluate("document.querySelector('#list').appendChild(Object.assign(document.createElement('li'), {textContent:'b'}))")
-        await src.wait_for_timeout(400)
+        await src.wait_for_timeout(1500)
 
-        muts = [m for m in messages if m.get("kind") == "mut"]
-        ops = [o for m in muts for o in m.get("ops", [])]
-        check("mutation streamed from the real page", len(ops) > 0,
+        docs2 = [m for m in messages if m.get("kind") == "doc"]
+        check("a live change produces a fresh capture", len(docs2) > 0,
               "kinds: " + str([m.get("kind") for m in messages]))
-        check("it was a granular add, not a subtree replace",
-              any(o["op"] == "add" for o in ops), str([o["op"] for o in ops]))
-
-        # Apply it in the mirror with the shipped applier and check convergence.
-        if ops:
+        if docs2:
+            capture = docs2[-1]
+            check("the capture has the change in it",
+                  "b" in capture["frames"][0]["html"], capture["frames"][0]["html"][:160])
             await mirror.evaluate(
-                """(ops) => {
-                   const d = window.__mirrorFrame.contentDocument;
-                   const ids = new Map();
-                   window.adopt(d, ids);
-                   window.applyOps({ doc: d, ids }, ops);
-                 }""",
-                ops,
+                "(a) => window.seed(a.frames, a.viewport)",
+                {"frames": capture["frames"], "viewport": capture.get("viewport")},
             )
+            await mirror.wait_for_timeout(300)
             items = await mirror.evaluate(
-                "() => [...window.__mirrorFrame.contentDocument.querySelectorAll('#list li')]"
-                ".map(n => n.textContent)"
+                "() => [...document.querySelectorAll('#list li')].map(n => n.textContent)"
             )
-            check("added node landed in the real mirror", items == ["a", "b"], str(items))
+            check("the change reached the real mirror", items == ["a", "b"], str(items))
 
         # ------------------------------------ bare text-node replacement
         # This is the bug class that caused "the dom is not updating": a
@@ -278,12 +270,13 @@ async def run():
         # (a) characterData: editing a text node in place.
         messages.clear()
         await src.evaluate("document.querySelector('#list li').firstChild.nodeValue = 'CHANGED'")
-        await src.wait_for_timeout(400)
-        cd_ops = [o for m in messages if m.get("kind") == "mut" for o in m.get("ops", [])]
-        check("in-place text edit produces ops", len(cd_ops) > 0, "got: " + str(cd_ops))
-        check("in-place text edit is addressed by id",
-              any(o["op"] in ("text", "children") for o in cd_ops),
-              str([o["op"] for o in cd_ops]))
+        await src.wait_for_timeout(1500)
+        cd_docs = [m for m in messages if m.get("kind") == "doc"]
+        check("in-place text edit produces a capture", len(cd_docs) > 0,
+              "kinds: " + str([m.get("kind") for m in messages]))
+        check("in-place text edit is in the capture",
+              any("CHANGED" in m["frames"][0]["html"] for m in cd_docs),
+              str([m["frames"][0]["html"][:120] for m in cd_docs])[:200])
 
         # (b) childList whose added/removed nodes are TEXT_NODE. This is the
         # distinct mutation shape: `li.textContent = x` removes the old text
@@ -292,12 +285,13 @@ async def run():
         # (a) because a MutationObserver reports it as a different record type.
         messages.clear()
         await src.evaluate("document.querySelector('#list li').textContent = 'REPLACED'")
-        await src.wait_for_timeout(400)
-        cl_ops = [o for m in messages if m.get("kind") == "mut" for o in m.get("ops", [])]
-        check("text-node replacement produces ops", len(cl_ops) > 0, "got: " + str(cl_ops))
+        await src.wait_for_timeout(1500)
+        cl_docs = [m for m in messages if m.get("kind") == "doc"]
+        check("text-node replacement produces a capture", len(cl_docs) > 0,
+              "kinds: " + str([m.get("kind") for m in messages]))
         check("text-node replacement is not silently dropped",
-              any(o["op"] in ("text", "children") for o in cl_ops),
-              str([o["op"] for o in cl_ops]))
+              any("REPLACED" in m["frames"][0]["html"] for m in cl_docs),
+              str([m["frames"][0]["html"][:120] for m in cl_docs])[:200])
 
         # ------------------------------------ mutation inside a shadow root
         # A shadow root created by a script at runtime is never reported by a
@@ -305,35 +299,39 @@ async def run():
         # *inside* one reaches the mirror.
         messages.clear()
         await src.evaluate("document.getElementById('host').shadowRoot.querySelector('#inner').textContent = 'Sign Out'")
-        await src.wait_for_timeout(600)
-        shadow_ops = [o for m in messages if m.get("kind") == "mut" for o in m.get("ops", [])]
-        check("mutation inside a runtime shadow root is observed",
-              any("Sign Out" in str(o.get("text") or o.get("html") or "") for o in shadow_ops),
-              str(shadow_ops)[:200])
+        await src.wait_for_timeout(1500)
+        shadow_docs = [m for m in messages if m.get("kind") == "doc"]
+        check("a change inside a runtime shadow root produces a capture",
+              len(shadow_docs) > 0, "kinds: " + str([m.get("kind") for m in messages]))
+        check("the capture carries the change inside the shadow root",
+              any("Sign Out" in m["frames"][0]["html"] for m in shadow_docs),
+              str([m["frames"][0]["html"][:200] for m in shadow_docs])[:300])
 
-        # ------------------------------------ drift must resync, not wipe
-        # A text op whose index no longer matches must be refused. Applying it
-        # the old way replaced the parent's whole child list with one string.
-        resync = await mirror.evaluate(
-            """(ops) => {
-                 const d = window.__mirrorFrame.contentDocument;
-                 const ids = new Map();
-                 window.adopt(d, ids);
-                 const boxId = [...ids].find(([, n]) => n.nodeType === 1 && n.id === 'box');
-                 const bad = [{ op: 'text', parent: boxId[0], index: 99, text: 'WIPED' }];
-                 return { applied: window.applyOps({ doc: d, ids }, bad) !== false,
-                          text: d.getElementById('box').textContent };
-               }"""
-        )
-        check("mis-indexed text op is refused", resync["applied"] is False, str(resync))
-        check("mis-indexed text op leaves the subtree intact",
-              resync["text"] == "styled", str(resync))
+        # ------------------------------------ the mirror cannot drift
+        # There is no patch to misapply: the mirror is rebuilt from the
+        # capture. So what is worth pinning is that a rebuild shows the page
+        # as it is, and that a rebuild cannot leave half a page behind.
+        await src.evaluate("document.getElementById('box').textContent = 'changed text'")
+        await src.wait_for_timeout(1500)
+        docs3 = [m for m in messages if m.get("kind") == "doc"]
+        if docs3:
+            capture = docs3[-1]
+            await mirror.evaluate(
+                "(a) => window.seed(a.frames, a.viewport)",
+                {"frames": capture["frames"], "viewport": capture.get("viewport")},
+            )
+            await mirror.wait_for_timeout(300)
+        text = await mirror.evaluate("() => document.getElementById('box').textContent")
+        check("the mirror shows the page as it is", text == "changed text", str(text))
+        copies = await mirror.evaluate("() => document.querySelectorAll('#box').length")
+        check("the rebuild replaced the page rather than adding to it",
+              copies == 1, str(copies) + " copies of #box")
 
         # ------------------------------- a change must not overtake its document
-        # The first capture is a snapshot, and the changes that follow it are
-        # delivered as ops. If an op were emitted while the snapshot was
-        # still being taken, it would arrive before the document it belongs
-        # to and be dropped by the mirror.
+        # A capture reads the page. If the page changes while the capture is
+        # being taken, the capture that is already on its way does not
+        # contain the change - so another capture has to follow it. Dropping
+        # the change would leave the mirror showing a page that is not there.
         #
         # A frame that never answers makes the capture wait for its timeout,
         # which is long enough for a change to happen in the middle of one.
@@ -365,13 +363,12 @@ async def run():
         await slow.wait_for_timeout(2000)
 
         order = await slow.evaluate("() => window.__order")
-        doc_at = next((i for i, k in enumerate(order) if k == "doc"), None)
-        mut_at = next((i for i, k in enumerate(order) if k == "mut"), None)
-        check("a change made during a capture is delivered",
-              mut_at is not None, str(order))
-        check("the change does not arrive before the document it belongs to",
-              doc_at is not None and mut_at is not None and doc_at < mut_at,
-              "doc at %r, mut at %r, order %r" % (doc_at, mut_at, order))
+        check("a change made during a capture is not lost",
+              order.count("doc") >= 2, str(order))
+        last = [m for m in messages if m.get("kind") == "doc"]
+        check("the last capture carries the change that happened during the first",
+              bool(last) and "during" in last[-1]["frames"][0]["html"],
+              str(last[-1]["frames"][0]["html"][:200]) if last else "no capture")
 
         # A capture asked for while another one is still running. The running
         # one read the document before the request, so it may already be out

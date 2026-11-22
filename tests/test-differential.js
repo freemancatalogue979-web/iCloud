@@ -1,14 +1,14 @@
-/* Differential test: capture in one jsdom, rebuild in a second jsdom, and check
- * the mirror converges on the source as mutations stream in.
+/* Differential test: capture in one jsdom, show it in a second one, and
+ * check the mirror converges on the source as the page changes.
  *
- * The applier is not re-implemented here - it is lifted out of the shipped
- * view.html and eval'd, so what runs is what ships. */
+ * The mirror is not re-implemented here - the shipped mirror.js is eval'd,
+ * so what runs is what ships.
+ */
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
 
 const AGENT = fs.readFileSync("/home/user/iCloud/agent.js", "utf8");
-const VIEW = fs.readFileSync("/home/user/iCloud/view.html", "utf8");
-const VIEW_SCRIPT = VIEW.split("<script>")[1].split("</script>")[0];
+const MIRROR = fs.readFileSync("/home/user/iCloud/mirror.js", "utf8");
 
 const PAGE = `<!DOCTYPE html><html><head><style>.a{color:red}</style></head><body>
 <div id="wrap"><span id="s">one</span><em>tail</em></div>
@@ -23,12 +23,16 @@ function check(name, cond, detail) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/* The real view.html applier, lifted into a jsdom so it can be called. */
-function makeMirror(html) {
-  const dom = new JSDOM(html, { runScripts: "outside-only", url: "http://localhost:9002/view" });
+/* The real mirror engine, lifted into a jsdom so it can be driven. */
+function makeMirror() {
+  const dom = new JSDOM(
+    "<!DOCTYPE html><html><head></head><body></body></html>",
+    { runScripts: "outside-only", url: "http://localhost:9002/1.html" }
+  );
   const win = dom.window;
-  win.WebSocket = function () { this.readyState = 1; this.send = () => {}; };
-  win.eval(VIEW_SCRIPT);
+  win.fetch = () => Promise.reject(new Error("no server in a unit test"));
+  win.WebSocket = function () { this.close = () => {}; };
+  win.eval(MIRROR);
   return { dom, win, doc: win.document };
 }
 
@@ -47,92 +51,91 @@ function makeMirror(html) {
   const frame = doc.frames[0];
   check("serialised HTML carries node ids", /data-rb-nid="/.test(frame.html));
 
-  // ---- ids must survive the trip and resolve to the right nodes ----------
-  const mir = makeMirror(frame.html);
-  const ids = new Map();
-  mir.win.adopt(mir.doc, ids);
-  check("every serialised element got adopted", ids.size > 0, ids.size + " adopted");
-  check("ids are unique", new Set([...ids.keys()]).size === ids.size);
+  // ---- the mirror shows the capture -------------------------------------
+  const mir = makeMirror();
+  const shown = mir.win.seed(doc.frames, doc.viewport);
+  check("the mirror accepts the capture", shown === true, String(shown));
+  check("the mirror shows the page",
+    mir.doc.getElementById("wrap") !== null, mir.doc.body.innerHTML.slice(0, 200));
+  check("the ids survive the trip",
+    mir.doc.querySelectorAll("[data-rb-nid]").length > 0,
+    String(mir.doc.querySelectorAll("[data-rb-nid]").length));
 
-  // Spot-check that identity lines up: the id the source gave #wrap must point
-  // at the mirror's #wrap.
-  const I = swin.__rbInternals;
-  const wrapId = I.ensureId(swin.document.getElementById("wrap"));
-  check("id maps to the same element across the wire",
-    ids.get(wrapId) === mir.doc.getElementById("wrap"),
-    "wrapId=" + wrapId + " -> " + (ids.get(wrapId) && ids.get(wrapId).id));
-  const fieldId = I.ensureId(swin.document.getElementById("field"));
-  check("input identity survives too", ids.get(fieldId) === mir.doc.getElementById("field"));
-
-  const entry = { doc: mir.doc, ids };
-
-  // ---- stream real mutations through the real applier -------------------
-  async function mutate(fn, label) {
+  /* A change on the source produces a new capture, and the mirror shows
+   * that capture. There is no patch to apply and nothing to address. */
+  async function change(fn) {
     sent.length = 0;
     fn();
-    await sleep(150);
-    const muts = sent.filter((m) => m.kind === "mut");
-    const ops = muts.flatMap((m) => m.ops || []);
-    const ok = muts.length ? mir.win.applyOps(entry, ops) : false;
-    return { ops, ok, muts };
+    await sleep(1200);
+    const docs = sent.filter((m) => m.kind === "doc");
+    if (!docs.length) return null;
+    const capture = docs[docs.length - 1];
+    mir.win.seed(capture.frames, capture.viewport);
+    return capture;
   }
 
   // 1. text edit
-  let r = await mutate(() => { swin.document.getElementById("s").textContent = "two"; }, "text");
-  check("text edit emitted ops", r.ops.length > 0, JSON.stringify(r.ops));
-  check("text edit applied", mir.doc.getElementById("s").textContent === "two",
+  let r = await change(() => { swin.document.getElementById("s").textContent = "two"; });
+  check("a text edit produces a new capture", !!r, "no new capture");
+  check("the mirror shows the new text",
+    mir.doc.getElementById("s").textContent === "two",
     mir.doc.getElementById("s").textContent);
-  check("text edit did not disturb its sibling",
+  check("the text edit did not disturb its sibling",
     mir.doc.querySelector("#wrap em").textContent === "tail",
     mir.doc.querySelector("#wrap em").textContent);
 
   // 2. attribute
-  r = await mutate(() => { swin.document.getElementById("wrap").setAttribute("class", "on"); });
-  check("attribute applied", mir.doc.getElementById("wrap").getAttribute("class") === "on");
+  r = await change(() => { swin.document.getElementById("wrap").setAttribute("class", "on"); });
+  check("the mirror shows the new attribute",
+    mir.doc.getElementById("wrap").getAttribute("class") === "on",
+    mir.doc.getElementById("wrap").getAttribute("class"));
 
   // 3. inserted node keeps existing siblings in place
-  r = await mutate(() => {
+  r = await change(() => {
     const li = swin.document.createElement("li");
     li.textContent = "c";
     swin.document.getElementById("list").appendChild(li);
   });
-  check("insert emitted an add op", r.ops.some((o) => o.op === "add"), JSON.stringify(r.ops));
-  check("insert applied",
+  check("the mirror shows the inserted node",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(",") === "a,b,c",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(","));
 
   // 4. insert at the FRONT - the case index paths get wrong
-  r = await mutate(() => {
+  r = await change(() => {
     const list = swin.document.getElementById("list");
     const li = swin.document.createElement("li");
     li.textContent = "zero";
     list.insertBefore(li, list.firstChild);
   });
-  check("front insert applied in the right position",
+  check("the mirror shows the front insert in the right position",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(",") === "zero,a,b,c",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(","));
 
   // 5. removal
-  r = await mutate(() => {
+  r = await change(() => {
     const list = swin.document.getElementById("list");
     list.removeChild(list.querySelector("li"));
   });
-  check("removal applied",
+  check("the mirror shows the removal",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(",") === "a,b,c",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).join(","));
 
-  // 6. typing - not a DOM mutation, needs the value side channel
-  r = await mutate(() => {
-    const f = swin.document.getElementById("field");
-    f.value = "me@icloud.com";
-    f.dispatchEvent(new swin.Event("input", { bubbles: true }));
-  });
-  check("typing emitted a value op", r.ops.some((o) => o.op === "value"), JSON.stringify(r.ops));
-  check("typing applied to the mirror",
+  // 6. typing - not a DOM mutation, so it is not a capture. It is the one
+  //    thing that stays a small message of its own.
+  sent.length = 0;
+  const field = swin.document.getElementById("field");
+  field.value = "me@icloud.com";
+  field.dispatchEvent(new swin.Event("input", { bubbles: true }));
+  await sleep(200);
+  const values = sent.filter((m) => m.kind === "value");
+  check("typing emitted a value message", values.length > 0,
+    JSON.stringify(sent.map((m) => m.kind)));
+  mir.win.__rbMirror.applyValue(values[0]);
+  check("typing reached the mirror",
     mir.doc.getElementById("field").value === "me@icloud.com",
     mir.doc.getElementById("field").value);
 
-  // 7. a burst stays granular rather than becoming one huge subtree replace
+  // 7. a burst is one capture, not forty patches
   sent.length = 0;
   const list = swin.document.getElementById("list");
   for (let i = 0; i < 40; i++) {
@@ -140,18 +143,18 @@ function makeMirror(html) {
     li.textContent = "b" + i;
     list.appendChild(li);
   }
-  await sleep(250);
-  const burstOps = sent.filter((m) => m.kind === "mut").flatMap((m) => m.ops || []);
-  const totalHtml = burstOps.reduce((n, o) => n + (o.html ? o.html.length : 0), 0);
-  check("burst produced add ops, not subtree replacements",
-    burstOps.length > 0 && burstOps.every((o) => o.op === "add"),
-    burstOps.map((o) => o.op).join(","));
-  // Per node, not in total: granular ops scale with what changed, whereas
-  // subtree replacement would scale with the whole list and grow without bound.
-  const perNode = totalHtml / 40;
-  check("payload scales per node, not per subtree",
-    perNode < 600, perNode.toFixed(0) + " bytes/node, " + totalHtml + " total");
-  mir.win.applyOps(entry, burstOps);
+  await sleep(1500);
+  const burstDocs = sent.filter((m) => m.kind === "doc");
+  check("a burst produces one capture, not one message per change",
+    burstDocs.length <= 3, burstDocs.length + " captures for 40 changes");
+  const burstHtml = burstDocs.length ? burstDocs[burstDocs.length - 1].frames[0].html : "";
+  // The list held a, b, c when the burst started - three survivors - so the
+  // capture must hold 43 items, not 41.
+  check("the capture has all 40 of them",
+    (burstHtml.match(/<li/g) || []).length === 43,
+    (burstHtml.match(/<li/g) || []).length + " list items");
+  mir.win.seed(burstDocs[burstDocs.length - 1].frames,
+    burstDocs[burstDocs.length - 1].viewport);
   check("all 40 burst nodes arrived in order",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).slice(-1)[0] === "b39",
     [...mir.doc.querySelectorAll("#list li")].map((n) => n.textContent).slice(-3).join(","));

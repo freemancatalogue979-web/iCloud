@@ -30,7 +30,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 AGENT_JS = (ROOT / "agent.js").read_text(encoding="utf-8")
-VIEW_HTML = (ROOT / "view.html").read_text(encoding="utf-8")
+MIRROR_JS = (ROOT / "mirror.js").read_text(encoding="utf-8")
+
+# The mirror is the captured page itself, with the engine that keeps it in
+# step with the real browser put into its head - which is what the server
+# does when it writes the capture out as a page of its own.
+MIRROR_PAGE = (
+    "<!DOCTYPE html><html><head><script>" + MIRROR_JS + "</script>"
+    "</head><body></body></html>"
+)
 
 passed = 0
 failed = 0
@@ -133,8 +141,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.split("?")[0] == "/view":
-            body, ctype = VIEW_HTML.encode(), "text/html; charset=utf-8"
+        if self.path.split("?")[0] == "/1.html":
+            body, ctype = MIRROR_PAGE.encode(), "text/html; charset=utf-8"
         else:
             body, ctype = PAGE.encode(), "text/html; charset=utf-8"
         self.send_response(200)
@@ -240,22 +248,24 @@ async def run():
         await page.wait_for_timeout(400)
 
         original = await page.evaluate(PROBE)
-        html = await page.evaluate(
-            "() => window.__rbInternals.serialiseDocumentOf(document).html"
+        frame = await page.evaluate(
+            "() => window.__rbInternals.serialiseDocumentOf(document)"
         )
+        html = frame["html"]
         print("     captured %d bytes" % len(html))
 
         # ---- rebuild the capture in a second, clean browser -----------------
         mirror_ctx = await browser.new_context(viewport={"width": 1280, "height": 800})
         mirror_page = await mirror_ctx.new_page()
-        await mirror_page.goto("http://127.0.0.1:%d/view" % port, wait_until="load")
-        # The real applier, the real seeding path.
+        await mirror_page.goto("http://127.0.0.1:%d/1.html" % port, wait_until="load")
+        # The real mirror, the real seeding path.
         await mirror_page.evaluate(
-            "(html) => window.seed([{ windowId: '0', html }])", html
+            "(a) => window.seed(a.frames, a.viewport)",
+            {"frames": [{"windowId": "0", **a} for a in [frame]],
+             "viewport": {"w": 1280, "h": 800}},
         )
         await mirror_page.wait_for_timeout(400)
-        mirror_frame = mirror_page.frames[-1]
-        rebuilt = await mirror_frame.evaluate(PROBE)
+        rebuilt = await mirror_page.evaluate(PROBE)
 
         # ---- elements -----------------------------------------------------
         missing = [k for k in original if k not in rebuilt and not k.startswith("__")]
@@ -367,20 +377,21 @@ async def run():
         )
 
         live_page = await mirror_ctx.new_page()
-        await live_page.goto("http://127.0.0.1:%d/view" % port, wait_until="load")
+        await live_page.goto("http://127.0.0.1:%d/1.html" % port, wait_until="load")
         await live_page.evaluate(
-            "(html) => window.seed([{ windowId: '0', html }])", html
+            "(a) => window.seed(a.frames, a.viewport)",
+            {"frames": [{"windowId": "0", **a} for a in [frame]],
+             "viewport": {"w": 1280, "h": 800}},
         )
         await live_page.wait_for_timeout(400)
-        live_frame = live_page.frames[-1]
-        cold = await live_frame.evaluate(
+        cold = await live_page.evaluate(
             "() => getComputedStyle(document.getElementById('styled')).color"
         )
-        await live_frame.evaluate(
+        await live_page.evaluate(
             "() => { document.getElementById('styled').className = 'hot'; }"
         )
-        await live_frame.wait_for_timeout(100)
-        warmed = await live_frame.evaluate(
+        await live_page.wait_for_timeout(100)
+        warmed = await live_page.evaluate(
             "() => getComputedStyle(document.getElementById('styled')).color"
         )
         check(
@@ -390,8 +401,8 @@ async def run():
         )
 
         # ---- an element added later gets its snapshot too -----------------
-        # The op carries the new node's resolved styles, and the mirror puts
-        # them in the sheet for whichever root the node lands in.
+        # The page changes, so a fresh capture is taken, and the mirror shows
+        # that capture. The new node's resolved styles travel with it.
         emitted.clear()
         await page2.evaluate(
             """() => {
@@ -402,28 +413,24 @@ async def run():
                  document.body.appendChild(d);
                }"""
         )
-        await page2.wait_for_timeout(300)
-        muts = [m for m in emitted if m.get("kind") == "mut"]
-        check("the page's addition is streamed as an op", bool(muts),
-              "no mut message: %r" % emitted[-2:])
-        ops = muts[-1]["ops"] if muts else []
-        applied = await live_page.evaluate(
-            """(ops) => {
-                 const entry = frames.get('0');
-                 if (!entry) return 'no frame';
-                 return applyOps(entry, ops);
-               }""",
-            ops,
-        )
-        check("the mirror accepts the op", applied is True, "applyOps said %r" % applied)
-        await live_frame.wait_for_timeout(200)
+        await page2.wait_for_timeout(1500)
+        docs = [m for m in emitted if m.get("kind") == "doc"]
+        check("the page's addition produces a fresh capture", bool(docs),
+              "no doc message: %r" % emitted[-2:])
+        if docs:
+            capture = docs[-1]
+            await live_page.evaluate(
+                "(a) => window.seed(a.frames, a.viewport)",
+                {"frames": capture["frames"], "viewport": capture.get("viewport")},
+            )
+        await live_page.wait_for_timeout(200)
         late_page = await page2.evaluate(
             """() => { const e = document.getElementById('late');
                  const cs = getComputedStyle(e);
                  return { color: cs.color, display: cs.display,
                           rect: [e.getBoundingClientRect().width] }; }"""
         )
-        late_mirror = await live_frame.evaluate(
+        late_mirror = await live_page.evaluate(
             """() => { const e = document.getElementById('late');
                  if (!e) return null;
                  const cs = getComputedStyle(e);
@@ -441,7 +448,7 @@ async def run():
         # ---- an element added inside a shadow root -----------------------
         # Its style comes from a constructable stylesheet, which is not
         # markup, so the only way it can reach the mirror is the snapshot
-        # the op carries.
+        # the capture carries.
         emitted.clear()
         await page2.evaluate(
             """() => {
@@ -452,33 +459,28 @@ async def run():
                  host.shadowRoot.appendChild(d);
                }"""
         )
-        await page2.wait_for_timeout(300)
-        muts = [m for m in emitted if m.get("kind") == "mut"]
-        ops = muts[-1]["ops"] if muts else []
-        applied = await live_page.evaluate(
-            """(ops) => {
-                 const entry = frames.get('0');
-                 if (!entry) return 'no frame';
-                 return applyOps(entry, ops);
-               }""",
-            ops,
-        )
-
-        check("the mirror accepts the shadow op", applied is True,
-              "applyOps said %r" % applied)
-        await live_frame.wait_for_timeout(200)
+        await page2.wait_for_timeout(1500)
+        docs = [m for m in emitted if m.get("kind") == "doc"]
+        check("a change inside a shadow root produces a capture", bool(docs),
+              "no doc message: %r" % emitted[-2:])
+        if docs:
+            capture = docs[-1]
+            await live_page.evaluate(
+                "(a) => window.seed(a.frames, a.viewport)",
+                {"frames": capture["frames"], "viewport": capture.get("viewport")},
+            )
+        await live_page.wait_for_timeout(200)
         shadow_page = await page2.evaluate(
             """() => { const e = document.getElementById('host').shadowRoot.querySelector('.late');
                  return e ? getComputedStyle(e).color : null; }"""
         )
-        shadow_mirror = await live_frame.evaluate(
+        shadow_mirror = await live_page.evaluate(
             """() => { const h = document.getElementById('host');
                  const e = h && h.shadowRoot && h.shadowRoot.querySelector('.late');
                  if (!e) return null;
                  return { color: getComputedStyle(e).color,
                           nid: e.getAttribute('data-rb-nid'),
                           width: getComputedStyle(e).width,
-                          matches: e.matches(':where([data-rb-nid="n33"])'),
                           inShadow: e.getRootNode() === h.shadowRoot }; }"""
         )
         check(
