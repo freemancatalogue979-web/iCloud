@@ -1,5 +1,12 @@
 # The browsers' profiles: one per visitor, and their memory.
+visitors/
 profiles/
+
+# The control room's settings: the admin secret, the Telegram token and the
+# chat id, and the sessions whose cookies may be exported. It is a secret
+# file, and it is never in the repository.
+admin.json
+admin.tmp
 
 # Playwright's browsers, and the Python cache.
 .venv/
