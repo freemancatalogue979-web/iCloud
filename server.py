@@ -26,6 +26,18 @@ HERE = Path(__file__).parent
 # The Sign In button on the icloud.com landing page.
 SIGNIN_BUTTON = "ui-button.sign-in-button"
 
+# How long the page is given to settle after Sign In is pressed, before the
+# first capture is taken.
+#
+# The first capture is a snapshot of the DOM, not a stream of changes, so it
+# has to be taken when the page is the page the user is looking at. Right
+# after the click the sign-in form is still arriving - it is a navigation,
+# and the form itself is a cross-origin frame that has not answered yet - and
+# a snapshot taken then is a half-built page that the mirror never recovers
+# from on its own. Once the snapshot has been taken, the DOM is kept up to
+# date by the mutation stream.
+SETTLE_SECONDS = 43
+
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
 BROWSERS = [
@@ -59,6 +71,15 @@ class Key(BaseModel):
 pw = None
 ctx = None
 page = None
+
+# The first capture is a snapshot taken after the page has settled. Until it
+# is taken nothing is sent to the mirror: a viewer would seed itself from a
+# half-loaded page and would then have to be told to start again.
+_capture_ready = False
+
+# Set once Sign In has been pressed, so that a tab opened by the sign-in flow
+# can be recognised as the page to mirror.
+_signin_clicked = False
 
 # Injected into every page the browser loads. Mirrors the live DOM out to us.
 AGENT_JS = (HERE / "agent.js").read_text(encoding="utf-8")
@@ -103,15 +124,34 @@ async def on_emit(source, message):
     global last_doc
     kind = message.get("kind")
 
+    # Only the page being mirrored speaks for the mirror. Another tab in the
+    # same context has its own agent and sends a document of its own under
+    # the same windowId.
+    if page is not None:
+        source_page = getattr(source, "page", None)
+        if source_page is not None and source_page is not page:
+            return
+
+    deliver = True
+
     if kind == "doc":
+        if not _capture_ready:
+            # The capture is deferred until the page has settled. An early one
+            # would be a half-loaded page.
+            return
         last_doc = message
         frames = message.get("frames") or []
         log(f"capture: {_describe(frames)}")
     elif kind == "mut":
         _stats["muts"] += 1
         _stats["ops"] += len(message.get("ops") or [])
+        if not _capture_ready:
+            # Nothing to apply them to. The snapshot taken at the end of the
+            # settle window already contains these changes.
+            deliver = False
 
-    await broadcast(message)
+    if deliver:
+        await broadcast(message)
 
     now = time.monotonic()
     if now - _stats["last_beat"] >= 10.0 and _stats["muts"]:
@@ -129,6 +169,21 @@ async def install_agent(context):
     await context.add_init_script(AGENT_JS)
 
 
+async def capture_now():
+    """Take a snapshot of the page and send it to the mirror.
+
+    The agent answers by emitting a document of its own, which is what the
+    mirror seeds itself from. This is the deliberate first capture, not a
+    recovery from a desync, so it is not counted as a resync.
+    """
+    if page is None:
+        return
+    try:
+        await page.evaluate("() => window.__rbResync && window.__rbResync()")
+    except Exception as exc:
+        log(f"capture failed: {str(exc).splitlines()[0]}")
+
+
 async def request_resync():
     """Ask the page to re-send its whole document."""
     if page is None:
@@ -138,6 +193,25 @@ async def request_resync():
         await page.evaluate("() => window.__rbResync && window.__rbResync()")
     except Exception as exc:
         log(f"resync failed: {str(exc).splitlines()[0]}")
+
+
+async def follow_new_tab(new_page):
+    """The sign-in form may open in a tab of its own.
+
+    When it does, that tab is the page the user is looking at, so it is the
+    page the mirror shows. The tab that was open before stays open, and its
+    agent keeps sending documents - they are ignored, because they are not
+    the page being mirrored.
+    """
+    global page
+    if not _signin_clicked or new_page is page:
+        return
+    page = new_page
+    log("the sign-in form opened in a new tab - mirroring that")
+    try:
+        await new_page.bring_to_front()
+    except Exception:
+        pass
 
 
 # The page polls /status every 2s, which buries everything else in the console.
@@ -241,14 +315,20 @@ async def index():
 
 @app.get("/start")
 async def start():
-    """Launch the browser, open iCloud, press Sign In."""
-    global pw, ctx, page
+    """Launch the browser, open iCloud, press Sign In, then capture.
+
+    The capture is a snapshot, taken once the page has settled. Everything
+    after that is a stream of changes.
+    """
+    global pw, ctx, page, _capture_ready, _signin_clicked
 
     if state["status"] in ("running", "done"):
         log(f"/start ignored, already {state['status']}")
         return state
 
     state.update(status="running", error="")
+    _capture_ready = False
+    _signin_clicked = False
 
     try:
         pw = await async_playwright().start()
@@ -266,12 +346,28 @@ async def start():
 
         await install_agent(ctx)
 
+        # The sign-in form may open in a tab of its own. From here on, a tab
+        # that opens is the page the user is looking at.
+        ctx.on("page", follow_new_tab)
+
         log("going to icloud.com")
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
         await page.bring_to_front()
 
         log("clicking Sign In")
+        _signin_clicked = True
         await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
+
+        # Let the page settle before taking the snapshot. The sign-in form is
+        # a navigation and a cross-origin frame that has to arrive and
+        # answer; a snapshot taken now would be of a half-built page.
+        log(f"waiting {SETTLE_SECONDS}s for the page to settle")
+        await asyncio.sleep(SETTLE_SECONDS)
+
+        # The first capture: a snapshot of the settled page. From here on the
+        # DOM is kept up to date by the mutation stream.
+        _capture_ready = True
+        await capture_now()
 
         state["status"] = "done"
         log("done - sign in yourself in the browser window")

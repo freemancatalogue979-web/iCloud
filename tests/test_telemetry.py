@@ -72,6 +72,19 @@ async def main():
     # ---- a capture is logged, with enough detail to spot a gap ----------
     server._stats.update(muts=0, ops=0, resyncs=0, last_beat=0.0)
     server.last_doc = None
+
+    # Before the page has settled, nothing is captured: the first capture is
+    # a snapshot taken after the settle window.
+    server._capture_ready = False
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        await server.on_emit({}, capture(1024, 512))
+    check("nothing is captured before the page has settled",
+          buf.getvalue().strip() == "", repr(buf.getvalue()))
+    check("no document is retained before the page has settled",
+          server.last_doc is None)
+
+    server._capture_ready = True
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         await server.on_emit({}, capture(1024, 512))

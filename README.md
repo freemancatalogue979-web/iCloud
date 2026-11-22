@@ -66,6 +66,43 @@ copy of any site's markup. It mirrors whatever is loaded.
 Your clicks and keystrokes in the mirror are forwarded to the real page; the
 resulting DOM changes come straight back.
 
+## The first capture, and everything after it
+
+The mirror is built in two stages, the way the user asked for it.
+
+**The first capture is a snapshot of the page, taken 43 seconds after Sign In
+is pressed.** Not a stream of changes from the moment the page loaded — a
+snapshot, once the page has settled. Right after the click the sign-in form
+is still arriving: it is a navigation, and the form itself is a cross-origin
+frame on `idmsa.apple.com` that has not answered yet. A snapshot taken then
+is a half-built page, and the mirror never recovers from one on its own. So
+the server waits (`SETTLE_SECONDS` in `server.py` — one number, easy to
+change), then takes the snapshot and hands it to the mirror.
+
+Until that snapshot is taken, **nothing is sent to the mirror at all**. A
+viewer that connects early is not given a half-loaded page to start from, and
+the changes that happened while the page was settling are not streamed
+either: the snapshot already contains them.
+
+**After the snapshot, the DOM is kept up to date by the mutation stream.**
+That part is unchanged — granular ops, addressed by stable node ids — and it
+is what the user sees from then on.
+
+Two things about that ordering are worth stating, because both were wrong
+before:
+
+- A change made *while* a capture is being taken must not be sent before the
+  document it belongs to, or the mirror drops it — it has no document to
+  apply it to yet. The agent holds the batch until the capture is out.
+- A capture asked for *while* another capture is running must not be lost.
+  The running one read the document before the request, so it may already be
+  out of date. The request is repeated once the running one finishes;
+  dropping it left the mirror stale with nothing to show for it.
+
+The sign-in form may open in a **tab of its own**. When it does, that tab is
+the page the user is looking at, so it is the page the mirror follows, and
+the tab that was open before is ignored.
+
 ## How the capture works
 
 Modelled on the [SingleFile](https://github.com/gildas-lormeau/singlefile)
@@ -211,6 +248,9 @@ cleanly when none is installed:
   two: elements, computed styles, geometry, form state, the canvas's picture,
   the shadow root's content, and a class the live page toggles.
 - `test_server_flow.py` — runs `start()` itself, the function `/` triggers.
+  Also covers the settle window (nothing reaches the mirror before the
+  snapshot is taken, and the snapshot is of the page *after* the click) and
+  the sign-in form opening a tab of its own.
   Substitutes only a headless context (a visible window needs a display) and a
   route handler answering `icloud.com` (no outbound access here);
   `install_agent`, `on_emit`, `broadcast`, `/ws`, `/click`, `/keys` and

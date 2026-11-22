@@ -25,6 +25,7 @@ import json
 import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,9 +43,38 @@ FAKE_ICLOUD = """<!DOCTYPE html>
   <script>
     window.__clicks = [];
     document.addEventListener('click', e => {
+      // A marker on the document, so a capture can be shown to be taken
+      // after the click rather than before it.
+      document.documentElement.setAttribute('data-clicked', '1');
       window.__clicks.push({ id: e.target.id || e.target.tagName,
                              x: Math.round(e.clientX), y: Math.round(e.clientY) });
     }, true);
+    // Something keeps changing for a while, so the settle window has live
+    // changes in it. Bounded, so it stops before the mutation test runs.
+    let ticks = 0;
+    const timer = setInterval(() => {
+      if (ticks++ > 20) { clearInterval(timer); return; }
+      const s = document.createElement('span');
+      s.textContent = 'tick';
+      document.body.appendChild(s);
+    }, 120);
+  </script>
+</body></html>"""
+
+
+# The sign-in form may open in a tab of its own. The tab it opens is the page
+# the user is looking at, so it is the page the mirror shows.
+POPUP_ICLOUD = """<!DOCTYPE html>
+<html><head><title>iCloud</title></head>
+<body>
+  <ui-button class="sign-in-button" id="signin">Sign In</ui-button>
+  <div id="marker">landing page</div>
+  <script>
+    document.getElementById('signin').addEventListener('click', () => {
+      window.open('/', '_blank');
+    });
+    // A tab that was opened by another one says so.
+    if (window.opener) document.getElementById('marker').textContent = 'sign-in tab';
   </script>
 </body></html>"""
 
@@ -81,6 +111,60 @@ def find_chromium():
     except Exception:
         pass
     return None, ""
+
+
+async def check_new_tab(exe, env):
+    """The sign-in form may open in a tab of its own."""
+    import server
+    from playwright.async_api import async_playwright
+
+    server.state.update(status="idle", error="", browser_open=False)
+    server._capture_ready = False
+    server._signin_clicked = False
+    server.SETTLE_SECONDS = 0.5
+
+    async with async_playwright() as p:
+        fake = await p.chromium.launch(
+            executable_path=exe,
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            env=env or None,
+        )
+        fake_ctx = await fake.new_context()
+        await fake_ctx.route(
+            "**/*",
+            lambda r: r.fulfill(
+                status=200,
+                content_type="text/html; charset=utf-8",
+                body=POPUP_ICLOUD,
+            )
+            if "icloud.com" in r.request.url
+            else r.continue_(),
+        )
+
+        async def fake_launch():
+            pg = fake_ctx.pages[0] if fake_ctx.pages else await fake_ctx.new_page()
+            return fake_ctx, pg
+
+        server.launch = fake_launch
+        saved_pw = server.pw
+        try:
+            await server.start()
+            await asyncio.sleep(0.5)
+
+            landing = fake_ctx.pages[0]
+            check("the sign-in form opened a tab of its own",
+                  len(fake_ctx.pages) > 1, str(len(fake_ctx.pages)))
+            check("the tab the sign-in form opened is the page that is mirrored",
+                  server.page is not landing and server.page in fake_ctx.pages,
+                  str([pg.url for pg in fake_ctx.pages]))
+            frames = (server.last_doc or {}).get("frames") or []
+            html = frames[0]["html"] if frames else ""
+            check("the capture is of the tab the user is on",
+                  "sign-in tab" in html, html[:160])
+        finally:
+            server.pw = saved_pw
+            await fake.close()
 
 
 async def run():
@@ -142,9 +226,37 @@ async def run():
             server.launch = fake_launch
 
             # ------------------------------------------------ /start
+            # The first capture is a snapshot taken after the page has settled,
+            # so a viewer that connects during the settle must not be handed
+            # a half-loaded page.
+            server.SETTLE_SECONDS = 1.5
+
             async with httpx.AsyncClient(timeout=60) as client:
-                r = await client.get(base + "/start")
+                started = time.monotonic()
+                start_task = asyncio.create_task(client.get(base + "/start"))
+                await asyncio.sleep(0.4)
+
+                early = await real_pw.new_page()
+                await early.set_content("<body></body>")
+                await early.evaluate(
+                    """(url) => {
+                        window.__msgs = [];
+                        window.__ws = new WebSocket(url);
+                        window.__ws.onmessage = e => window.__msgs.push(JSON.parse(e.data));
+                    }""",
+                    base.replace("http://", "ws://") + "/ws",
+                )
+                await early.wait_for_function("() => window.__ws.readyState === 1", timeout=8000)
+                await asyncio.sleep(0.3)
+                early_kinds = await early.evaluate("() => window.__msgs.map(m => m.kind)")
+                check("nothing is sent to the mirror before the page has settled",
+                      early_kinds == [], str(early_kinds))
+
+                r = await start_task
+                elapsed = time.monotonic() - started
                 check("/start responds 200", r.status_code == 200, str(r.status_code))
+                check("the capture waits for the page to settle",
+                      elapsed >= 1.4, "%.2fs" % elapsed)
 
                 for _ in range(60):
                     st = (await client.get(base + "/status")).json()
@@ -167,6 +279,12 @@ async def run():
                 check("the capture carries ids",
                       "data-rb-nid" in (frames[0]["html"] if frames else ""),
                       (frames[0]["html"][:120] if frames else ""))
+                check("the capture is a snapshot of the page after the click",
+                      "data-clicked" in (frames[0]["html"] if frames else ""),
+                      (frames[0]["html"][:160] if frames else ""))
+                check("the early viewer was handed the snapshot when it arrived",
+                      "doc" in (await early.evaluate("() => window.__msgs.map(m => m.kind)")),
+                      str(await early.evaluate("() => window.__msgs.map(m => m.kind)")))
 
                 # ---------------------------------------- the WebSocket mirror
                 # A real browser connects to the real /ws endpoint.
@@ -264,6 +382,8 @@ async def run():
             server.page = None
             await fake.close()
             await real_pw.close()
+
+            await check_new_tab(exe, env)
             return True
     finally:
         uv.should_exit = True

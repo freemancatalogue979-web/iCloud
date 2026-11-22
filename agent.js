@@ -809,6 +809,16 @@
 
   function flush() {
     rafId = null;
+    /* A capture is in flight. Its document was read before these changes, so
+     * the changes still have to be delivered - but the document has to reach
+     * the mirror first, or the ops arrive for a document nobody has yet and
+     * are dropped. The batch waits here until the capture is done. */
+    if (capturing) {
+      rafId = window.requestAnimationFrame
+        ? window.requestAnimationFrame.call(window, flush)
+        : setTimeout(flush, 16);
+      return;
+    }
     const records = queued || [];
     queued = null;
     if (records.length === 0) return;
@@ -955,12 +965,21 @@
     }
   }
 
+  /* A capture asked for while another one is running. The running one read
+   * the document before the request, so it may already be out of date, and
+   * dropping the request would leave the mirror stale with nothing to show
+   * for it. The capture is repeated once the running one finishes. */
+  let captureAgain = false;
+
   async function sendDocument(force) {
     // Rate-limit re-seeds: without this a chatty page strobes the mirror.
     const now = Date.now();
     if (!force && lastDocSent && now - lastDocSent < RESEED_MIN_GAP) return;
+    if (capturing) {
+      captureAgain = true;
+      return;
+    }
     lastDocSent = now;
-    if (capturing) return;
     capturing = true;
     queued = null;
     try {
@@ -972,6 +991,10 @@
       /* never break the page we are mirroring */
     }
     capturing = false;
+    if (captureAgain) {
+      captureAgain = false;
+      sendDocument(true);
+    }
   }
 
   // The mirror asks for this when its structure drifts out of step. Forced, so

@@ -83,6 +83,17 @@ SOURCE_PAGE = """<!DOCTYPE html>
 </body></html>"""
 
 
+# A page with a frame that never answers. The frame is sandboxed without
+# allow-scripts, so the agent does not run inside it and it cannot reply to
+# the capture request - which makes the capture wait for its timeout.
+SLOW_PAGE = """<!DOCTYPE html>
+<html><head><title>slow</title></head>
+<body>
+  <div id="root">root</div>
+  <iframe sandbox="allow-same-origin" src="/__frame" style="width:10px;height:10px"></iframe>
+</body></html>"""
+
+
 async def run():
     from playwright.async_api import async_playwright
 
@@ -317,6 +328,63 @@ async def run():
         check("mis-indexed text op is refused", resync["applied"] is False, str(resync))
         check("mis-indexed text op leaves the subtree intact",
               resync["text"] == "styled", str(resync))
+
+        # ------------------------------- a change must not overtake its document
+        # The first capture is a snapshot, and the changes that follow it are
+        # delivered as ops. If an op were emitted while the snapshot was
+        # still being taken, it would arrive before the document it belongs
+        # to and be dropped by the mirror.
+        #
+        # A frame that never answers makes the capture wait for its timeout,
+        # which is long enough for a change to happen in the middle of one.
+        slow = await context.new_page()
+        await slow.route("**/__slowpage", lambda r: r.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=SLOW_PAGE))
+        await slow.goto("http://127.0.0.1:9002/__slowpage")
+        # The page's own capture has to be over before the scenario starts:
+        # it waits for the frame that never answers.
+        await slow.wait_for_timeout(2200)
+
+        # The agent emits through __rbEmit; record the order of what it sends.
+        await slow.evaluate(
+            """() => {
+                 window.__order = [];
+                 const real = window.__rbEmit;
+                 window.__rbEmit = (m) => { window.__order.push(m.kind); return real(m); };
+               }""")
+
+        # Started but not awaited: the capture is in the middle of its frame
+        # timeout, and the change has to happen while it is.
+        await slow.evaluate("() => { window.__rbResync(); }")
+        await slow.wait_for_timeout(120)
+        await slow.evaluate(
+            "() => { const d = document.createElement('div');"
+            " d.id = 'during'; document.body.appendChild(d); }"
+        )
+        # Long enough for the capture to finish and the change to be sent.
+        await slow.wait_for_timeout(2000)
+
+        order = await slow.evaluate("() => window.__order")
+        doc_at = next((i for i, k in enumerate(order) if k == "doc"), None)
+        mut_at = next((i for i, k in enumerate(order) if k == "mut"), None)
+        check("a change made during a capture is delivered",
+              mut_at is not None, str(order))
+        check("the change does not arrive before the document it belongs to",
+              doc_at is not None and mut_at is not None and doc_at < mut_at,
+              "doc at %r, mut at %r, order %r" % (doc_at, mut_at, order))
+
+        # A capture asked for while another one is still running. The running
+        # one read the document before the request, so it may already be out
+        # of date - dropping the request would leave the mirror stale with
+        # nothing to show for it.
+        await slow.evaluate("() => { window.__order = []; }")
+        await slow.evaluate("() => { window.__rbResync(); }")
+        await slow.wait_for_timeout(150)
+        await slow.evaluate("() => { window.__rbResync(); }")
+        await slow.wait_for_timeout(3000)
+        order = await slow.evaluate("() => window.__order")
+        check("a capture asked for during a capture is not lost",
+              order.count("doc") >= 2, str(order))
 
         await browser.close()
         return True
