@@ -12,6 +12,7 @@ import logging
 import re
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import quote, urljoin
 
@@ -330,6 +331,48 @@ def rewrite_css(css: str, base: str) -> str:
     return CSS_URL_RE.sub(replace, css)
 
 
+# Proxied assets are static in practice, and one page asks for the same font or
+# sprite from several rules at once. Without a cache every mirror load re-fetches
+# every asset through the browser's request API, and concurrent requests for the
+# same URL each pay for it separately.
+_RES_TTL = 600.0
+_RES_MAX_ENTRIES = 256
+_RES_MAX_BYTES = 8 * 1024 * 1024
+_res_cache: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()
+_res_inflight: dict[str, "asyncio.Future[tuple[bytes, str]]"] = {}
+
+
+def _res_get(url: str):
+    hit = _res_cache.get(url)
+    if not hit:
+        return None
+    at, body, content_type = hit
+    if time.monotonic() - at > _RES_TTL:
+        _res_cache.pop(url, None)
+        return None
+    _res_cache.move_to_end(url)  # least recently used falls off first
+    return body, content_type
+
+
+def _res_put(url: str, body: bytes, content_type: str):
+    if len(body) > _RES_MAX_BYTES:
+        return  # one huge asset should not evict everything else
+    _res_cache[url] = (time.monotonic(), body, content_type)
+    _res_cache.move_to_end(url)
+    while len(_res_cache) > _RES_MAX_ENTRIES:
+        _res_cache.popitem(last=False)
+
+
+async def _res_fetch(url: str) -> tuple[bytes, str]:
+    """Fetch through the browser context and rewrite CSS url()s."""
+    response = await ctx.request.get(url)
+    body = await response.body()
+    content_type = response.headers.get("content-type", "application/octet-stream")
+    if "text/css" in content_type.lower():
+        body = rewrite_css(body.decode(errors="replace"), url).encode("utf-8")
+    return body, content_type
+
+
 @app.get("/res")
 async def proxy(url: str):
     # Validate before anything else, so this can never be pointed at a local
@@ -339,18 +382,36 @@ async def proxy(url: str):
     if ctx is None:
         return Response(status_code=503, content=b"no browser session")
 
-    try:
-        # Shares cookies with the driven browser, so authenticated assets work.
-        response = await ctx.request.get(url)
-    except Exception as exc:
-        return Response(status_code=502, content=str(exc).splitlines()[0].encode()[:300])
+    cached = _res_get(url)
+    if cached is None:
+        # Several rules can ask for the same asset in the same instant; let the
+        # first one fetch and the rest wait on it. A failure resolves the shared
+        # future to None rather than raising or cancelling: CancelledError
+        # descends from BaseException, so an `except Exception` in the waiter
+        # would not catch it and it would escape the request handler.
+        inflight = _res_inflight.get(url)
+        if inflight is None:
+            inflight = asyncio.get_running_loop().create_future()
+            _res_inflight[url] = inflight
+            try:
+                fetched = await _res_fetch(url)
+            except Exception as exc:
+                reason = str(exc).splitlines()[0].encode()[:300]
+                _res_inflight.pop(url, None)
+                if not inflight.done():
+                    inflight.set_result(None)
+                return Response(status_code=502, content=reason)
+            _res_inflight.pop(url, None)
+            _res_put(url, *fetched)
+            if not inflight.done():
+                inflight.set_result(fetched)
+            cached = fetched
+        else:
+            cached = await inflight
+            if cached is None:
+                return Response(status_code=502, content=b"upstream fetch failed")
 
-    body = await response.body()
-    content_type = response.headers.get("content-type", "application/octet-stream")
-
-    if "text/css" in content_type.lower():
-        body = rewrite_css(body.decode(errors="replace"), url).encode("utf-8")
-
+    body, content_type = cached
     return Response(
         content=body,
         media_type=content_type,
