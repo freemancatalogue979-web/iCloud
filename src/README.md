@@ -12,6 +12,10 @@ What the server does with them:
 - **Everything else is served as-is**, so keep stylesheets, scripts, images
   and fonts next to the page that references them (relative URLs resolve
   against `/src/…`, the same shape the capture had).
+- **A captured Content-Security-Policy `<meta>` is removed**, because it was
+  written for the site's origin and here it would block `/sync.js` and the
+  socket. The standard `mobile-web-app-capable` meta is added if it is
+  missing, next to the Apple one.
 
 `/src/` (no file name) lists what is here, and a missing page says so instead
 of showing a bare 404, so a fresh clone with an empty `src/` still explains

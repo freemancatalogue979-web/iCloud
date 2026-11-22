@@ -8,9 +8,9 @@
  * what it does with what comes back, and that it neither echoes an applied
  * value nor replays a click.
  *
- * test-launcher.js runs client.html with a stubbed /status: when it replaces
- * itself with the capture, and what it shows while the browser is opening or
- * after a failed launch.
+ * test-launcher.js runs client.html with a stubbed /status: that the splash is
+ * only the mark, and that it replaces itself with the capture when the run is
+ * over (including after a failed launch).
  *
  * test_sync.py runs the rest of server.py without a browser: the src/ routes,
  * the engine injection, the hub that carries values, clicks and page changes

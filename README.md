@@ -52,9 +52,11 @@ carry. A static file cannot be addressed wrongly.
 
 ## How the app gets to the capture
 
-There is no iframe. `/` is a launcher: it opens the browser (`/start`), says
-what it is doing, and — as soon as `/status` answers `done`, which is the
-moment Sign In has been clicked — replaces itself with the captured page:
+There is no iframe. `/` is a splash screen and nothing else: a black screen
+with the Apple mark breathing on it. No caption, no spinner, no links, no
+"opening this / doing that". It opens the browser (`/start`) and, as soon as
+`/status` answers `done` — the moment Sign In has been clicked — it replaces
+itself with the captured page:
 
 ```js
 location.replace("/src/1.html")
@@ -76,8 +78,15 @@ would break. A navigation is the honest swap: same URL, same document, same
 script behaviour as opening the file directly.
 
 While the run is `done`, `/` redirects to the capture, so a reload comes back
-to the page rather than to the launcher. If the browser cannot be opened, the
-launcher says so and offers the capture anyway.
+to the page rather than to the splash. A browser that will not open does not
+hold the page hostage either: on `error` the splash goes to the capture anyway,
+and there is a 30 s cap in case the launch hangs. Nothing is ever shown about
+it — the static capture is the point.
+
+The one thing that does change on the way out is the markup: the capture keeps
+its own `<meta name="apple-mobile-web-app-capable">`, and the standard
+`<meta name="mobile-web-app-capable" content="yes">` is added if it is missing,
+because Chrome warns about a page that has only the deprecated Apple name.
 
 ## Sign in still happens, in the real browser
 
@@ -153,6 +162,13 @@ written back into `src/` — those files are the captures.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
   empty `src/` is not a blank page.
+- **The capture's Content-Security-Policy is removed.** A policy captured from
+  the site was written for the site's origin. Served from here it blocks
+  `/sync.js` (leaving a dead file), the socket, and Chrome's own request to
+  `/.well-known/appspecific/com.chrome.devtools.json` — the
+  `default-src 'none'` violation in the console. The `<meta>` is dropped on the
+  way out; other metas, including the Apple one, are left alone.
+- **The standard web-app meta is added** when the capture does not have it.
 
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
@@ -216,10 +232,9 @@ npm test
 Three suites, none of which needs Chromium or a network:
 
 - `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
-  pins the hand-off: the caption follows the server's step, the spinner gives
-  way to the mark when the browser is open, the launcher navigates to the page
-  the server names as soon as the run is `done`, and a failed launch stops
-  polling, says why, and offers the capture instead.
+  pins the splash: the screen is only the mark — no text, no buttons, nothing
+  that pops up — it navigates only once the run is over, it navigates on a
+  failed launch too, and it stops polling after it goes.
 - `test-sync.js` runs `sync.js` in jsdom with a stubbed WebSocket. It pins the
   protocol: typing is not sent mid-word, an unchanged field is not sent again,
   a checkbox carries its state, a click carries its position, a remote value
@@ -228,8 +243,9 @@ Three suites, none of which needs Chromium or a network:
   followed, a submit is cancelled, and a dropped socket reconnects and asks
   for the state again.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
-  injected once and only into HTML, assets keep their type, nothing outside
-  `src/` is readable, a missing capture says so, and the hub really is the
+  injected once and only into HTML, the standard web-app meta is added and the
+  capture's CSP removed, assets keep their type, nothing outside `src/` is
+  readable, a missing capture says so, and the hub really is the
   shared state — a value reaches the other viewer and the next one to join, a
   click is relayed but a click with no position is dropped, a link moves every
   viewer and clears form state, an off-site page is refused, a viewer that

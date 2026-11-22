@@ -92,19 +92,40 @@ def make_request(payload):
 
 
 async def main():
-    # ---- the engine goes into a captured page, and only once -------------
+    # ---- what a captured page gets on the way out ------------------------
     page = (
-        "<!DOCTYPE html><html><head><title>Sign in</title></head>"
-        "<body><p>hello</p></body></html>"
+        "<!DOCTYPE html><html><head><title>Sign in</title>"
+        '<meta name="apple-mobile-web-app-capable" content="yes">'
+        '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'">'
+        '<meta name="viewport" content="width=device-width">'
+        "</head><body><p>hello</p></body></html>"
     )
-    served = server.inject_sync(page)
+    served = server.prepare_page(page)
     check("the sync engine is injected into the head",
-          "</title>" + server.SYNC_TAG + "</head>" in served, served[:120])
-    check("injecting twice changes nothing", server.inject_sync(served) == served)
-    check("a capture with an upper-case head still gets it",
-          server.SYNC_TAG in server.inject_sync("<HTML><HEAD></HEAD><BODY></BODY></HTML>"))
-    check("a capture with no head still gets it",
-          "<body>" + server.SYNC_TAG in server.inject_sync("<html><body>x</body></html>"))
+          server.SYNC_TAG in served and
+          served.index(server.SYNC_TAG) < served.index("</head>"), served[:200])
+    check("the standard web-app meta is added",
+          'name="mobile-web-app-capable" content="yes"' in served, served[:200])
+    check("the apple-prefixed meta is left alone",
+          'name="apple-mobile-web-app-capable"' in served)
+    check("the capture's Content-Security-Policy is removed",
+          "content-security-policy" not in served.lower(), served)
+    check("other metas are left alone", 'name="viewport"' in served)
+    check("preparing a page twice changes nothing",
+          server.prepare_page(served) == served)
+    check("a standard meta already there is not duplicated",
+          server.prepare_page(
+              "<html><head><meta name='mobile-web-app-capable'></head></html>"
+          ).count("mobile-web-app-capable") == 1)
+
+    upper = server.prepare_page("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
+    check("a capture with an upper-case head still gets both",
+          server.SYNC_TAG in upper and server.WEB_APP_META in upper, upper)
+
+    headless = server.prepare_page("<html><body>x</body></html>")
+    check("a capture with no head still gets both",
+          server.SYNC_TAG in headless and server.WEB_APP_META in headless and
+          headless.index(server.SYNC_TAG) > headless.index("<body>"), headless)
 
     # ---- only captured pages may be navigated to -------------------------
     check("a captured page is a valid destination",

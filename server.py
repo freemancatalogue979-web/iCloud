@@ -72,9 +72,14 @@ pw = None
 ctx = None
 page = None
 
-# The one script a captured page gets, put into it as it is served rather than
-# written into the file on disk. The file stays exactly what was captured.
+# What a captured page gets on the way out. None of it is written into the
+# file on disk: the file stays exactly what was captured, and these are put in
+# as it is served.
 SYNC_TAG = '<script src="/sync.js"></script>'
+
+# Apple's standalone meta predates the standard one. Chrome warns about a page
+# that has only the apple-prefixed name, so both are served.
+WEB_APP_META = '<meta name="mobile-web-app-capable" content="yes">'
 
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -268,33 +273,61 @@ async def status():
 # --------------------------------------------------------------------------
 # The captured pages
 #
-# src/ is served as it is, with one addition: every HTML page gets /sync.js in
-# its head. That script is how what the user does in the page reaches the
-# server. Without it the page is just a file and nothing leaves the tab.
+# src/ is served as it is, with a small amount put in on the way out: the sync
+# engine, the standard web-app meta, and one removal - the capture's own
+# Content-Security-Policy. That policy was written for the site it was captured
+# from, and on this origin it does real damage: it blocks /sync.js (so the page
+# is a dead file), it blocks the socket, and it blocks Chrome's own request to
+# /.well-known/appspecific/com.chrome.devtools.json. A captured page is not
+# the live site and cannot be policed as if it were.
 # --------------------------------------------------------------------------
 
 _HEAD_END = re.compile(r"</head\s*>", re.IGNORECASE)
 _BODY_OPEN = re.compile(r"<body[^>]*>", re.IGNORECASE)
+_META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_CSP_HTTP_EQUIV = re.compile(
+    r"""http-equiv\s*=\s*["']?\s*content-security-policy""", re.IGNORECASE
+)
+_SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.IGNORECASE)
+_WEB_APP_PRESENT = re.compile(
+    r"""<meta\b[^>]*\bname\s*=\s*["']?mobile-web-app-capable""", re.IGNORECASE
+)
 _HTML_SUFFIXES = (".html", ".htm")
 
 
-def inject_sync(page_html: str) -> str:
-    """Put the sync engine into a captured page, once."""
-    if "/sync.js" in page_html:
+def _drop_csp_meta(match: re.Match) -> str:
+    tag = match.group(0)
+    # Attribute order is not guaranteed, so the policy is checked on the whole
+    # tag rather than in a fixed position.
+    return "" if _CSP_HTTP_EQUIV.search(tag) else tag
+
+
+def _insert_once(page_html: str, tag: str, present: re.Pattern) -> str:
+    if present.search(page_html):
         return page_html
 
     match = _HEAD_END.search(page_html)
     if match:
-        return page_html[: match.start()] + SYNC_TAG + page_html[match.start():]
+        return page_html[: match.start()] + tag + page_html[match.start():]
 
-    # A capture with no head still has to run the engine. Before the body is
-    # as good a place as any: the script defers its DOM work until the
-    # document has been parsed.
+    # A capture with no head still needs both. After the body tag is as good a
+    # place as any: the engine defers its DOM work until parsing is done.
     match = _BODY_OPEN.search(page_html)
     if match:
-        return page_html[: match.end()] + SYNC_TAG + page_html[match.end():]
+        return page_html[: match.end()] + tag + page_html[match.end():]
 
-    return SYNC_TAG + page_html
+    return tag + page_html
+
+
+def prepare_page(page_html: str) -> str:
+    """A captured page, made fit to serve.
+
+    Idempotent, so a file that was prepared once is not prepared again.
+    """
+    page_html = _META_TAG.sub(_drop_csp_meta, page_html)
+    page_html = _insert_once(page_html, SYNC_TAG, _SYNC_PRESENT)
+    page_html = _insert_once(page_html, WEB_APP_META, _WEB_APP_PRESENT)
+    return page_html
 
 
 def captured_files(folder: Path) -> list[Path]:
@@ -401,7 +434,7 @@ async def captured(path: str = ""):
 
     if target.suffix.lower() in _HTML_SUFFIXES:
         source = target.read_text(encoding="utf-8", errors="replace")
-        return HTMLResponse(inject_sync(source), headers=NO_STORE)
+        return HTMLResponse(prepare_page(source), headers=NO_STORE)
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(

@@ -3,150 +3,83 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
 <title>iCloud</title>
 <style>
-  html, body { height:100%; margin:0; background:#000; color:#f5f5f7; }
+  html, body { height:100%; margin:0; background:#000; }
 
-  body {
-    display:flex; align-items:center; justify-content:center;
-    font:15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  body { display:flex; align-items:center; justify-content:center; }
+
+  /* Nothing else: a black screen and the mark, breathing, until the capture
+   * is ready to take over. No text, no buttons, no links. */
+  .mark {
+    width:64px; height:64px;
+    opacity:0;
+    animation:
+      fade .45s ease-out both,
+      breathe 2.8s ease-in-out .45s infinite;
   }
 
-  main { max-width:24rem; padding:2rem; text-align:center; }
+  .mark svg { display:block; width:100%; height:100%; fill:#fff; }
 
-  .spinner {
-    width:44px; height:44px;
-    margin:0 auto 1.4rem;
-    border:3px solid rgba(255,255,255,.18);
-    border-top-color:#fff;
-    border-radius:50%;
-    animation:spin .9s linear infinite;
-  }
-  @keyframes spin { to { transform:rotate(360deg); } }
-
-  .icon { display:flex; justify-content:center; margin:0 auto 1.4rem; animation:fade .3s ease-in; }
   @keyframes fade { from { opacity:0; } to { opacity:1; } }
+  @keyframes breathe {
+    0%, 100% { transform:scale(1); opacity:1; }
+    50% { transform:scale(.9); opacity:.55; }
+  }
 
-  /* Errors are shown by colour: the mark turns red, the caption says why. */
-  .icon.failed svg { fill:#ff453a; }
-
-  #caption { margin:0; color:#a1a1a6; }
-
-  #fallback { margin:1.2rem 0 0; font-size:.9rem; }
-  #fallback a { color:#0a84ff; text-decoration:none; }
-  #fallback a:hover { text-decoration:underline; }
-  #fallback a + a { margin-left:1rem; }
-
-  [hidden] { display:none !important; }
+  @media (prefers-reduced-motion: reduce) {
+    .mark { animation:none; opacity:1; }
+  }
 </style>
 </head>
 <body>
-  <main>
-    <div class="spinner" id="spinner"></div>
-
-    <div class="icon" id="icon" hidden>
-      <svg width="64" height="64" viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
-        <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 5.98-3.74 4.25z"/>
-      </svg>
-    </div>
-
-    <p id="caption" role="status" aria-live="polite">Opening iCloud…</p>
-
-    <p id="fallback" hidden>
-      <a id="open" href="/src/1.html">Open the captured page</a>
-      <a href="/">Try again</a>
-    </p>
-  </main>
+  <div class="mark" role="img" aria-label="Apple">
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 5.98-3.74 4.25z"/>
+    </svg>
+  </div>
 
 <script>
-  const spinner = document.getElementById("spinner");
-  const icon = document.getElementById("icon");
-  const caption = document.getElementById("caption");
-  const fallback = document.getElementById("fallback");
-  const open = document.getElementById("open");
+  // Where the app goes when the wait is over. The server knows which page
+  // everyone is on, which is not always 1.html.
+  let target = "/src/1.html";
+  let gone = false;
 
-  // Where the app goes when the browser is ready. The server knows the page
-  // everyone is on, which may not be 1.html if another viewer followed a link.
-  let target = open.getAttribute("href");
-  let navigated = false;
-  let timer = null;
-
-  // Visiting the page opens the real browser and presses Sign In.
-  fetch("/start").catch(() => {});
-
-  /* The capture replaces this document entirely.
-   *
-   * No iframe: the captured page is a document of its own, laid out as a
-   * page rather than squeezed into a frame inside another document. Its
-   * /sync.js - injected by the server - runs at the top level exactly as it
-   * did before, so typing, clicks and navigation still go to the server and
-   * come back out on every other viewer. */
+  /* The capture replaces this document entirely - no frame, no chrome, no
+   * intermediate screen. Its /sync.js, injected by the server, runs at the
+   * top level, so typing, clicks and navigation still reach the server. */
   function go() {
-    if (navigated) return;
-    navigated = true;
-    clearTimeout(timer);
+    if (gone) return;
+    gone = true;
     location.replace(target);
   }
 
-  function failed(message) {
-    clearTimeout(timer);
-    spinner.hidden = true;
-    icon.hidden = false;
-    icon.classList.add("failed");
-    caption.textContent = message || "The browser could not be opened.";
-    fallback.hidden = false;
-  }
-
-  function render(state) {
-    if (state.status === "done") {
-      go();
-      return;
-    }
-
-    if (state.status === "error") {
-      failed(state.error ? "The browser could not be opened: " + state.error
-                         : "The browser could not be opened.");
-      return;
-    }
-
-    // Once the browser is open the wait is the sign-in click, so the mark
-    // replaces the spinner.
-    if (state.browser_open) {
-      spinner.hidden = true;
-      icon.hidden = false;
-    } else {
-      spinner.hidden = false;
-      icon.hidden = true;
-    }
-
-    if (state.step) caption.textContent = state.step;
-    timer = setTimeout(poll, 400);
-  }
+  // Visiting the page opens the browser and presses Sign In. This screen is
+  // only the wait for that.
+  fetch("/start").catch(() => {});
 
   function poll() {
     fetch("/status")
       .then((r) => r.json())
       .then((state) => {
-        if (state.page) {
-          target = state.page;
-          open.setAttribute("href", target);
+        if (state.page) target = state.page;
+        // Done is Sign In clicked. An error means the browser will not open;
+        // the capture is still the page the user came for, so show it.
+        if (state.status === "done" || state.status === "error") {
+          go();
+          return;
         }
-        render(state);
+        setTimeout(poll, 250);
       })
-      .catch(() => {
-        // The server is restarting or the request was interrupted; keep
-        // trying rather than leaving a spinner spinning for no reason.
-        timer = setTimeout(poll, 1000);
-      });
+      .catch(() => setTimeout(poll, 800));
   }
 
   poll();
 
-  // Do not hold the capture hostage to a browser that will not open. The
-  // links are there if this is taking longer than a launch should.
-  setTimeout(() => {
-    if (!navigated) fallback.hidden = false;
-  }, 15000);
+  // No screen should be permanent. If the browser is still not up after half
+  // a minute, open the capture anyway.
+  setTimeout(go, 30000);
 </script>
 </body>
 </html>

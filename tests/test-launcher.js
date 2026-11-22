@@ -1,9 +1,9 @@
-/* Exercises client.html - the launcher - in jsdom.
+/* Exercises client.html - the splash - in jsdom.
  *
- * The launcher is what decides when the app becomes the capture: it polls
- * /status, follows the step the server reports, and replaces itself with the
- * captured page once Sign In has been clicked. jsdom cannot navigate, so a
- * navigation attempt shows up as a jsdomError; that is the signal used here.
+ * The splash is deliberately silent: a black screen with the mark on it, and
+ * then the capture. No text, no buttons, no "opening this / doing that". The
+ * only decision it makes is when to hand over. jsdom cannot navigate, so an
+ * attempt shows up as a jsdomError; that is the signal used here.
  */
 const fs = require("fs");
 const path = require("path");
@@ -41,8 +41,8 @@ function launch(statuses) {
         if (String(url) === "/start") {
           return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
         }
-        // Stay on the last state: a launcher that keeps polling after it has
-        // navigated, or after a failure, is a launcher that never settles.
+        // Stay on the last state: a splash that keeps polling after it has
+        // gone, or after a failure, is a splash that never settles.
         const body = statuses[Math.min(polls, statuses.length - 1)];
         polls++;
         return Promise.resolve({ json: () => Promise.resolve(body) });
@@ -50,68 +50,60 @@ function launch(statuses) {
     },
   });
 
-  return {
-    dom,
-    errors,
-    polls: () => polls,
-    id: (name) => dom.window.document.getElementById(name),
-  };
+  return { dom, errors, polls: () => polls };
 }
 
 const navigations = (errors) => errors.filter((message) => /navigation/i.test(message));
 
+// The inline <script> is part of body.textContent; only what a person could
+// see counts.
+function visibleText(doc) {
+  const copy = doc.body.cloneNode(true);
+  copy.querySelectorAll("script, style").forEach((el) => el.remove());
+  return copy.textContent.trim();
+}
+
 (async () => {
-  // ---- the happy path ---------------------------------------------------
-  const running = launch([
-    { status: "running", step: "launching bundled chromium", browser_open: false, page: "/src/1.html" },
-    { status: "running", step: "clicking Sign In", browser_open: true, page: "/src/2.html" },
-    { status: "done", step: "done", browser_open: true, page: "/src/2.html" },
-  ]);
+  // ---- the splash is only the mark --------------------------------------
+  const running = { status: "running", browser_open: false, page: "/src/1.html" };
+  const done = { status: "done", browser_open: true, page: "/src/1.html" };
+  const ok = launch([running, running, done]);
 
-  await sleep(120);
-  check("the launcher shows what the server is doing",
-    running.id("caption").textContent === "launching bundled chromium",
-    running.id("caption").textContent);
-  check("a spinner shows while the browser is opening",
-    running.id("spinner").hidden === false && running.id("icon").hidden === true);
+  await sleep(100);
+  const doc = ok.dom.window.document;
+  const bodyChildren = [...doc.body.children].filter((el) => el.tagName !== "SCRIPT");
+  check("the screen is only the mark - no text, no buttons",
+    visibleText(doc) === "" &&
+      doc.querySelectorAll("a, button, input, p, span, h1, img").length === 0 &&
+      bodyChildren.length === 1 && bodyChildren[0].classList.contains("mark") &&
+      !!doc.querySelector(".mark svg"),
+    JSON.stringify(visibleText(doc)) + " / " + bodyChildren.length);
+  check("the page carries the standard web-app meta",
+    !!doc.querySelector('meta[name="mobile-web-app-capable"]'));
+  check("nothing has happened before Sign In is clicked",
+    navigations(ok.errors).length === 0, ok.errors);
 
-  await sleep(420);
-  check("the mark replaces the spinner once the browser is open",
-    running.id("spinner").hidden === true && running.id("icon").hidden === false,
-    [running.id("spinner").hidden, running.id("icon").hidden].join(" / "));
-  check("the launcher knows which page the server is on",
-    running.id("open").getAttribute("href") === "/src/2.html",
-    running.id("open").getAttribute("href"));
+  // ---- and then it goes -------------------------------------------------
+  await sleep(800);
+  check("it goes straight to the capture once Sign In has been clicked",
+    navigations(ok.errors).length === 1, ok.errors);
 
-  await sleep(460);
-  check("once Sign In has been clicked the launcher navigates to the capture",
-    navigations(running.errors).length === 1, running.errors);
-
-  const pollsWhenDone = running.polls();
-  await sleep(900);
-  check("it does not keep polling once it has gone",
-    running.polls() === pollsWhenDone,
-    pollsWhenDone + " -> " + running.polls());
+  const pollsWhenGone = ok.polls();
+  await sleep(600);
+  check("it stops polling after it has gone",
+    ok.polls() === pollsWhenGone, pollsWhenGone + " -> " + ok.polls());
 
   // ---- the browser will not open ---------------------------------------
   const broken = launch([
-    { status: "error", step: "FAILED", error: "no display", browser_open: false, page: "/src/1.html" },
+    { status: "error", error: "no display", browser_open: false, page: "/src/1.html" },
   ]);
 
-  await sleep(200);
-  check("a failure is reported instead of spinning forever",
-    /no display/.test(broken.id("caption").textContent),
-    broken.id("caption").textContent);
-  check("the failed mark is shown",
-    broken.id("icon").hidden === false &&
-      broken.id("icon").classList.contains("failed"));
-
-  await sleep(700);
-  check("a failed launch still offers the capture",
-    broken.id("fallback").hidden === false &&
-      broken.id("open").getAttribute("href") === "/src/1.html");
-  check("a failed launch does not navigate", navigations(broken.errors).length === 0,
-    broken.errors);
+  await sleep(150);
+  check("a browser that will not open still opens the capture",
+    navigations(broken.errors).length === 1, broken.errors);
+  check("and still shows nothing on the way",
+    visibleText(broken.dom.window.document) === "",
+    JSON.stringify(visibleText(broken.dom.window.document)));
   check("a failed launch stops polling", broken.polls() === 1, broken.polls());
 
   console.log(`\n${passed} passed, ${failed} failed`);
