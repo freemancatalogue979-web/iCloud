@@ -66,6 +66,24 @@ copy of any site's markup. It mirrors whatever is loaded.
 Your clicks and keystrokes in the mirror are forwarded to the real page; the
 resulting DOM changes come straight back.
 
+**The mirror is laid out at the size the page was captured, and scaled to
+fit.** The browser window is opened maximised, so the real page is as wide as
+the screen - often wider than the window the mirror is shown in. If the
+mirror reflowed the capture to its own width, two things would be wrong at
+once: the page would be cut off where it did not fit, and a click would land
+somewhere other than where it was clicked. The capture carries the size it
+was taken at, the mirror lays it out at that size and scales it down, and a
+click is sent as a fraction of the captured page. The server scales that
+fraction to the window it is actually driving - not to a size guessed at
+build time, which put the click in the wrong place on any window that was
+not 1280x800.
+
+**A click inside a frame is mapped out of the frame first.** The sign-in
+form is a frame, and a frame reports a click in its own coordinates. Each
+frame's offset is added as the frames are climbed out of, so the click ends
+up in the captured page's coordinates - the only ones the server can use.
+Without it, a click in the sign-in form landed somewhere else entirely.
+
 ## The first capture, and everything after it
 
 The mirror is built in two stages, the way the user asked for it.
@@ -247,6 +265,12 @@ cleanly when none is installed:
   it in a second real browser through the real `view.html`, and compares the
   two: elements, computed styles, geometry, form state, the canvas's picture,
   the shadow root's content, and a class the live page toggles.
+- `test_cross_origin.py` — two real origins, `www.icloud.com` and
+  `idmsa.apple.com`, in a real Chromium. The sign-in form is a frame on the
+  second one. It checks that the form is in the capture, that a click in the
+  mirror lands on the field inside that frame, that what is typed in the
+  mirror arrives in it, and that the mirror lays the page out at the size it
+  was captured rather than reflowing it.
 - `test_server_flow.py` — runs `start()` itself, the function `/` triggers.
   Also covers the settle window (nothing reaches the mirror before the
   snapshot is taken, and the snapshot is of the page *after* the click) and
