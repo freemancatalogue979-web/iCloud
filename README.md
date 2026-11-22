@@ -142,10 +142,11 @@ navigation is cancelled.
 **A viewer that is not reading misses a message, it does not stall the page.**
 Each viewer has its own queue; a full one drops the message.
 
-**What is not carried.** Scroll position, focus, file inputs, and DOM
-changes the captured page's own scripts make — a menu opening, a tab
-switching. Only what you do to the captured controls travels; the document
-itself is the file.
+**What is not carried.** Scroll position, focus, file inputs, and anything
+the capture's own scripts would have done — a menu opening, a tab switching,
+the site re-rendering itself. Those scripts are removed on the way out (see
+below), so the page stays the document that was captured. Only what you do to
+the captured controls travels.
 
 The state is in memory. Restarting the server clears it, and it is never
 written back into `src/` — those files are the captures.
@@ -162,16 +163,49 @@ written back into `src/` — those files are the captures.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
   empty `src/` is not a blank page.
+- **The capture's own scripts are removed.** A capture is a finished
+  document: the DOM a script would build is already in the file. Its
+  JavaScript, though, was written against the live site, and run against a
+  copy it does damage — Apple's sign-in app bootstraps and replaces the very
+  form that was captured, leaving a blank panel; other pages navigate away or
+  open dialogs. Nothing it does can work here anyway, because there is no
+  backend behind the copy. The tags are dropped; the markup is not touched.
+  The only script left is `/sync.js`.
 - **The capture's Content-Security-Policy is removed.** A policy captured from
   the site was written for the site's origin. Served from here it blocks
   `/sync.js` (leaving a dead file), the socket, and Chrome's own request to
   `/.well-known/appspecific/com.chrome.devtools.json` — the
   `default-src 'none'` violation in the console. The `<meta>` is dropped on the
   way out; other metas, including the Apple one, are left alone.
-- **The standard web-app meta is added** when the capture does not have it.
+- **The standard web-app meta is added** when the capture does not have it,
+  as the first thing in the head — before the deprecated Apple meta, so Chrome
+  never sees the Apple name without the standard one and has nothing to warn
+  about.
+- **`?raw=1` serves the file untouched** — no engine, scripts and CSP
+  included. It is the thing to open when a served page does not look like the
+  file it came from.
+
+The removals happen in that order — scripts first — because a capture can
+contain `</head>` or a `<meta>` inside a script string, and an edit made
+before the scripts were gone could land inside the script instead of the
+document.
 
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
+
+### If a capture does not look like the page
+
+Open it with `?raw=1`. If that looks right and the prepared page does not, the
+difference is one of the transformations above. If both look wrong, the
+capture itself is missing something — usually the site's CSS: a page that
+points at stylesheets which were never saved renders as bare markup, and a
+page whose layout came from a script that is now (correctly) not running
+renders as whatever the capture saw at the moment it was taken.
+
+The console is the other place to look. A served capture that has no scripts
+left will not log anything about the site it came from; if something is still
+running there, it came from an inline handler (`onclick=`) on the captured
+markup.
 
 ## The socket
 
@@ -243,9 +277,10 @@ Three suites, none of which needs Chromium or a network:
   followed, a submit is cancelled, and a dropped socket reconnects and asks
   for the state again.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
-  injected once and only into HTML, the standard web-app meta is added and the
-  capture's CSP removed, assets keep their type, nothing outside `src/` is
-  readable, a missing capture says so, and the hub really is the
+  injected once and only into HTML, the capture's scripts and CSP are removed,
+  the standard web-app meta is added before the Apple one, `?raw=1` serves the
+  file untouched, assets keep their type, nothing outside `src/` is readable, a
+  missing capture says so, and the hub really is the
   shared state — a value reaches the other viewer and the next one to join, a
   click is relayed but a click with no position is dropped, a link moves every
   viewer and clears form state, an off-site page is refused, a viewer that

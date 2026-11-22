@@ -273,26 +273,48 @@ async def status():
 # --------------------------------------------------------------------------
 # The captured pages
 #
-# src/ is served as it is, with a small amount put in on the way out: the sync
-# engine, the standard web-app meta, and one removal - the capture's own
-# Content-Security-Policy. That policy was written for the site it was captured
-# from, and on this origin it does real damage: it blocks /sync.js (so the page
-# is a dead file), it blocks the socket, and it blocks Chrome's own request to
-# /.well-known/appspecific/com.chrome.devtools.json. A captured page is not
-# the live site and cannot be policed as if it were.
+# src/ is served as it is, with a small amount put in on the way out and three
+# things taken out:
+#
+#   * the capture's own scripts, because a capture is a finished document.
+#     Its JavaScript was written against the live site: run on a copy it can
+#     blank the markup that was captured (Apple's sign-in form is rendered by
+#     the app bootstrapping itself), navigate the page away, or pop a dialog
+#     up. None of it can work here - there is no backend behind the copy - and
+#     the DOM it would build is already in the file.
+#   * the capture's Content-Security-Policy <meta>, because that policy was
+#     written for the site it came from. Served from here it blocks /sync.js
+#     (leaving a dead file), the socket, and Chrome's request to
+#     /.well-known/appspecific/com.chrome.devtools.json.
+#   * nothing else. The file on disk is untouched; ?raw=1 serves it that way.
+#
+# Put in: /sync.js, and the standard mobile-web-app-capable meta (first in the
+# head, before the deprecated Apple one, so Chrome has nothing to complain
+# about).
+#
+# The scripts go first, before any other edit. A capture can contain "</head>"
+# or "<meta ...>" inside a <script> string, and an edit that ran before the
+# scripts were removed could land inside the script instead of the document.
 # --------------------------------------------------------------------------
 
+_HEAD_OPEN = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 _HEAD_END = re.compile(r"</head\s*>", re.IGNORECASE)
 _BODY_OPEN = re.compile(r"<body[^>]*>", re.IGNORECASE)
 _META_TAG = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_SCRIPT = re.compile(r"<script\b[^>]*>.*?</script\s*>", re.IGNORECASE | re.DOTALL)
 _CSP_HTTP_EQUIV = re.compile(
     r"""http-equiv\s*=\s*["']?\s*content-security-policy""", re.IGNORECASE
 )
 _SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.IGNORECASE)
 _WEB_APP_PRESENT = re.compile(
-    r"""<meta\b[^>]*\bname\s*=\s*["']?mobile-web-app-capable""", re.IGNORECASE
+    r"""<meta\b[^>]*\bname\s*=\s*["']?mobile-web-app-capable[\s"'/>]""", re.IGNORECASE
 )
 _HTML_SUFFIXES = (".html", ".htm")
+
+
+def _keep_sync(match: re.Match) -> str:
+    # prepare_page is idempotent, so the one script that belongs here stays.
+    return match.group(0) if _SYNC_PRESENT.search(match.group(0)) else ""
 
 
 def _drop_csp_meta(match: re.Match) -> str:
@@ -302,9 +324,16 @@ def _drop_csp_meta(match: re.Match) -> str:
     return "" if _CSP_HTTP_EQUIV.search(tag) else tag
 
 
-def _insert_once(page_html: str, tag: str, present: re.Pattern) -> str:
+def _insert_once(page_html: str, tag: str, present: re.Pattern, after_head: bool = False) -> str:
     if present.search(page_html):
         return page_html
+
+    if after_head:
+        # First thing in the head: a policy or a browser check that reads the
+        # document in order has then already seen it.
+        match = _HEAD_OPEN.search(page_html)
+        if match:
+            return page_html[: match.end()] + tag + page_html[match.end():]
 
     match = _HEAD_END.search(page_html)
     if match:
@@ -324,9 +353,10 @@ def prepare_page(page_html: str) -> str:
 
     Idempotent, so a file that was prepared once is not prepared again.
     """
+    page_html = _SCRIPT.sub(_keep_sync, page_html)
     page_html = _META_TAG.sub(_drop_csp_meta, page_html)
+    page_html = _insert_once(page_html, WEB_APP_META, _WEB_APP_PRESENT, after_head=True)
     page_html = _insert_once(page_html, SYNC_TAG, _SYNC_PRESENT)
-    page_html = _insert_once(page_html, WEB_APP_META, _WEB_APP_PRESENT)
     return page_html
 
 
@@ -409,8 +439,13 @@ def missing_page(path: str, folder: Path) -> str:
 
 @app.get("/src")
 @app.get("/src/{path:path}")
-async def captured(path: str = ""):
-    """Serve a captured page (with the sync engine) or one of its assets."""
+async def captured(path: str = "", raw: bool = False):
+    """Serve a captured page (with the sync engine) or one of its assets.
+
+    ``?raw=1`` serves the file untouched - no engine, scripts and CSP
+    included - which is the thing to open when a served page does not look
+    like the file it came from.
+    """
     folder = SRC
     path = path.lstrip("/")
 
@@ -434,7 +469,7 @@ async def captured(path: str = ""):
 
     if target.suffix.lower() in _HTML_SUFFIXES:
         source = target.read_text(encoding="utf-8", errors="replace")
-        return HTMLResponse(prepare_page(source), headers=NO_STORE)
+        return HTMLResponse(source if raw else prepare_page(source), headers=NO_STORE)
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(

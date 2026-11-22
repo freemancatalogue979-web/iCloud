@@ -12,10 +12,18 @@ What the server does with them:
 - **Everything else is served as-is**, so keep stylesheets, scripts, images
   and fonts next to the page that references them (relative URLs resolve
   against `/src/…`, the same shape the capture had).
+- **The capture's own `<script>` tags are removed.** The DOM they would
+  build is already in the file, and run against a copy they can blank it
+  (Apple's sign-in app replaces its own captured form) or navigate away.
+  `/sync.js` is the only script that runs.
 - **A captured Content-Security-Policy `<meta>` is removed**, because it was
   written for the site's origin and here it would block `/sync.js` and the
-  socket. The standard `mobile-web-app-capable` meta is added if it is
-  missing, next to the Apple one.
+  socket.
+- **The standard `mobile-web-app-capable` meta is added** if it is missing,
+  before the Apple one.
+
+`?raw=1` serves a page untouched (scripts and CSP included) — use it to see
+what the file itself does when the served page looks different.
 
 `/src/` (no file name) lists what is here, and a missing page says so instead
 of showing a bare 404, so a fresh clone with an empty `src/` still explains

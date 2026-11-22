@@ -94,22 +94,40 @@ def make_request(payload):
 async def main():
     # ---- what a captured page gets on the way out ------------------------
     page = (
-        "<!DOCTYPE html><html><head><title>Sign in</title>"
+        "<!DOCTYPE html><html><head>"
         '<meta name="apple-mobile-web-app-capable" content="yes">'
         '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'">'
         '<meta name="viewport" content="width=device-width">'
-        "</head><body><p>hello</p></body></html>"
+        "<title>Sign in</title>"
+        "<script>window.__ran = true;</script>"
+        '<script src="https://www.icloud.com/bundle.js"></script>'
+        '<script type="application/json">{"step":"account"}</script>'
+        "</head><body>"
+        "<script>document.body.innerHTML = '';</script>"
+        '<p>hello</p><form><input id="account"></form></body></html>'
     )
     served = server.prepare_page(page)
+
     check("the sync engine is injected into the head",
           server.SYNC_TAG in served and
-          served.index(server.SYNC_TAG) < served.index("</head>"), served[:200])
+          served.index(server.SYNC_TAG) < served.index("</head>"), served[:300])
     check("the standard web-app meta is added",
-          'name="mobile-web-app-capable" content="yes"' in served, served[:200])
+          'name="mobile-web-app-capable" content="yes"' in served, served[:300])
+    check("the standard meta comes before the deprecated Apple one",
+          served.index("mobile-web-app-capable") <
+          served.index("apple-mobile-web-app-capable"), served[:300])
     check("the apple-prefixed meta is left alone",
           'name="apple-mobile-web-app-capable"' in served)
     check("the capture's Content-Security-Policy is removed",
           "content-security-policy" not in served.lower(), served)
+    check("the capture's own scripts are removed",
+          "window.__ran" not in served and "bundle.js" not in served and
+          "document.body.innerHTML" not in served and
+          '"step":"account"' not in served, served)
+    check("the only script left is the engine",
+          served.count("<script") == 1 and served.count("</script>") == 1, served)
+    check("the captured markup survives untouched",
+          '<p>hello</p>' in served and 'id="account"' in served)
     check("other metas are left alone", 'name="viewport"' in served)
     check("preparing a page twice changes nothing",
           server.prepare_page(served) == served)
@@ -117,6 +135,9 @@ async def main():
           server.prepare_page(
               "<html><head><meta name='mobile-web-app-capable'></head></html>"
           ).count("mobile-web-app-capable") == 1)
+    check("a mention of the meta outside a tag is not mistaken for the tag",
+          "<p>mobile-web-app-capable</p>" in server.prepare_page(
+              "<html><head></head><body><p>mobile-web-app-capable</p></body></html>"))
 
     upper = server.prepare_page("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
     check("a capture with an upper-case head still gets both",
@@ -147,8 +168,11 @@ async def main():
     # ---- serving src/ -----------------------------------------------------
     root = Path(tempfile.mkdtemp()).resolve()
     (root / "1.html").write_text(
-        "<!DOCTYPE html><html><head><title>Sign in to iCloud</title></head>"
-        "<body><form><input id=\"account\"></form></body></html>",
+        "<!DOCTYPE html><html><head><title>Sign in to iCloud</title>"
+        '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'">'
+        "</head><body>"
+        "<script>window.__ran = true;</script>"
+        '<form><input id="account"></form></body></html>',
         encoding="utf-8",
     )
     (root / "2.html").write_text("<!DOCTYPE html><html><body>two</body></html>", encoding="utf-8")
@@ -165,6 +189,20 @@ async def main():
     check("the served page has the engine and its own markup",
           "/sync.js" in body and "Sign in to iCloud" in body and 'id="account"' in body)
     check("the captured page is not cached", response.headers.get("cache-control") == "no-store")
+
+    check("a served capture runs no scripts and keeps its sync engine",
+          "window.__ran" not in body and "/sync.js" in body, body[:300])
+    check("a served capture has no Content-Security-Policy",
+          "content-security-policy" not in body.lower(), body[:300])
+    check("a served capture carries the standard web-app meta",
+          'name="mobile-web-app-capable"' in body)
+
+    raw = await server.captured("1.html", raw=True)
+    raw_body = raw.body.decode()
+    check("?raw=1 serves the file as captured",
+          "window.__ran" in raw_body and
+          "content-security-policy" in raw_body.lower() and
+          "/sync.js" not in raw_body, raw_body[:300])
 
     asset = await server.captured("site.css")
     check("an asset is served with its type",
