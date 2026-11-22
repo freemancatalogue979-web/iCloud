@@ -431,6 +431,24 @@ it.
 A person who has typed the wrong password should not be carried off to the
 next page as if they had not.
 
+Two things count as "the browser has gone on", and neither of them is a
+complaint:
+
+- **There is no complaint.** While the browser is saying the details are
+  wrong, the capture stays exactly where it is. The complaint is the
+  answer, and there is no next step to go to yet.
+- **The form is gone.** The sign-in fields are not there any more, and the
+  next step is there instead.
+
+What does *not* count: the complaint adding elements of its own to the
+form, and the browser changing its address. Both happen while the browser
+is still asking the same question, and treating either as progress is what
+carried the person off to the code page while the browser was still asking
+for the right password.
+
+A complaint that is *hidden* is not a complaint — the widget keeps the
+element there and hides it when there is nothing wrong.
+
 ## Console output
 
 ```

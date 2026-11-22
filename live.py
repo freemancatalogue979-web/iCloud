@@ -131,6 +131,12 @@ _READ = """() => {
     if (el.getAttribute('aria-hidden') === 'true') continue;
 
     const style = window.getComputedStyle(el);
+    // A message that is not shown is not a message. The widget keeps the
+    // element there and hides it when there is nothing wrong, and a hidden
+    // complaint must not hold the app on the sign-in page.
+    if (el.hidden || style.display === 'none' || style.visibility === 'hidden') {
+      continue;
+    }
     const messages_style = {
       color: style.color,
       fontSize: style.fontSize,

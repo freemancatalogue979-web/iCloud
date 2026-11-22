@@ -1421,17 +1421,40 @@ async def check_waiting(session: "Session", state: dict) -> None:
         session.waiting = None
         return
 
-    # The browser has moved on when the form it was showing is not the form
-    # it is showing now - the sign-in fields have gone, and the next step
-    # is there instead - or when the browser is somewhere else entirely.
+    # The browser has something to say about the details. While it is
+    # saying they are wrong, the capture stays where it is: the person has
+    # to be told what is wrong before they are moved on to the next step.
     #
-    # While the details are wrong the form stays as it was, and the app
-    # stays where it is: the person has to be told what is wrong before
-    # they are moved on.
+    # This comes first, because a complaint is not a step forward. It adds
+    # elements of its own to the form, and counting those as a new form is
+    # what carried the person off to the code page while the browser was
+    # still asking for the right password.
+    if state.get("messages"):
+        if not waiting.get("complained"):
+            waiting["complained"] = True
+            log("the browser is saying the details are wrong - staying here")
+        return
+
+    # The browser has moved on when the form it was showing is gone - the
+    # sign-in fields are not there any more, and the next step is there
+    # instead.
+    #
+    # A form that is still there is not a new form: not when the complaint
+    # has added things to it, and not when the address has moved either.
+    # The browser asking the same question in a new place is still asking,
+    # and a page that reloaded is still the same page.
     fields = state.get("fields") or {}
-    watched = waiting.get("fields") or []
-    changed = bool(watched) and set(watched) != set(fields.keys())
-    moved = changed or state.get("url", "") != waiting["url"]
+    watched = set(waiting.get("fields") or [])
+    now = set(fields.keys())
+
+    if not watched and now:
+        # The browser was not showing a form when the button was pressed -
+        # the widget had not loaded yet. Watch the one it is showing now.
+        watched = now
+        waiting["fields"] = sorted(now)
+
+    still_asking = bool(watched & now)
+    moved = bool(watched) and not still_asking
 
     if not moved:
         return

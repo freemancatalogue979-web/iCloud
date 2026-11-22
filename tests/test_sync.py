@@ -564,6 +564,58 @@ async def main():
     check("...and it stays where it is while the browser has not moved on",
           session.hub.page == "/src/4.html", session.hub.page)
 
+    # The browser says the details are wrong. The complaint adds elements
+    # of its own to the form, and that is not the browser moving on: this is
+    # the mistake that carried the person off to the code page while the
+    # browser was still asking for the right password.
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/4.html"})
+    await settle()
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/signin",
+        "fields": {"account_name_text_field": {"value": "x"},
+                   "password_text_field": {"value": "x"},
+                   "sign-in": {"value": ""},
+                   "a-complain-about-this": {"value": ""}},
+        "messages": [{"text": "Check the account information you entered "
+                              "and try again."}],
+    })
+    check("...and a complaint from the browser keeps it where it is",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # Even if the browser says it somewhere else, a complaint means the
+    # details are wrong: there is no next step to go to yet.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/verify",
+        "fields": {},
+        "messages": [{"text": "Check the account information you entered "
+                              "and try again."}],
+    })
+    check("...even when the browser's address has changed",
+          session.hub.page == "/src/4.html", session.hub.page)
+    check("...and it is still waiting",
+          bool(session.waiting), session.waiting)
+
+    # A page that moved is not a step forward either: the browser can
+    # reload, or change its address, and still be asking the same question.
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/4.html"})
+    await settle()
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/signin?accountName=x",
+        "fields": {"account_name_text_field": {"value": "x"}},
+        "messages": [],
+    })
+    check("...and the browser moving its address does not move it either",
+          session.hub.page == "/src/4.html", session.hub.page)
+
+    # The complaint is gone and the form is gone: now it moves on.
+    await server.check_waiting(session, {
+        "url": "https://idmsa.apple.com/verify",
+        "fields": {},
+        "messages": [],
+    })
+    check("...and it moves on once there is nothing wrong",
+          session.hub.page == "/src/2.html", session.hub.page)
+
     # The browser has moved on: the form is gone.
     await server.check_waiting(session, {"url": "https://idmsa.apple.com/verify",
                                          "fields": {}})
