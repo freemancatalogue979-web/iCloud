@@ -38,7 +38,8 @@ whatever is in it.
 
 Three things, and no more:
 
-1. **The wait.** `/` is a black screen with the Apple mark breathing on it. No
+1. **The wait.** `/` is a black screen with the Apple mark breathing on it —
+   every visit, a reload included, for 900 ms before anything else appears. No
    text, no caption, no spinner, no "opening this / doing that".
 2. **The capture.** When the sign-in form is up in the browser, `src/1.html` is
    shown in a frame that fills the window. Its stylesheets, its images, its
@@ -98,9 +99,16 @@ that step shows.
 | `#remember-me` — password, keep me signed in | `src/4.html` |
 | `#account_name_text_field` — the account step | `src/1.html` |
 
-Most specific first, and a step whose capture is missing from `src/` is skipped
-rather than shown as a blank frame. Rename a capture and `STEP_PAGES` in
-`server.py` is the one place to change.
+A step's marker has to be **on screen** — visible, with area — not merely
+present in the document: the widget keeps several steps in one DOM, and the
+capture of the account step contains the password field too. And the page the
+frame is already on comes first: while that step is still on screen nothing
+moves, and a new step has to be there on two polls running before the frame
+changes. A capture that flickers is worse than one that is a moment late.
+
+A step whose capture is missing from `src/` is skipped rather than shown as a
+blank frame. Rename a capture and `STEP_PAGES` in `server.py` is the one place to
+change.
 
 ## The mapping
 

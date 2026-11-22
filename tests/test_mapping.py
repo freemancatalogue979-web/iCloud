@@ -382,7 +382,9 @@ async def main():
     check("nothing is read off the browser before the form is up",
           await server.refresh_page() == "/src/1.html", server.current_page)
     server.state["status"] = "done"
-    check("once it is, the page follows the step",
+    check("one poll is not enough to move the frame",
+          await server.refresh_page() == "/src/1.html", server.current_page)
+    check("the second poll in a row is: the page follows the step",
           await server.refresh_page() == "/src/2.html", server.current_page)
     check("and it remembers where it got to",
           server.current_page == "/src/2.html", server.current_page)
@@ -390,6 +392,7 @@ async def main():
     # page follows what can actually be shown.
     (root / "2.html").unlink()
     browser(FakePage([FakeFrame({"account_name_text_field"})]))
+    await server.refresh_page()
     check("the page follows a step whose capture is there",
           await server.refresh_page() == "/src/1.html", server.current_page)
     (root / "2.html").write_text("<html></html>", encoding="utf-8")

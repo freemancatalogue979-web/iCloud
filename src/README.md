@@ -75,9 +75,12 @@ is on in the browser window:
 | `#remember-me` — password, keep me signed in | `4.html` |
 | `#account_name_text_field` — the account step | `1.html` |
 
-When the browser moves to the next step, the frame moves with it. `STEP_PAGES`
-in `server.py` is the table to edit if a file is renamed, and a step whose file
-is not here is skipped rather than shown as a blank frame.
+When the browser moves to the next step, the frame moves with it — but only
+when the marker is really on screen (visible, with area) and the page the frame
+is on has gone. The widget holds several steps in one DOM, so "the marker is in
+the document" is not the same thing as "this is the step". `STEP_PAGES` in
+`server.py` is the table to edit if a file is renamed, and a step whose file is
+not here is skipped rather than shown as a blank frame.
 
 The ids are what make the mapping work, so keep them. `2.html` is the exception:
 its six digit fields have no ids, only `class=form-security-code-input`, so

@@ -114,7 +114,7 @@ function visibleText(doc) {
     app.errors.filter((message) => /navigation/i.test(message)).length === 0, app.errors);
 
   // ---- the form is up: the capture takes over --------------------------
-  await sleep(700);
+  await sleep(950);        // the mark is given its moment first
 
   check("the capture is loaded once the sign-in form is up",
     frame.getAttribute("src") === "/src/1.html", frame.getAttribute("src"));
@@ -159,8 +159,14 @@ function visibleText(doc) {
     { status: "done", browser_open: true, form_up: true, page: "/src/4.html" },
     { status: "done", browser_open: true, form_up: true, page: "/src/4.html" },
   ]);
-  await sleep(1300);      // the app looks for the next step once a second
   const stepFrame = steps.dom.window.document.getElementById("capture");
+
+  // The mark, then the first step loads and is bound.
+  await sleep(1000);
+  stepFrame.dispatchEvent(new steps.dom.window.Event("load"));
+
+  // The browser moves on, and the app sees it on its next look.
+  await sleep(1600);
   stepFrame.dispatchEvent(new steps.dom.window.Event("load"));
 
   check("the frame follows the step the real page moves on to",
@@ -194,7 +200,7 @@ function visibleText(doc) {
 
   // ---- the frame never reports back ------------------------------------
   const quiet = launch([done]);
-  await sleep(1500);
+  await sleep(2600);        // the mark, then the fallback
   check("a frame that never reports back is shown anyway",
     quiet.dom.window.document.body.classList.contains("show"),
     quiet.dom.window.document.body.className);

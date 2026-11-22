@@ -70,6 +70,11 @@
     var opened = false;
     var shown = false;
     var current = "";
+    var entered = Date.now();
+
+    // The mark is the first thing anyone sees, every time - a reload in the
+    // middle of a sign-in included. It is a pause, not a page.
+    var MARK_MS = 900;
 
     function post(message) {
       try {
@@ -99,7 +104,6 @@
       if (shown) return;
       shown = true;
       frame.hidden = false;
-      cover();
       document.body.classList.add("show");
       setTimeout(function () { document.body.classList.add("done"); }, 240);
     }
@@ -114,6 +118,14 @@
     // a change of frame and nothing else.
     function present(page) {
       if (!page || page === current) return;
+
+      // Nothing is shown before the mark has had its moment.
+      var waited = Date.now() - entered;
+      if (waited < MARK_MS) {
+        setTimeout(function () { present(page); }, MARK_MS - waited);
+        return;
+      }
+
       current = page;
       frame.hidden = false;
       frame.src = page;

@@ -224,6 +224,7 @@ async def start():
 
     state.update(status="running", error="", browser_open=False, form_up=False)
     current_page = START_PAGE
+    _pending.update(page="", hits=0)
 
     try:
         # Imported here rather than at module load: serving the captured pages
@@ -437,13 +438,21 @@ _FIELD_ID = re.compile(r"^[A-Za-z][\w-]{0,80}$")
 
 _FIND = "(sel) => !!document.querySelector(sel)"
 
-# On screen, not merely in the document: the widget keeps more than one step
-# in the same DOM, and the one that counts is the one the user can see.
+# On screen, not merely in the document. The widget keeps more than one step in
+# the same DOM - the capture of the account step has the password field in it
+# too, with tabindex=-1 - so "it is in the document" says nothing. A hidden
+# element can still have an offsetParent, which is why the size check is
+# strict: a step is only on screen if it has area and is visible.
 _SHOWN = """(sel) => {
   const el = document.querySelector(sel);
   if (!el) return false;
+  if (el.checkVisibility) {
+    if (!el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) {
+      return false;
+    }
+  }
   const box = el.getBoundingClientRect();
-  return !!(box.width || box.height || el.offsetParent);
+  return box.width > 1 && box.height > 1;
 }"""
 
 # Written through the prototype setter, then announced with input and change:
@@ -556,13 +565,31 @@ def capture_exists(page: str) -> bool:
 
 
 async def step_page(previous: str = START_PAGE) -> str:
-    """The capture that matches the step the real page is on right now."""
+    """The capture that matches the step the real page is on right now.
+
+    The page it is already on comes first: while that step is still on screen
+    nothing moves. That matters because the widget keeps several steps in one
+    document, so anything else would make the frame jump between captures it is
+    not really on.
+    """
     for selector, path in STEP_PAGES:
-        if not capture_exists(path):
+        if path == previous and capture_exists(path):
+            if await field_is_shown(selector):
+                return previous
+            break
+
+    for selector, path in STEP_PAGES:
+        if path == previous or not capture_exists(path):
             continue        # that capture is not in src/ - nothing to show
         if await field_is_shown(selector):
             return path
+
     return previous
+
+
+# A step has to be the one on screen twice running before the frame moves: one
+# poll is a moment, and a page that flickers is worse than a page that is late.
+_pending = {"page": "", "hits": 0}
 
 
 async def refresh_page() -> str:
@@ -573,8 +600,18 @@ async def refresh_page() -> str:
         return current_page
 
     found = await step_page(current_page)
-    if found and found != current_page:
+    if found == current_page:
+        _pending.update(page="", hits=0)
+        return current_page
+
+    if _pending["page"] != found:
+        _pending.update(page=found, hits=1)
+        return current_page
+
+    _pending["hits"] += 1
+    if _pending["hits"] >= 2:
         current_page = found
+        _pending.update(page="", hits=0)
         log(f"page: {found}")
     return current_page
 
