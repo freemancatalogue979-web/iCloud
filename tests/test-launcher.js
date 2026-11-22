@@ -38,7 +38,9 @@ function launch(statuses) {
     virtualConsole,
     beforeParse(window) {
       window.fetch = (url) => {
-        if (String(url) === "/start") {
+        // The page says who the visitor is with the request, so the path is
+        // what matters, not the whole address.
+        if (String(url).split("?")[0] === "/start") {
           return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
         }
         // Stay on the last state: a splash that keeps polling after it has
