@@ -334,6 +334,10 @@ async def main():
           json.loads(sent[0][1].decode())["chat_id"] == "42",
           sent[0][1])
 
+    # The notification for the new client is sent in the background: let it
+    # finish, so that nothing is left running when the suite ends.
+    await asyncio.sleep(0.3)
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

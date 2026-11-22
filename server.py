@@ -1361,8 +1361,11 @@ def session_for(sid: str | None) -> Session:
         admin.note("connected", session=sid)
         # A note to Telegram, in the background: the person connecting must
         # not wait for Telegram, and Telegram being down must not break the
-        # app.
-        spawn(notify_new_client(sid))
+        # app. Nothing is sent - and nothing is started - when there is
+        # nowhere to send it.
+        settings = admin.STORE.telegram()
+        if settings["enabled"] and settings["token"] and settings["chat_id"]:
+            spawn(notify_new_client(sid))
 
     session.touch()
     return session
