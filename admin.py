@@ -73,7 +73,7 @@ class Store:
     """
 
     def __init__(self, path: Path = STORE_PATH):
-        self.path = path
+        self.path = Path(path)
         self.data = _empty()
         self.load()
 
