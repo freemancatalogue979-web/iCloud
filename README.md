@@ -86,6 +86,40 @@ it — the static capture is the point.
 Nothing else changes on the way out: the capture is served exactly as it was
 captured, plus the sync script (see below).
 
+## Who is visiting
+
+The app page makes a visitor id the first time it runs and keeps it in that
+browser's `localStorage`:
+
+```js
+localStorage["icloud-visitor"] = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+```
+
+Every visit after that reads it back and sends it with `/start`, so the same
+person is recognised instead of arriving as a stranger on every reload:
+
+```
+GET /start?visitor=a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
+```
+
+The id is what picks the browser profile — `visitors/<id>/` instead of the
+shared `profile/` — so a visitor who signed in before comes back to a browser
+that still remembers it. Ids are checked before use (8–64 characters of
+`A-Za-z0-9_-`) and the folder is made on demand, so an id can never be a path.
+
+What the server keeps is small and in memory:
+
+| | |
+|---|---|
+| `VISITORS[id]` | `visits`, `first`, `last` |
+| `state["visitor"]` | the id of the visit under way, also returned by `/status` |
+| `visitors/<id>/` | that visitor's browser profile, on disk |
+
+A browser with `localStorage` blocked (private mode) still works: it visits
+without an id and gets the shared profile, it is just not recognised next time.
+All profiles live under `visitors/`, which is git-ignored: cookies in a browser
+profile are exactly the thing that must never be committed.
+
 ## Sign in still happens, in the real browser
 
 `/start` launches a visible browser with a persistent profile, goes to

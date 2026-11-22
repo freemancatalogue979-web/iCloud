@@ -277,6 +277,62 @@ async def main():
     check("nothing outside src/ can be read",
           traversal.status_code == 404 and "TOP SECRET" not in leaked, traversal.status_code)
 
+    # ---- who is visiting --------------------------------------------------
+    # The id comes from the visitor's own browser, and it is what picks their
+    # browser profile - so it has to be safe as a directory name.
+    check("a visitor id is accepted",
+          server.clean_visitor("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6") ==
+          "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")
+    for bad, why in [
+        ("", "an empty id"),
+        ("short", "a too-short id"),
+        ("x" * 100, "a too-long id"),
+        ("../../etc/passwd", "a path"),
+        ("a/b", "an id with a slash"),
+        ("id with spaces", "an id with spaces"),
+        (None, "a missing id"),
+        (42, "a number"),
+    ]:
+        check(f"{why} is refused", server.clean_visitor(bad) == "", bad)
+    check("an id is trimmed before it is used",
+          server.clean_visitor("  a1b2c3d4e5f6a7b8  ") == "a1b2c3d4e5f6a7b8")
+
+    real_home = server.HERE
+    home = Path(tempfile.mkdtemp()).resolve()
+    server.HERE = home
+    try:
+        visitor = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+        profile = server.profile_for(visitor)
+        check("a visitor gets a profile of their own",
+              profile == home / "visitors" / visitor, profile)
+        check("the profile folder is made when it is needed",
+              profile.parent.is_dir(), profile.parent)
+        check("a visitor with no id gets the shared profile",
+              server.profile_for("") == home / "profile", server.profile_for(""))
+        check("an id that is really a path gets the shared profile",
+              server.profile_for("../" + visitor) == home / "profile",
+              server.profile_for("../" + visitor))
+    finally:
+        server.HERE = real_home
+
+    server.VISITORS.clear()
+    # A copy each time: the entry is one dict, and it is updated in place.
+    first = dict(server.remember_visitor("a1b2c3d4e5f6a7b8"))
+    again = dict(server.remember_visitor("a1b2c3d4e5f6a7b8"))
+    other = server.remember_visitor("ffffffffffffffff")
+    check("a visit is counted", first["visits"] == 1 and again["visits"] == 2,
+          (first["visits"], again["visits"]))
+    check("the first time they were seen is kept",
+          again["first"] == first["first"], (first["first"], again["first"]))
+    check("a different visitor is counted separately", other["visits"] == 1,
+          other["visits"])
+    check("both are remembered", set(server.VISITORS) ==
+          {"a1b2c3d4e5f6a7b8", "ffffffffffffffff"}, list(server.VISITORS))
+
+    live = await server.status()
+    check("status says who is visiting", "visitor" in live, live)
+    server.VISITORS.clear()
+
     client = await server.index()
     check("/ serves the launcher while the browser is idle",
           str(client.path).endswith("client.html"), client.path)

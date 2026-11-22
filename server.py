@@ -29,6 +29,7 @@ import mimetypes
 import os
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -65,6 +66,7 @@ state = {
     "step": "",
     "error": "",
     "browser_open": False,
+    "visitor": "",
 }
 
 # The real browser. It is opened so the user can sign in; it is not mirrored.
@@ -102,6 +104,48 @@ def log(message):
     """Progress in the console, so a stuck run is diagnosable."""
     print(f"[icloud] {message}", flush=True)
     state["step"] = message
+
+
+# --------------------------------------------------------------------------
+# Visitors
+#
+# A visitor is whoever is using the app page. Their id is made once, in their
+# own browser, and kept in localStorage: the next visit reads it back, so the
+# same person is recognised instead of being a new stranger every reload.
+#
+# The id is what picks the browser profile, so a visitor who signed in before
+# comes back to a browser that still remembers it.
+# --------------------------------------------------------------------------
+
+VISITORS = {}                       # id -> {"visits": n, "first": t, "last": t}
+_VISITOR_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+def clean_visitor(value) -> str:
+    """An id we are willing to use as a directory name, or nothing."""
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    return value if _VISITOR_ID.match(value) else ""
+
+
+def remember_visitor(visitor: str) -> dict:
+    entry = VISITORS.setdefault(
+        visitor, {"visits": 0, "first": time.time(), "last": time.time()}
+    )
+    entry["visits"] += 1
+    entry["last"] = time.time()
+    return entry
+
+
+def profile_for(visitor: str) -> Path:
+    """The browser profile for a visitor: theirs, or the shared one."""
+    visitor = clean_visitor(visitor)
+    if not visitor:
+        return HERE / "profile"
+    folder = HERE / "visitors"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / visitor
 
 
 # --------------------------------------------------------------------------
@@ -152,12 +196,13 @@ def pick_reason(text: str) -> str:
     return "could not install chromium"
 
 
-async def launch():
+async def launch(profile: Path):
     """Open a visible browser window with whatever is available.
 
-    Returns (context, page). Raises once every candidate has failed, with all
-    the reasons joined so the caller can tell a missing download from a
-    genuinely broken setup.
+    The profile is the visitor's own, so cookies and the sign-in they did last
+    time are still there. Returns (context, page). Raises once every candidate
+    has failed, with all the reasons joined so the caller can tell a missing
+    download from a genuinely broken setup.
     """
     reasons = []
 
@@ -165,7 +210,7 @@ async def launch():
         try:
             log(f"launching {label}")
             browser_ctx = await pw.chromium.launch_persistent_context(
-                str(HERE / "profile"),
+                str(profile),
                 headless=False,
                 no_viewport=True,
                 args=["--start-maximized"],
@@ -215,15 +260,28 @@ async def index():
 
 
 @app.get("/start")
-async def start():
-    """Launch the browser and press Sign In. Nothing is captured."""
+async def start(visitor: str = ""):
+    """Launch the browser for this visitor and press Sign In. Nothing is captured."""
     global pw, ctx, page
+
+    # Who is asking. The app page sends the id it keeps in localStorage, so a
+    # visit that comes back is the same person, with the same browser profile.
+    visitor = clean_visitor(visitor)
+    state["visitor"] = visitor
 
     if state["status"] in ("running", "done"):
         log(f"/start ignored, already {state['status']}")
         return state
 
     state.update(status="running", error="", browser_open=False)
+
+    if visitor:
+        entry = remember_visitor(visitor)
+        log(f"visitor {visitor} - visit {entry['visits']}")
+    else:
+        log("visitor unknown - using the shared profile")
+
+    profile = profile_for(visitor)
 
     try:
         # Imported here rather than at module load: serving the captured pages
@@ -234,13 +292,13 @@ async def start():
         pw = await async_playwright().start()
 
         try:
-            ctx, page = await launch()
+            ctx, page = await launch(profile)
         except Exception as exc:
             # Nothing to run yet - download Chromium, then try once more.
             if "Executable doesn't exist" not in str(exc):
                 raise
             await install_chromium()
-            ctx, page = await launch()
+            ctx, page = await launch(profile)
 
         state["browser_open"] = True
 

@@ -26,19 +26,31 @@ function check(name, cond, detail) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function launch(statuses) {
+function launch(statuses, options) {
+  options = options || {};
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
 
   let polls = 0;
+  const starts = [];
   const dom = new JSDOM(CLIENT, {
     url: "http://localhost:9002/",
     runScripts: "dangerously",
     virtualConsole,
     beforeParse(window) {
+      if (options.noStorage) {
+        Object.defineProperty(window, "localStorage", {
+          configurable: true,
+          get() { throw new Error("storage is blocked"); },
+        });
+      } else if (options.kept) {
+        window.localStorage.setItem("icloud-visitor", options.kept);
+      }
+
       window.fetch = (url) => {
-        if (String(url) === "/start") {
+        starts.push(String(url));
+        if (String(url).startsWith("/start")) {
           return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
         }
         // Stay on the last state: a splash that keeps polling after it has
@@ -50,10 +62,13 @@ function launch(statuses) {
     },
   });
 
-  return { dom, errors, polls: () => polls };
+  return { dom, errors, starts, polls: () => polls };
 }
 
 const navigations = (errors) => errors.filter((message) => /navigation/i.test(message));
+
+// Every /start the page asked for, with the query string it carried.
+const startCalls = (app) => app.starts.filter((url) => url.startsWith("/start"));
 
 // The inline <script> is part of body.textContent; only what a person could
 // see counts.
@@ -82,6 +97,37 @@ function visibleText(doc) {
     !!doc.querySelector('meta[name="mobile-web-app-capable"]'));
   check("nothing has happened before Sign In is clicked",
     navigations(ok.errors).length === 0, ok.errors);
+
+  // ---- who is visiting -------------------------------------------------
+  const kept = ok.dom.window.localStorage.getItem("icloud-visitor");
+  check("a visitor is given an id the first time",
+    !!kept && /^[A-Za-z0-9_-]{8,64}$/.test(kept), kept);
+  check("the id goes to the server with the visit",
+    startCalls(ok).length === 1 && startCalls(ok)[0] === "/start?visitor=" + kept,
+    JSON.stringify(ok.starts));
+
+  const returning = launch([running, done], { kept });
+  await sleep(120);
+  check("the same visitor coming back is the same id",
+    startCalls(returning).length === 1 &&
+      startCalls(returning)[0] === "/start?visitor=" + kept &&
+      returning.dom.window.localStorage.getItem("icloud-visitor") === kept,
+    JSON.stringify(returning.starts));
+
+  const fresh = launch([running, done]);
+  await sleep(120);
+  const other = fresh.dom.window.localStorage.getItem("icloud-visitor");
+  check("another visitor is someone else",
+    !!other && other !== kept, other);
+
+  const blocked = launch([running, done], { noStorage: true });
+  await sleep(120);
+  check("a browser with no storage still visits, without an id",
+    startCalls(blocked).length === 1 && startCalls(blocked)[0] === "/start",
+    JSON.stringify(blocked.starts));
+  check("and it is still only the mark on screen",
+    visibleText(blocked.dom.window.document) === "",
+    JSON.stringify(visibleText(blocked.dom.window.document)));
 
   // ---- and then it goes -------------------------------------------------
   await sleep(800);
