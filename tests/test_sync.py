@@ -112,19 +112,41 @@ async def main():
     check("the sync engine is injected into the head",
           server.SYNC_TAG in served and
           served.index(server.SYNC_TAG) < served.index("</head>"), served[:300])
-    check("the sync tag is the only difference",
-          served.replace(server.SYNC_TAG, "") == page, served[:300])
     check("the capture's own scripts are untouched",
           "window.__ran" in served and "bundle.js" in served and
           "document.body.innerHTML" in served, served)
-    check("the capture's policy is untouched",
-          'content="default-src \'none\'"' in served, served)
+    check("the capture's policy is extended, not replaced",
+          'content="default-src \'none\'; script-src \'self\'; '
+          'connect-src \'self\' ws: wss:"' in served, served[:300])
+    check("the policy still forbids what it forbade",
+          "default-src 'none'" in served and "form-action" not in served, served[:300])
     check("no meta is added",
           'name="mobile-web-app-capable"' not in served, served)
     check("the captured markup survives untouched",
           '<p>hello</p>' in served and 'id="account"' in served)
     check("preparing a page twice changes nothing",
           server.with_engine(served) == served)
+
+    # ---- the policy, on its own ------------------------------------------
+    # The engine is a script of ours and it opens a socket to our own
+    # origin. A capture's policy says no to both, because it was written for
+    # a page that has no engine in it - so without this the page is a
+    # picture of a page.
+    check("a policy that pins scripts gains 'self'",
+          server._relax_policy("default-src 'none'; script-src 'unsafe-inline' data:") ==
+          "default-src 'none'; script-src 'unsafe-inline' data: 'self'; "
+          "connect-src 'self' ws: wss:", None)
+    check("a policy with no script-src gets one",
+          server._relax_policy("default-src 'none'") ==
+          "default-src 'none'; script-src 'self'; connect-src 'self' ws: wss:", None)
+    check("a policy that says nothing about scripts is left alone",
+          server._relax_policy("img-src 'self' data:") == "img-src 'self' data:", None)
+    check("a socket is allowed where the policy would refuse one",
+          "connect-src 'self' ws: wss:" in
+          server._relax_policy("default-src 'none'; script-src 'unsafe-inline'"), None)
+    check("relaxing a policy twice changes nothing",
+          server._relax_policy(server._relax_policy("default-src 'none'")) ==
+          server._relax_policy("default-src 'none'"), None)
 
     upper = server.with_engine("<HTML><HEAD></HEAD><BODY></BODY></HTML>")
     check("a capture with an upper-case head still gets it",
@@ -164,13 +186,13 @@ async def main():
         '<meta http-equiv=content-security-policy content="default-src \'none\'; '
         'script-src \'unsafe-inline\' data:">'
         "<body __processed_=true class=clicking><div id=root><header>logo</header>"
-        f'<iframe src width=100% height=365 srcdoc="{inner}"></iframe>'
+        f'<iframe src width=100% height=365 sandbox="allow-scripts allow-modals" srcdoc="{inner}"></iframe>'
         "</div></body></html>"
     )
     single_served = server.with_engine(single_file)
 
-    check("a SingleFile capture is served with only the tag added",
-          single_served.replace(server.SYNC_TAG, "") == single_file, single_served[:200])
+    check("a SingleFile capture keeps its markup",
+          "<div id=root><header>logo</header>" in single_served, single_served[:200])
     check("the tag lands in the capture's own body, not in an attribute",
           single_served.index(server.SYNC_TAG) > single_served.index("<body")
           and single_served.index(server.SYNC_TAG) < single_served.index("<iframe"),
@@ -178,6 +200,8 @@ async def main():
     check("the nested document keeps its own </head>",
           single_served.count("</head>") == single_file.count("</head>")
           == 1, single_served[:260])
+    check("the capture's own policy is extended",
+          "script-src 'unsafe-inline' data: 'self'" in single_served, single_served[:300])
 
     class _Srcdoc(HTMLParser):
         def __init__(self):
@@ -196,12 +220,29 @@ async def main():
     check("the iframe's srcdoc attribute is untouched",
           srcdoc_of(single_served) == srcdoc_of(single_file),
           str(srcdoc_of(single_served))[:200])
+    check("the nested document's own policy is untouched",
+          "content=&quot;default-src 'none'&quot;" in single_served, single_served[:400])
     check("the sign-in form is still inside it",
           "account_name_text_field" in (srcdoc_of(single_served) or "")
           and "id=sign-in" in (srcdoc_of(single_served) or ""),
           str(srcdoc_of(single_served))[:200])
     check("a SingleFile capture is not tagged twice",
           server.with_engine(single_served) == single_served)
+
+    # ---- the frames a capture carries ------------------------------------
+    # The form in a SingleFile capture lives in a frame that is sandboxed
+    # without allow-same-origin, so the page cannot reach it at all. The
+    # engine is in the page, so without this the form is a picture of a form.
+    check("a frame the capture carries is given the page's origin",
+          'sandbox="allow-scripts allow-modals allow-same-origin"' in single_served,
+          single_served[:400])
+
+    plain_frame = (
+        "<!DOCTYPE html><html><body>"
+        '<iframe src="https://idmsa.apple.com/"></iframe></body></html>'
+    )
+    check("a frame of another site is left alone",
+          "allow-same-origin" not in server.with_engine(plain_frame), plain_frame)
 
     # ---- only captured pages may be navigated to -------------------------
     check("a captured page is a valid destination",
@@ -249,12 +290,15 @@ async def main():
     check("the captured page is not cached", response.headers.get("cache-control") == "no-store")
 
     source = (root / "1.html").read_text(encoding="utf-8")
-    check("the served page is the file, byte for byte, with the engine",
-          body == source.replace("</head>", server.SYNC_TAG + "</head>", 1),
+    check("the served page is the file, with the engine and the policy extended",
+          body == source.replace("</head>", server.SYNC_TAG + "</head>", 1).replace(
+              'content="default-src \'none\'"',
+              'content="default-src \'none\'; script-src \'self\'; '
+              'connect-src \'self\' ws: wss:"'),
           body[:300])
     check("nothing else was rewritten",
           "window.__ran" in body and
-          'content="default-src \'none\'"' in body and
+          "default-src 'none'" in body and
           'name="mobile-web-app-capable"' not in body, body[:300])
 
     asset = await server.captured("site.css")

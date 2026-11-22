@@ -5,6 +5,12 @@ icloud.com and clicks Sign In. The page in the app is not that browser: once
 Sign In has been clicked it becomes a capture you made earlier, served from
 `src/` as a document of its own.
 
+But it is not a picture of a page. The capture is wired to the browser the
+server opened: what you type into it is written into the real sign-in form,
+a button you press is pressed there as well, and what the browser is
+showing is put back into the capture. The capture is the controls; the
+browser is the session. That is what makes it remote browsing.
+
 ## Run
 
 ```bash
@@ -93,6 +99,59 @@ icloud.com and clicks Sign In, so you can sign in there yourself. That browser
 is not mirrored any more: nothing is captured from it, and its window is not
 what the app shows.
 
+## The capture talks to the browser
+
+A capture is a copy of a moment; the browser holds the session. The two are
+tied together by their ids: a capture keeps the ids of the page it was taken
+from, so the field with the id `account_name_text_field` in the capture is
+the field with that id in the real page — in whichever frame of the browser
+happens to hold it.
+
+| In the capture | In the browser |
+|---|---|
+| a value typed into a field | the field with the same id, in whichever frame has it |
+| a button pressed | the button with the same id, pressed |
+| what the browser is showing | put back into the capture's fields |
+
+Three things had to be true for any of this to work, and none of them were.
+
+**The capture's policy has to let the engine in.** A SingleFile capture
+carries the policy of the page it was taken from, and that policy is as
+tight as policies get: `default-src 'none'`, so nothing loads and nothing
+runs unless it is named. The engine is a script of ours, from our own
+origin, and it opens a socket to our own origin — and the policy said no to
+both, because it was written for a page that has no engine in it. So the
+policy is served *extended*, not as it was: `script-src` gains `'self'`, and
+`connect-src` is added. Everything the capture forbade stays forbidden, so
+the page still renders exactly as it was captured. The nested document
+inside an `<iframe srcdoc>` has a policy of its own, and that one is left
+alone.
+
+**The form has to be reachable.** The sign-in form is not in the capture's
+own document: SingleFile keeps it inside an `<iframe srcdoc="…">`, and that
+frame is sandboxed without `allow-same-origin`, so it is a frame of an
+origin of its own and the page cannot reach it — not its fields, not its
+buttons, nothing. So a frame the capture carries is served with
+`allow-same-origin` added to its sandbox. Nothing else about it changes: it
+keeps its sandbox, and it keeps its scripts.
+
+**The engine has to look into the frame.** It does: the engine binds the
+page and every frame it can reach, and an element in a frame is named by the
+frame it is in first, so the same selector in two documents is two different
+elements.
+
+The engine asks where the browser is whenever it binds a document, so a
+frame that has just loaded is told the state even when it was sent before
+the frame was there. A field someone is typing into is never overwritten by
+that state — their keystrokes are the newer truth.
+
+**What this is not.** The capture can drive the browser; it cannot show a
+page it has no capture of. The iCloud app after the sign-in is not a file in
+`src/`, so the capture of the sign-in screen is all it can show. For a live
+view of the browser itself, the mirror — an agent in the real browser that
+streams the live document — is the other design, and it is a different
+branch.
+
 ## What stays in sync
 
 A static page cannot know that anyone else is typing into it. So the server
@@ -150,18 +209,22 @@ written back into `src/` — those files are the captures.
 
 ## Serving `src/`
 
-One URL, one rule: **the file, byte for byte, plus the sync script.**
+One URL, one rule: **the file, plus the three things the engine needs.**
 
 ```html
 <script src="/sync.js"></script>
 ```
 
-That tag is the only thing added — before `</head>`, or after `<body>` when the
-capture has no head, or at the top when it has neither. Nothing is removed, no
-meta is rewritten, no policy is touched, and the file on disk is never written
-to. The insertion point is found by reading tags, not by searching for text, so
-it can never land inside an attribute value: a SingleFile export keeps a whole
-nested document in `<iframe srcdoc="…">`, and that one is left untouched.
+That tag is the first of them. The second is the capture's own
+`Content-Security-Policy`, extended with the sources the engine needs, and
+the third is `allow-same-origin` on the frames the capture carries — both
+explained in [the capture talks to the browser](#the-capture-talks-to-the-browser).
+
+Nothing else is added: no meta is rewritten, no script is stripped, no
+policy is removed, and the file on disk is never written to. The insertion
+point is found by reading tags, not by searching for text, so it can never
+land inside an attribute value: a SingleFile export keeps a whole nested
+document in `<iframe srcdoc="…">`, and that one is left untouched.
 
 - **Everything else is served as bytes**, with a content type from the file
   name. Keep a capture's stylesheets, scripts, images and fonts next to it.
@@ -174,12 +237,6 @@ nested document in `<iframe srcdoc="…">`, and that one is left untouched.
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
 
-The one thing worth knowing: a capture that carries its own
-`Content-Security-Policy` can refuse `/sync.js` and its socket. That is the
-capture's policy doing its job, and the console says so (`Refused to load…`).
-Nothing the server can do about it without editing the document, which it does
-not do.
-
 ## The socket
 
 One socket per viewer at `/ws`, plus `POST /nav` for the beacon.
@@ -189,18 +246,27 @@ Client to server:
 ```json
 {"t": "hello", "page": "/src/1.html", "from": "http://localhost:9002/"}
 {"t": "value", "key": "#account", "value": "someone@example.com", "checked": false}
+{"t": "field", "id": "account_name_text_field", "value": "someone@example.com", "checked": false}
+{"t": "press", "id": "sign-in"}
 {"t": "click", "key": "#go", "x": 120, "y": 340}
 {"t": "nav",   "page": "/src/2.html"}
+{"t": "where"}
 ```
 
 Server to client:
 
 ```json
 {"t": "state", "page": "/src/1.html", "values": {"#account": {"value": "…", "checked": false}}}
+{"t": "browser", "url": "https://idmsa.apple.com/signin", "title": "…", "fields": {"account_name_text_field": {"value": "…", "checked": false}}}
 {"t": "value", "key": "#account", "value": "…", "checked": false}
 {"t": "click", "key": "#go", "x": 120, "y": 340}
 {"t": "nav",   "page": "/src/2.html"}
 ```
+
+`field` and `press` are the bridge to the browser. `where` asks where the
+browser is and `browser` is the answer: where it is, what it is called, and
+what its fields hold. The server sends `browser` on its own when the browser
+has moved on, and when a viewer asks.
 
 `from` is the referrer: a hello whose referrer is another captured page is a
 link being followed — the beacon may have been lost — and the hub moves to it.
@@ -222,12 +288,16 @@ A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 [icloud] launching bundled chromium
 [icloud] clicking Sign In
 [icloud] done - sign in yourself in the browser window
+[icloud] browser: account_name_text_field written
+[icloud] browser: sign-in pressed
 [icloud] page: /src/2.html
 ```
 
-The `page:` line is the hub following a viewer to another captured page. If a
-captured page stops responding to typing, the question is whether `/sync.js`
-was served with it — open the page's source and look for the script tag.
+The `browser:` lines are the bridge: a value written into the browser, and a
+button pressed in it. The `page:` line is the hub following a viewer to
+another captured page. If a captured page stops responding to typing, the
+question is whether `/sync.js` was served with it — open the page's source
+and look for the script tag.
 
 ## Tests
 
@@ -236,7 +306,7 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-Three suites, none of which needs Chromium or a network:
+Five suites:
 
 - `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
   pins the splash: the screen is only the mark — no text, no buttons, nothing
@@ -248,34 +318,47 @@ Three suites, none of which needs Chromium or a network:
   lands without being echoed, a remote click is drawn and not replayed, a
   captured link reports its destination, a link out of the captures is not
   followed, a submit is cancelled, and a dropped socket reconnects and asks
-  for the state again.
+  for the state again. It also pins the bridge: typing is sent to the browser
+  as well, a button pressed is pressed in the browser, and what the browser is
+  showing is put back into the capture.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
-  injected once and only into HTML, the served page is the file byte for byte
-  with that one tag added, assets keep their type, nothing outside `src/` is
-  readable, a missing capture says so, and the hub really is the
-  shared state — a value reaches the other viewer and the next one to join, a
-  click is relayed but a click with no position is dropped, a link moves every
-  viewer and clears form state, an off-site page is refused, a viewer that
-  leaves is forgotten, and `/` is the launcher until the browser is up and the
-  capture afterwards.
+  injected once and only into HTML, the capture's policy is extended rather
+  than replaced, the frames a capture carries are made reachable, the nested
+  document inside a frame is left alone, assets keep their type, nothing
+  outside `src/` is readable, a missing capture says so, and the hub really
+  is the shared state — a value reaches the other viewer and the next one to
+  join, a click is relayed but a click with no position is dropped, a link
+  moves every viewer and clears form state, an off-site page is refused, a
+  viewer that leaves is forgotten, and `/` is the launcher until the browser
+  is up and the capture afterwards.
+- `test_live.py` runs the bridge without a browser: the browser is a stub, so
+  the scripts the bridge runs in the browser are the shipped ones while the
+  browser answering them is not real. It pins that a value reaches the field
+  with the same id — in whichever frame holds it, and in whichever tab — that
+  a button is pressed there too, that an id that is not an id is refused, and
+  that what the browser is showing reaches the viewers.
+- `test_browser.py` runs the whole way round in a real Chromium: a capture
+  with the policy a SingleFile capture carries, and the form in a frame that
+  is sandboxed without `allow-same-origin`. It pins that the engine runs at
+  all, that the policy does not refuse it, that the form inside the frame is
+  reachable, and that typing and pressing in the capture reach the browser —
+  and come back. It is skipped when there is no browser to be had.
 
-`npm test` runs all three and prints one total; `node tests/run.js` finds the
-project virtualenv by itself.
-
-What is deliberately not covered: a real browser loading `src/1.html`. There is
-no display server and no Chromium download in the sandbox this was written in,
-and the engine is small enough that jsdom plus the live socket above is the
-honest boundary.
+`npm test` runs all of them and prints one total; `node tests/run.js` finds
+the project virtualenv by itself.
 
 ## Files
 
 - `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
-  and navigation
+  and navigation, and talks to the browser through the server
+- `live.py` — the bridge to the browser the server opened: finds a control by
+  its id, writes a value into it, presses it, and reads back what the browser
+  is showing
 - `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
 - `src/` — the captures (yours; `1.html` is the one the app opens)
 - `run.bat` — Windows launcher
-- `tests/` — the two suites above
+- `tests/` — the suites above
 
 ## Note
 
@@ -284,3 +367,8 @@ code yourself in the browser window that opened — it never touches your
 password. The page in the app is the capture from `src/`, not that window, and
 it does not wait for you to finish signing in: it appears as soon as Sign In
 has been clicked.
+
+What you type into the capture *is* typed into the browser, so the capture is
+not a copy you work in: it is the controls for the session the browser holds.
+The password is not read back — it is written once, by you, and it is never
+broadcast to another viewer or kept in the server's memory.

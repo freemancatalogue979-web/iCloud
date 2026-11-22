@@ -97,6 +97,8 @@ class FakeSocket {
   check("says hello with the page it is showing",
     hello.t === "hello" && hello.page === "/src/1.html" && typeof hello.from === "string",
     JSON.stringify(hello));
+  check("asks where the browser is",
+    sock.ofType("where").length === 1, JSON.stringify(sock.ofType("where")));
 
   // ---- typing -----------------------------------------------------------
   const account = doc.getElementById("account");
@@ -110,6 +112,12 @@ class FakeSocket {
   check("typing is sent once the word settles",
     typed.key === "#account" && typed.value === "someone@example.com" && typed.checked === false,
     JSON.stringify(typed));
+
+  // The same word goes to the browser the server holds.
+  const field = sock.ofType("field")[0] || {};
+  check("typing is sent to the browser as well",
+    field.id === "account" && field.value === "someone@example.com",
+    JSON.stringify(field));
 
   const before = sock.ofType("value").length;
   account.dispatchEvent(new win.Event("input", { bubbles: true }));
@@ -139,6 +147,11 @@ class FakeSocket {
   check("a click is relayed with where it landed",
     click.key === "#go" && typeof click.x === "number" && typeof click.y === "number",
     JSON.stringify(click));
+
+  // ...and the same press is a press in the browser.
+  const press = sock.ofType("press")[0] || {};
+  check("a button pressed is pressed in the browser",
+    press.id === "go", JSON.stringify(press));
 
   // A click from another viewer draws a marker and presses nothing.
   const buttonsBefore = doc.querySelectorAll("button").length;
@@ -172,6 +185,21 @@ class FakeSocket {
   });
   check("a freshly loaded viewer gets the stored state",
     account.value === "stored@example.com" && remember.checked === true,
+    account.value + " / " + remember.checked);
+
+  // ---- what the browser is showing --------------------------------------
+  // The browser is the session; the capture is a copy of a moment of it.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {
+      account: { value: "live@example.com", checked: false },
+      remember: { value: "on", checked: true },
+    },
+  });
+  check("what the browser holds is shown in the capture",
+    account.value === "live@example.com" && remember.checked === true,
     account.value + " / " + remember.checked);
 
   // An element with no id still has a name the server can use.

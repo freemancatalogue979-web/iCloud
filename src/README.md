@@ -4,17 +4,34 @@ Put the HTML files you captured in this folder. Once the browser is open and
 Sign In has been clicked, the app opens `src/1.html` as its own document; every
 page here is reachable at `/src/<name>.html`.
 
-What the server does with them: **nothing, except add one tag.**
+What the server does with them: **three things, and all three are so that the
+page can be used.**
 
 ```html
 <script src="/sync.js"></script>
 ```
 
-That is the whole contract: the file is served byte for byte, with that tag
-before `</head>` (or after `<body>` when the page has no head), and the tag is
-how typing, clicks and navigation reach the server. No meta is rewritten, no
-script is stripped, no policy is edited — and the file on disk is never written
-to.
+The tag is how typing, clicks and navigation reach the server. It goes in
+before `</head>` (or after `<body>` when the page has no head), and the file
+on disk is never written to.
+
+The other two are needed because a capture is a copy of a page that had its
+own restrictions, and those restrictions were written for a page with no
+engine in it:
+
+- **The page's own `Content-Security-Policy` is extended, not edited.** A
+  SingleFile capture carries `default-src 'none'`, which refuses the engine
+  and its socket. `script-src` gains `'self'` and `connect-src` is added;
+  everything the capture forbade stays forbidden, so the page still renders
+  exactly as it was captured. The policy of the nested document inside an
+  `<iframe srcdoc>` is left alone.
+- **A frame the capture carries is given the page's own origin**
+  (`allow-same-origin` is added to its sandbox). The sign-in form in a
+  SingleFile export lives in such a frame, and without this the page cannot
+  reach it at all — not its fields, not its buttons, nothing.
+
+No meta is rewritten, no script is stripped, and the file on disk is never
+written to.
 
 The tag only ever lands in the page's own markup. Markup that sits inside a
 quoted attribute value is not a place to put it, and a SingleFile export is
@@ -45,7 +62,6 @@ capture time, not on the server:
 
    ```js
    document.querySelectorAll("script").forEach((s) => s.remove());
-   document.querySelectorAll('meta[http-equiv="Content-Security-Policy"]').forEach((m) => m.remove());
    ```
 
 3. Elements → right-click `<html>` → **Copy → Copy outerHTML**, paste it into
@@ -55,6 +71,9 @@ capture time, not on the server:
 What is left is the markup exactly as the browser had rendered it, with nothing
 in it that can re-run and disturb it. `/sync.js` is then the only script on the
 page, and nothing is blocked from loading it.
+
+There is no need to remove the `Content-Security-Policy` meta any more: the
+server extends that policy for the engine and leaves the rest of it alone.
 
 `/src/` (no file name) lists what is here, and a missing page says so instead
 of showing a bare 404, so a fresh clone with an empty `src/` still explains
@@ -71,3 +90,17 @@ itself.
 
 The state is in memory: restarting the server clears it. It is deliberately
 not written back into these files — these are the captures.
+
+## And the browser behind the page
+
+The page is also wired to the browser the server opened, by id: the field with
+the id `account_name_text_field` here is the field with that id there.
+
+| In the page | In the browser |
+|---|---|
+| a value typed into a field | written into the field with the same id |
+| a button pressed | pressed in the browser too |
+| what the browser is showing | put back into the page's fields |
+
+So a capture is not a copy you work in — it is the controls for the session
+the browser holds. What it cannot do is show a page it has no capture of.

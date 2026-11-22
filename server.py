@@ -29,11 +29,14 @@ import mimetypes
 import os
 import re
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+
+import live
 
 HERE = Path(__file__).parent
 
@@ -58,7 +61,20 @@ BROWSERS = [
     ("system edge", {"channel": "msedge"}),
 ]
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """The app starts by looking at the browser.
+
+    There may not be one yet - the browser opens when the page is visited -
+    and then there is nothing to look at. The watcher copes with that: it
+    waits, and it starts reporting as soon as there is something to report.
+    """
+    start_watching()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 state = {
     "status": "idle",      # idle | running | done | error
@@ -244,6 +260,12 @@ async def start():
 
         state["browser_open"] = True
 
+        # The browser is the session. The capture is a copy of a moment of
+        # it, and this is what connects the two: what is typed into the
+        # capture is written into the browser, and what the browser is
+        # showing is written back into the capture.
+        live.attach(ctx, page)
+
         # A tab the sign-in flow opens is where the user will be typing.
         ctx.on("page", bring_new_tab_to_front)
 
@@ -267,16 +289,23 @@ async def start():
 
 @app.get("/status")
 async def status():
-    return {**state, "page": hub.page}
+    return {**state, "page": hub.page, "browser": hub.browser}
 
 
 # --------------------------------------------------------------------------
 # The captured pages
 #
 # src/ is served as it is. The file on disk is never written to, and the
-# document is not rewritten: scripts, styles, metas, policy and markup all go
-# out as they came in. The one addition is /sync.js, so the page reports what
-# is done to it to the server.
+# document is not rebuilt: scripts, styles, metas, policy and markup all go
+# out as they came in. Three things are added on the way out, and each of
+# them is something the engine needs:
+#
+#   * /sync.js, so the page reports what is done to it to the server;
+#   * the capture's own Content-Security-Policy, extended with the sources
+#     the engine needs - without this the policy refuses the engine that
+#     was just added to it, and the page is a picture of a page;
+#   * the frames the capture carries, given the page's own origin - without
+#     this the sign-in form inside the frame cannot be reached at all.
 #
 # The tag goes in once: before </head>, or after <body> when the capture has
 # no head, or at the top when it has neither.
@@ -286,25 +315,35 @@ _SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.I
 _HTML_SUFFIXES = (".html", ".htm")
 
 
-def _insert_point(page_html: str) -> int | None:
-    """Where the engine tag goes: before </head>, else after <body>, else None.
+# --------------------------------------------------------------------------
+# Reading the document
+#
+# A capture is a copy of a page, and the copy has the copy's own quirks. The
+# one that matters here is that a tag's attributes have to be read properly:
+# a SingleFile capture keeps a whole nested document inside an
+# <iframe srcdoc="..."> attribute, and that document's tags are part of the
+# attribute value, not part of the page. A ">" inside the value does not end
+# the tag, and a "</head>" inside it does not end the page's head.
+# --------------------------------------------------------------------------
 
-    Tags inside a quoted attribute value are skipped. SingleFile captures keep
-    a whole nested document in an <iframe srcdoc="..."> attribute, so their
-    first </head> belongs to that inner document, not to the page: dropping a
-    tag there would end the attribute early and cut the frame open.
+
+def _tags(page_html: str):
+    """Every tag in the document, in order.
+
+    Yields (start, end, name, closing, text): where the tag is, what it is
+    called, whether it closes, and the tag itself.
     """
     size = len(page_html)
     i = 0
     while i < size:
         i = page_html.find("<", i)
         if i < 0:
-            return None
+            return
 
         if page_html.startswith("<!--", i):
             end = page_html.find("-->", i + 4)
             if end < 0:
-                return None
+                return
             i = end + 3
             continue
 
@@ -325,29 +364,233 @@ def _insert_point(page_html: str) -> int | None:
             if char in "\"'":
                 k = page_html.find(char, k + 1)
                 if k < 0:
-                    return None
+                    return
                 k += 1
                 continue
             if char == ">":
                 break
             k += 1
         if k >= size:
-            return None
+            return
 
-        if closing and name == "head":
-            return i
-        if not closing and name == "body":
-            return k + 1
-
+        yield i, k + 1, name, closing, page_html[i:k + 1]
         i = k + 1
 
+
+def _attributes(tag_text: str):
+    """The attributes of a start tag.
+
+    Yields (name, value start, value end, quote). The span is into the tag
+    text itself, so the caller can find the value again.
+    """
+    size = len(tag_text)
+    i = 1
+    while i < size and tag_text[i] not in " \t\r\n/>":
+        i += 1
+
+    while i < size:
+        while i < size and tag_text[i] in " \t\r\n/":
+            i += 1
+        if i >= size or tag_text[i] == ">":
+            break
+
+        name_at = i
+        while i < size and tag_text[i] not in " \t\r\n=/>":
+            i += 1
+        name = tag_text[name_at:i].lower()
+
+        j = i
+        while j < size and tag_text[j] in " \t\r\n":
+            j += 1
+
+        if j < size and tag_text[j] == "=":
+            j += 1
+            while j < size and tag_text[j] in " \t\r\n":
+                j += 1
+            if j < size and tag_text[j] in "\"'":
+                quote = tag_text[j]
+                start = j + 1
+                end = tag_text.find(quote, start)
+                if end < 0:
+                    end = size
+                yield name, start, end, quote
+                i = end + 1
+            else:
+                start = j
+                while j < size and tag_text[j] not in " \t\r\n>":
+                    j += 1
+                yield name, start, j, ""
+                i = j
+        else:
+            yield name, i, i, ""
+
+
+# --------------------------------------------------------------------------
+# The capture's own policy
+#
+# A capture carries the policy of the page it was taken from, and that policy
+# is as tight as policies get: "default-src 'none'", so nothing loads and
+# nothing runs unless it is named. The engine is a script of ours, from our
+# own origin, and it opens a socket to our own origin - and the policy says
+# no to both, because it was written for a page that has no engine in it.
+#
+# So the policy is extended, not replaced: the sources the engine needs are
+# added to the directives that are already there, and nothing else is
+# widened. Everything the capture forbade stays forbidden, so the page still
+# renders exactly as it was captured.
+#
+#   * script-src gains 'self', so the engine can be loaded at all;
+#   * connect-src gains 'self' and the websocket schemes, so its socket can
+#     be opened.
+#
+# A policy that says nothing about scripts is left alone: it already allows
+# them.
+# --------------------------------------------------------------------------
+
+CSP_ENGINE_SCRIPT = "'self'"
+CSP_ENGINE_CONNECT = "'self' ws: wss:"
+
+
+def _relax_policy(policy: str) -> str:
+    """The policy, with the engine's own sources added to it."""
+    parts = [part.strip() for part in policy.split(";") if part.strip()]
+    names = [part.split()[0].lower() for part in parts]
+
+    def named(part: str, directive: str) -> bool:
+        return part.split()[0].lower() == directive
+
+    def widened(part: str, sources: str) -> str:
+        """The directive with the sources it is missing."""
+        tokens = part.split()
+        for source in sources.split():
+            if source not in tokens:
+                part = part + " " + source
+        return part
+
+    if "script-src" in names or "script-src-elem" in names:
+        parts = [
+            widened(part, CSP_ENGINE_SCRIPT)
+            if named(part, "script-src") or named(part, "script-src-elem")
+            else part
+            for part in parts
+        ]
+    elif "default-src" in names:
+        # Scripts follow default-src, so they have to be named to be widened.
+        parts.append("script-src " + CSP_ENGINE_SCRIPT)
+
+    if "connect-src" in names:
+        # 'self' alone is not enough for the socket everywhere: a browser that
+        # does not treat ws:// as the same origin as http:// would refuse it.
+        parts = [
+            widened(part, CSP_ENGINE_CONNECT) if named(part, "connect-src") else part
+            for part in parts
+        ]
+    elif "default-src" in names:
+        parts.append("connect-src " + CSP_ENGINE_CONNECT)
+
+    return "; ".join(parts)
+
+
+def _relax_csp(page_html: str) -> str:
+    """The capture's policy, extended for the engine.
+
+    Only the metas that are really in the page are touched: the nested
+    document inside an <iframe srcdoc="..."> has a policy of its own, and
+    that one is left alone.
+    """
+    edits = []
+
+    for start, end, name, closing, text in _tags(page_html):
+        if closing or name != "meta":
+            continue
+
+        equiv = None
+        content = None
+        for attr_name, a_start, a_end, quote in _attributes(text):
+            if attr_name == "http-equiv":
+                equiv = text[a_start:a_end].strip().lower()
+            elif attr_name == "content":
+                content = (a_start, a_end)
+
+        if equiv != "content-security-policy" or content is None:
+            continue
+
+        a_start, a_end = content
+        policy = text[a_start:a_end]
+        relaxed = _relax_policy(policy)
+        if relaxed != policy:
+            edits.append((start + a_start, start + a_end, relaxed))
+
+    for a, b, replacement in reversed(edits):
+        page_html = page_html[:a] + replacement + page_html[b:]
+    return page_html
+
+
+# --------------------------------------------------------------------------
+# The frames a capture carries
+#
+# A SingleFile capture keeps the sign-in form inside an <iframe srcdoc="...">,
+# and that frame is sandboxed without allow-same-origin: it is a frame of an
+# origin of its own, so the page cannot reach it - not its fields, not its
+# buttons, nothing. The engine lives in the page, so the form would be a
+# picture of a form.
+#
+# So a frame the capture carries is given the page's own origin. Nothing
+# else about it changes: it keeps its sandbox, and it keeps its scripts.
+# --------------------------------------------------------------------------
+
+
+def _make_frames_reachable(page_html: str) -> str:
+    """The frames the capture carries, given the page's own origin."""
+    edits = []
+
+    for start, end, name, closing, text in _tags(page_html):
+        if closing or name != "iframe":
+            continue
+
+        attrs = list(_attributes(text))
+        if not any(attr_name == "srcdoc" for attr_name, _, _, _ in attrs):
+            continue
+
+        for attr_name, a_start, a_end, quote in attrs:
+            if attr_name != "sandbox" or quote == "":
+                continue
+            if "allow-same-origin" in text[a_start:a_end].split():
+                continue
+            edits.append((start + a_end, start + a_end, " allow-same-origin"))
+            break
+
+    for a, b, replacement in reversed(edits):
+        page_html = page_html[:a] + replacement + page_html[b:]
+    return page_html
+
+
+def _insert_point(page_html: str) -> int | None:
+    """Where the engine tag goes: before </head>, else after <body>, else None.
+
+    Tags inside a quoted attribute value are skipped. SingleFile captures keep
+    a whole nested document in an <iframe srcdoc="..."> attribute, so their
+    first </head> belongs to that inner document, not to the page: dropping a
+    tag there would end the attribute early and cut the frame open.
+    """
+    for start, end, name, closing, text in _tags(page_html):
+        if closing and name == "head":
+            return start
+        if not closing and name == "body":
+            return end
     return None
 
 
 def with_engine(page_html: str) -> str:
-    """The capture with the sync engine in it, and nothing else changed."""
+    """The capture with the engine in it, and the two things the engine needs.
+
+    Idempotent: a page that has been through this once is left alone.
+    """
     if _SYNC_PRESENT.search(page_html):
         return page_html
+
+    page_html = _relax_csp(page_html)
+    page_html = _make_frames_reachable(page_html)
 
     at = _insert_point(page_html)
     if at is None:
@@ -436,7 +679,7 @@ def missing_page(path: str, folder: Path) -> str:
 @app.get("/src/{path:path}")
 async def captured(path: str = ""):
     """Serve a captured page (with the sync engine) or one of its assets."""
-    folder = SRC
+    folder = SRC.resolve()
     path = path.lstrip("/")
 
     if not path:
@@ -545,12 +788,14 @@ class Viewer:
 
 
 class Hub:
-    """The page everyone is on, and what has been done to it."""
+    """The page everyone is on, what has been done to it, and where the
+    browser is."""
 
     def __init__(self):
         self.viewers: set[Viewer] = set()
         self.page = START_PAGE
         self.values: dict[str, dict] = {}
+        self.browser: dict = {"url": "", "title": "", "fields": {}}
 
     def snapshot(self) -> dict:
         # A copy: the message sits in a queue, and a navigation in the meantime
@@ -564,6 +809,9 @@ class Hub:
     def join(self, viewer: Viewer) -> None:
         self.viewers.add(viewer)
         viewer.send(self.snapshot())
+        # Where the browser is, so a viewer that joins late is looking at the
+        # same session the others are.
+        viewer.send({"t": "browser", **self.browser})
 
     def leave(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)
@@ -629,8 +877,109 @@ class Hub:
                 sender=viewer,
             )
 
+        elif kind == "where":
+            # "Where is the browser?" A document has just been bound and may
+            # hold fields the browser knows about and the page does not, so
+            # the state is sent again to this viewer.
+            viewer.send({"t": "browser", **hub.browser})
+
+        elif kind == "field":
+            # A value typed into the capture, written into the browser the
+            # server holds. The capture keeps the ids of the page it was
+            # taken from, so the field with that id in the capture is the
+            # field with that id in the browser.
+            element = live.element_id(message.get("id"))
+            if not element:
+                return
+            value = message.get("value")
+            spawn(write_to_browser(element, value if isinstance(value, str) else ""))
+
+        elif kind == "press":
+            # A button pressed in the capture, pressed in the browser.
+            element = live.element_id(message.get("id"))
+            if not element:
+                return
+            spawn(press_in_browser(element))
+
 
 hub = Hub()
+
+
+# --------------------------------------------------------------------------
+# The browser behind the capture
+#
+# What is typed into a capture is written into the browser the server opened,
+# and what the browser is showing is written back into the capture. That is
+# what makes a capture a page again instead of a picture of one: the same
+# field, the same value, on both sides.
+#
+# The writes are done in the background: the socket must not wait for a
+# browser to answer, or one slow page would hold every other viewer up.
+# --------------------------------------------------------------------------
+
+
+def spawn(coro) -> None:
+    """A job that runs on its own, with a reference kept until it is done."""
+    task = asyncio.ensure_future(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+_background: set = set()
+
+
+async def write_to_browser(element: str, value: str) -> None:
+    try:
+        written = await live.write_field(element, value)
+    except Exception as exc:
+        log(f"browser write failed: {str(exc).splitlines()[0]}")
+        return
+    log(f"browser: {element} {'written' if written else 'not found'}")
+
+
+async def press_in_browser(element: str) -> None:
+    try:
+        pressed = await live.press(element)
+    except Exception as exc:
+        log(f"browser press failed: {str(exc).splitlines()[0]}")
+        return
+    log(f"browser: {element} {'pressed' if pressed else 'not found'}")
+
+
+LIVE_POLL_SECONDS = 0.6
+
+
+async def watch_browser() -> None:
+    """Tell the viewers where the browser is.
+
+    The capture is a copy of a moment; the browser is the session. This is
+    what puts the session back into the copy: where the browser is, what it
+    is called, and what its fields hold.
+    """
+    last = None
+    while True:
+        await asyncio.sleep(LIVE_POLL_SECONDS)
+        try:
+            state = await live.snapshot()
+        except Exception:
+            continue
+        if state == last:
+            continue
+        last = state
+        hub.browser = state
+        hub.broadcast({"t": "browser", **state})
+
+
+_watching = False
+
+
+def start_watching() -> None:
+    """Begin telling the viewers where the browser is."""
+    global _watching
+    if _watching:
+        return
+    _watching = True
+    spawn(watch_browser())
 
 
 async def sync_socket(websocket: WebSocket):
