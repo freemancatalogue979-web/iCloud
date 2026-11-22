@@ -46,19 +46,87 @@ async def settle(rounds=8):
         await asyncio.sleep(0.01)
 
 
-class FakeFrame:
-    """A frame of the browser, with the ids it holds."""
+class FakeLocator:
+    """What Playwright's locator does, as far as the bridge uses it.
 
-    def __init__(self, ids=(), fields=None, url="https://www.icloud.com/", title="iCloud"):
+    The bridge types into the browser with a locator, so a stub that only
+    answers evaluate() would say nothing about whether typing works.
+    """
+
+    def __init__(self, frame, elements, index=0):
+        self.frame = frame
+        self.elements = elements
+        self.index = index
+
+    def nth(self, index):
+        return FakeLocator(self.frame, self.elements, index)
+
+    def _element(self):
+        if self.index < len(self.elements):
+            return self.elements[self.index]
+        return None
+
+    async def count(self):
+        return len(self.elements)
+
+    async def input_value(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        return self.frame.fields.get(name, "")
+
+    async def click(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.clicks.append(name)
+
+    async def fill(self, value, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.filled.append((name, value))
+        self.frame.fields[name] = value
+
+    async def press_sequentially(self, value, delay=None, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.typed.append((name, value))
+        self.frame.fields[name] = value
+
+
+class FakeFrame:
+    """A frame of the browser, with the controls it holds.
+
+    ``ids`` are the controls that have an id. ``kinds`` are the controls
+    that have none - Apple's verification code boxes - named by their place,
+    the same way the capture names them.
+    """
+
+    def __init__(self, ids=(), fields=None, kinds=None,
+                 url="https://www.icloud.com/", title="iCloud"):
         self.ids = set(ids)
         self.fields = dict(fields or {})
+        self.kinds = dict(kinds or {})
         self.url = url
         self.title = title
         self.written = []
         self.pressed = []
+        self.clicks = []      # every click, into a field or on a button
+        self.typed = []       # what was typed, key by key
+        self.filled = []      # what was cleared
+
+    def locator(self, selector):
+        if selector.startswith("#"):
+            name = selector[1:]
+            elements = [name] if name in self.ids else []
+        else:
+            elements = list(self.kinds.get(selector, []))
+        return FakeLocator(self, elements)
 
     async def evaluate(self, script, argument=None):
-        if "ids.slice" in script:
+        if "out.slice" in script:
             return list(self.ids)
 
         if "querySelectorAll" in script:
@@ -75,11 +143,12 @@ class FakeFrame:
             self.pressed.append(argument)
             return argument in self.ids
 
-        # The write: [id, value]
-        element, value = argument
-        self.written.append((element, value))
-        if element in self.ids:
-            self.fields[element] = value
+        # The write: [target, value]
+        target, value = argument
+        name = target.get("id") if isinstance(target, dict) else target
+        self.written.append((name, value))
+        if name in self.ids:
+            self.fields[name] = value
             return True
         return False
 
@@ -119,10 +188,13 @@ async def main():
 
     check("a value is written into the field with the same id",
           await live.write_field("account_name_text_field", "someone@example.com"),
-          form.written)
+          form.typed)
     check("...and the browser holds it",
           form.fields["account_name_text_field"] == "someone@example.com",
           form.fields)
+    check("...and it was typed, key by key, not assigned behind the widget's back",
+          form.typed == [("account_name_text_field", "someone@example.com")],
+          form.typed)
     check("a field the browser does not have is not written",
           not await live.write_field("no_such_field", "x"))
     check("a value that is not text is written as nothing",
@@ -132,7 +204,9 @@ async def main():
           not await live.write_field("a b", "x"))
 
     check("a button is pressed in the browser",
-          await live.press("sign-in"), form.pressed)
+          await live.press("sign-in"), form.clicks)
+    check("...with a real click, so the page takes it as a person",
+          "sign-in" in form.clicks, form.clicks)
     check("a button the browser does not have is not pressed",
           not await live.press("no_such_button"))
 
@@ -167,6 +241,33 @@ async def main():
     check("...and the frame that has them says where the browser is",
           merged["url"] == "https://idmsa.apple.com/signin", merged)
 
+    # ---- a control with no id --------------------------------------------
+    # Apple's verification code boxes have no ids at all: six inputs, and
+    # the third one is named by being the third one.
+    boxes = FakeFrame(
+        ids=[],
+        kinds={"input": ["input#1", "input#2", "input#3"]},
+        fields={"input#1": "", "input#2": "", "input#3": ""},
+    )
+    live.attach(FakeContext([FakePage([boxes])]), None)
+
+    check("a control with no id is written by its place",
+          await live.write_at("input", 3, 3, "7"), boxes.typed)
+    check("...and it is typed, not assigned",
+          boxes.typed == [("input#3", "7")], boxes.typed)
+
+    # ...but only when the page has the same number of them. If it does
+    # not, the right box cannot be told from the wrong one.
+    check("a control is not written when the page has a different number",
+          not await live.write_at("input", 3, 6, "7"), boxes.typed)
+
+    check("a place that is not a place is refused",
+          not await live.write_at("input", 0, 3, "7"))
+    check("a place beyond the end is refused",
+          not await live.write_at("input", 9, 3, "7"))
+
+    live.detach()
+
     # ---- no browser at all ------------------------------------------------
     live.detach()
     check("with no browser there is nothing to write to",
@@ -187,7 +288,7 @@ async def main():
     check("a value with no field yet is not written",
           not await live.write_field("account_name_text_field", "someone@example.com"))
     check("...but it is kept",
-          live.pending().get("account_name_text_field", {}).get("value")
+          live.pending().get("id:account_name_text_field", {}).get("value")
           == "someone@example.com", live.pending())
 
     late.ids.add("account_name_text_field")
@@ -196,7 +297,7 @@ async def main():
           late.fields.get("account_name_text_field") == "someone@example.com",
           late.fields)
     check("...and then it is not kept any more",
-          "account_name_text_field" not in live.pending(), live.pending())
+          "id:account_name_text_field" not in live.pending(), live.pending())
 
     # A press that had no button is kept as well, but only for a little
     # while: a button pressed long after the person pressed it is not what
@@ -204,20 +305,20 @@ async def main():
     check("a press with no button yet is not pressed",
           not await live.press("sign-in"))
     check("...but it is kept",
-          "sign-in" in live.pending(), live.pending())
+          "id:sign-in" in live.pending(), live.pending())
     late.ids.add("sign-in")
     await live.flush_pending()
     check("...and it is pressed when the button turns up",
-          "sign-in" in late.pressed, late.pressed)
+          "sign-in" in late.clicks, late.clicks)
     check("...and then it is not kept any more",
-          "sign-in" not in live.pending(), live.pending())
+          "id:sign-in" not in live.pending(), live.pending())
 
     # A value that never finds its field is given up on.
     await live.write_field("never_there", "x")
-    live._pending["never_there"]["at"] -= (live.PENDING_FIELD_TTL + 1)
+    live._pending["id:never_there"]["at"] -= (live.PENDING_FIELD_TTL + 1)
     await live.flush_pending()
     check("a value that never finds its field is given up on",
-          "never_there" not in live.pending(), live.pending())
+          "id:never_there" not in live.pending(), live.pending())
 
     # ---- what the browser has -------------------------------------------
     # "not found" on its own is not worth much. What the browser does have
@@ -292,14 +393,15 @@ async def main():
     websocket.feed({"t": "press", "id": "sign-in"})
     await settle(20)
     check("a button pressed in the capture reaches the browser",
-          "sign-in" in form.pressed, form.pressed)
+          "sign-in" in form.clicks, form.clicks)
 
     websocket.feed({"t": "field", "id": "not an id", "value": "x"})
     websocket.feed({"t": "press", "id": "not an id"})
     await settle(20)
     check("an id that is not an id is refused",
-          form.written == [("account_name_text_field", "someone@example.com")] and
-          form.pressed == ["sign-in"], (form.written, form.pressed))
+          form.typed == [("account_name_text_field", "someone@example.com")] and
+          form.clicks == ["account_name_text_field", "sign-in"],
+          (form.typed, form.clicks))
 
     # ---- the browser state reaches the viewers ----------------------------
     server.hub.browser = {"url": "https://idmsa.apple.com/signin",

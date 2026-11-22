@@ -44,8 +44,18 @@ SECRET_TYPES = ("password",)
 # itself. Playwright hands a script exactly one argument: a script that
 # expects two gets the first one and undefined for the second, and
 # getElementById then looks for "id,value" and finds nothing.
-_WRITE = """([id, value]) => {
-  const el = document.getElementById(id);
+#
+# The target is either an id or a place: what the control is, how many of
+# them there are, and which one this is. Apple's verification code boxes
+# have no ids at all, and the place is what names them.
+_WRITE = """([target, value]) => {
+  const el = target.id
+    ? document.getElementById(target.id)
+    : (() => {
+        const all = document.getElementsByTagName(target.tag);
+        if (all.length !== target.of) return null;
+        return all[target.n - 1] || null;
+      })();
   if (!el) return false;
   const tag = el.tagName;
   const type = (el.getAttribute('type') || '').toLowerCase();
@@ -184,21 +194,139 @@ async def write_field(name: str, value: str) -> bool:
     name = element_id(name)
     if not name:
         return False
+    return await _write_target({"id": name}, value)
+
+
+async def write_at(tag: str, n: int, of: int, value: str) -> bool:
+    """Write into the nth control of a kind, when the page has that many.
+
+    A control with no id - Apple's verification code boxes have none - is
+    named by what it is and how many of them there are: the third input of
+    the page. The capture and the live page are the same page, so the third
+    input of one is the third input of the other.
+
+    But only if there are the same number of them. If the live page has a
+    different number, the right one cannot be told from the wrong one, and
+    a value typed into the wrong box is worse than no value at all - so
+    nothing is written, and the console says so.
+    """
+    if not isinstance(tag, str) or not re.match(r"^[a-z][a-z0-9-]{0,20}$", tag):
+        return False
+    if not isinstance(n, int) or not isinstance(of, int) or n < 1 or of < 1 or n > of:
+        return False
+    return await _write_target({"tag": tag, "n": n, "of": of}, value)
+
+
+async def _write_target(target: dict, value: str) -> bool:
+    """The value goes in as keys, and only as a last resort as a value.
+
+    The sign-in widget is a widget: it watches for keys, not for values. A
+    value assigned behind its back sits in the field, and the page does not
+    react - the code boxes do not take the focus on, and the page looks
+    like nobody has touched it. So the value is typed, key by key, the way
+    a person types it, and the page reacts as it would.
+
+    Where typing cannot happen - the control is not on screen, or the frame
+    will not take a click - the value is written the old way, so that
+    something is better than nothing.
+    """
     if not isinstance(value, str):
         value = ""
     value = value[:MAX_VALUE]
 
-    written = await _write_now(name, value)
+    written = await _write_now(target, value)
     if written:
-        forget(name)
+        forget(target)
     else:
-        remember(name, "field", value)
+        remember(target, "field", value)
     return written
 
 
-async def _write_now(name: str, value: str) -> bool:
+async def _write_now(target: dict, value: str) -> bool:
     async with _lock:
-        return await in_frames(_WRITE, [name, value])
+        if await _type_now(target, value):
+            return True
+        return await in_frames(_WRITE, [target, value])
+
+
+async def _type_now(target: dict, value: str) -> bool:
+    """Type the value into the control, key by key, in the live browser."""
+    for frame in frames():
+        locator = _locator(frame, target)
+        if locator is None:
+            continue
+
+        try:
+            if await locator.count() == 0:
+                continue
+            if not await _same_page(frame, target):
+                continue
+        except Exception:
+            continue
+
+        current = None
+        try:
+            current = await locator.input_value(timeout=1500)
+        except Exception:
+            pass
+        if current == value:
+            return True              # it is already what it should be
+
+        try:
+            await locator.click(timeout=1500)
+            if current:
+                # The value is the whole of what should be in the field, not
+                # more of it.
+                await locator.fill("", timeout=1500)
+            await locator.press_sequentially(value, delay=15, timeout=15000)
+            return True
+        except Exception:
+            # Not on screen, or the frame will not take a click: the next
+            # frame may be the one that has it.
+            continue
+    return False
+
+
+def _locator(frame, target: dict):
+    """The control, as a locator: by id, or by its place among its kind."""
+    try:
+        if target.get("id"):
+            return frame.locator("#" + target["id"])
+
+        tag = target.get("tag")
+        if not tag:
+            return None
+        return frame.locator(tag).nth(target["n"] - 1)
+    except Exception:
+        return None
+
+
+def _matches(target: dict, count: int) -> bool:
+    """Is this the page the control was named on?
+
+    A control named by its place is only the same control if the page has
+    the same number of them.
+    """
+    if target.get("id"):
+        return True
+    return count == target.get("of")
+
+
+async def _same_page(frame, target: dict) -> bool:
+    """Is this frame the page the control was named on?
+
+    A control named by its place is only the same control if the page has
+    the same number of them. If it has a different number, the right one
+    cannot be told from the wrong one - and a value typed into the wrong
+    box is worse than no value at all.
+    """
+    if target.get("id"):
+        return True
+    try:
+        count = await frame.locator(target["tag"]).count()
+    except Exception:
+        return False
+    return count == target.get("of")
 
 
 async def press(name: str) -> bool:
@@ -212,17 +340,30 @@ async def press(name: str) -> bool:
     if not name:
         return False
 
-    pressed = await _press_now(name)
+    target = {"id": name}
+    pressed = await _press_now(target)
     if pressed:
-        forget(name)
+        forget(target)
     else:
-        remember(name, "press", "")
+        remember(target, "press", "")
     return pressed
 
 
-async def _press_now(name: str) -> bool:
+async def _press_now(target: dict) -> bool:
+    """A real click, so the page treats it as a person."""
     async with _lock:
-        return await in_frames(_PRESS, name)
+        for frame in frames():
+            locator = _locator(frame, target)
+            if locator is None:
+                continue
+            try:
+                if await locator.count() == 0:
+                    continue
+                await locator.click(timeout=1500)
+                return True
+            except Exception:
+                continue
+        return await in_frames(_PRESS, target.get("id", ""))
 
 
 # --------------------------------------------------------------------------
@@ -242,13 +383,21 @@ PENDING_PRESS_TTL = 20.0
 _pending: dict[str, dict] = {}
 
 
-def remember(name: str, kind: str, value: str = "") -> None:
+def remember(target: dict, kind: str, value: str = "") -> None:
     """Keep something that had nowhere to go, so it can be tried again."""
-    _pending[name] = {"kind": kind, "value": value, "at": time.monotonic()}
+    _pending[_key(target)] = {"target": dict(target), "kind": kind,
+                              "value": value, "at": time.monotonic()}
 
 
-def forget(name: str) -> None:
-    _pending.pop(name, None)
+def forget(target: dict) -> None:
+    _pending.pop(_key(target), None)
+
+
+def _key(target: dict) -> str:
+    """What a target is called in the pending list."""
+    if target.get("id"):
+        return "id:" + target["id"]
+    return f"{target.get('tag')}:{target.get('n')}"
 
 
 def pending() -> dict:
@@ -269,11 +418,11 @@ async def flush_pending() -> None:
             continue
 
         if entry["kind"] == "press":
-            if await _press_now(name):
+            if await _press_now(entry["target"]):
                 _pending.pop(name, None)
             continue
 
-        if await _write_now(name, entry["value"]):
+        if await _write_now(entry["target"], entry["value"]):
             _pending.pop(name, None)
 
 
@@ -283,11 +432,16 @@ async def flush_pending() -> None:
 _CONTROLS = """() => {
   const nodes = document.querySelectorAll(
     'input, textarea, select, button, [role=button], a[href]');
-  const ids = [];
+  const out = [];
+  const seen = {};
   for (const el of nodes) {
-    if (el.id) ids.push(el.id);
+    const tag = el.tagName.toLowerCase();
+    seen[tag] = (seen[tag] || 0) + 1;
+    // A control with no id is named by its place, the same way the capture
+    // names it.
+    out.push(el.id ? el.id : (tag + '#' + seen[tag]));
   }
-  return ids.slice(0, 60);
+  return out.slice(0, 60);
 }"""
 
 

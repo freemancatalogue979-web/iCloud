@@ -109,7 +109,7 @@ happens to hold it.
 
 | In the capture | In the browser |
 |---|---|
-| a value typed into a field | the field with the same id, in whichever frame has it |
+| a value typed into a field | the field with the same id, typed into, in whichever frame has it |
 | a button pressed | the button with the same id, pressed |
 | what the browser is showing | put back into the capture's fields |
 
@@ -144,6 +144,22 @@ The engine asks where the browser is whenever it binds a document, so a
 frame that has just loaded is told the state even when it was sent before
 the frame was there. A field someone is typing into is never overwritten by
 that state — their keystrokes are the newer truth.
+
+**The value goes in as keys.** The sign-in widget is a widget: it watches
+for keys, not for values. So what you type in the capture is *typed* into
+the browser — clicked into, then typed, key by key — and the page reacts as
+it would if a person were there. A value assigned behind the widget's back
+sits in the field and the page is not moved by it. Where typing cannot
+happen — the control is not on screen — the value is written the old way,
+so that something is better than nothing.
+
+**A control with no id is named by its place.** Apple's verification code
+boxes have no ids at all: six inputs and a hidden one. They are the third
+input of the page, the fourth input of the page, and so on — and they are
+written only when the live page has the same number of them. If it does
+not, the right box cannot be told from the wrong one, and a code typed
+into the wrong box is worse than no code at all, so nothing is written and
+the console says so.
 
 **A value that has nowhere to go yet is kept.** The sign-in widget is a
 frame on another origin, and Apple loads it a second or two after Sign In

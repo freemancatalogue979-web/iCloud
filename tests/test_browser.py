@@ -12,16 +12,18 @@ sandboxed without allow-same-origin. That is the shape that used to fail -
 the engine was refused by the policy, and the form was in a frame the page
 could not reach.
 
+The bridge is asynchronous and so is this: the app's server and the browser
+it drives share one event loop, and so do this test and the page it opens.
+
 If there is no browser to be had, the suite says so and is skipped.
 """
 
 import asyncio
+import json
 import os
 import socket
 import sys
 import tempfile
-import threading
-import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -54,19 +56,87 @@ FIXTURE = """<!DOCTYPE html><html lang=en-us dir=ltr>
 </div></body></html>"""
 
 
-class FakeFrame:
-    """The frame of the browser that holds the form."""
+class FakeLocator:
+    """What Playwright's locator does, as far as the bridge uses it.
 
-    def __init__(self):
-        self.ids = {"account_name_text_field", "sign-in"}
-        self.fields = {"account_name_text_field": ""}
-        self.url = "https://idmsa.apple.com/signin"
-        self.title = "Sign in to your Apple Account"
+    The bridge types into the browser with a locator, so a stub that only
+    answers evaluate() would say nothing about whether typing works.
+    """
+
+    def __init__(self, frame, elements, index=0):
+        self.frame = frame
+        self.elements = elements
+        self.index = index
+
+    def nth(self, index):
+        return FakeLocator(self.frame, self.elements, index)
+
+    def _element(self):
+        if self.index < len(self.elements):
+            return self.elements[self.index]
+        return None
+
+    async def count(self):
+        return len(self.elements)
+
+    async def input_value(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        return self.frame.fields.get(name, "")
+
+    async def click(self, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.clicks.append(name)
+
+    async def fill(self, value, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.filled.append((name, value))
+        self.frame.fields[name] = value
+
+    async def press_sequentially(self, value, delay=None, timeout=None):
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        self.frame.typed.append((name, value))
+        self.frame.fields[name] = value
+
+
+class FakeFrame:
+    """A frame of the browser, with the controls it holds.
+
+    ``ids`` are the controls that have an id. ``kinds`` are the controls
+    that have none - Apple's verification code boxes - named by their place,
+    the same way the capture names them.
+    """
+
+    def __init__(self, ids=(), fields=None, kinds=None,
+                 url="https://www.icloud.com/", title="iCloud"):
+        self.ids = set(ids)
+        self.fields = dict(fields or {})
+        self.kinds = dict(kinds or {})
+        self.url = url
+        self.title = title
         self.written = []
         self.pressed = []
+        self.clicks = []      # every click, into a field or on a button
+        self.typed = []       # what was typed, key by key
+        self.filled = []      # what was cleared
+
+    def locator(self, selector):
+        if selector.startswith("#"):
+            name = selector[1:]
+            elements = [name] if name in self.ids else []
+        else:
+            elements = list(self.kinds.get(selector, []))
+        return FakeLocator(self, elements)
 
     async def evaluate(self, script, argument=None):
-        if "ids.slice" in script:
+        if "out.slice" in script:
             return list(self.ids)
 
         if "querySelectorAll" in script:
@@ -78,13 +148,17 @@ class FakeFrame:
                     for name, value in self.fields.items()
                 },
             }
+
         if "el.click()" in script:
             self.pressed.append(argument)
             return argument in self.ids
-        element, value = argument
-        self.written.append((element, value))
-        if element in self.ids:
-            self.fields[element] = value
+
+        # The write: [target, value]
+        target, value = argument
+        name = target.get("id") if isinstance(target, dict) else target
+        self.written.append((name, value))
+        if name in self.ids:
+            self.fields[name] = value
             return True
         return False
 
@@ -108,13 +182,13 @@ def free_port() -> int:
 def browser_path():
     """A browser to test with, or None."""
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.async_api import async_playwright
     except ImportError:
         return None
 
     candidates = []
     try:
-        with sync_playwright() as p:
+        with async_playwright() as p:
             candidates.append(p.chromium.executable_path)
     except Exception:
         pass
@@ -144,14 +218,19 @@ def browser_path():
     return None
 
 
-def main():
-    global passed, failed
-
+async def main():
     root = Path(tempfile.mkdtemp()).resolve()
     (root / "1.html").write_text(FIXTURE, encoding="utf-8")
     server.SRC = root
 
-    frame = FakeFrame()
+    # The browser behind the app: a sign-in form with the ids the capture
+    # has. A frame with no ids at all would say nothing: the bridge would
+    # find nothing to type into and the test would pass anyway.
+    frame = FakeFrame(
+        ids=["account_name_text_field", "password_text_field", "sign-in"],
+        fields={"account_name_text_field": "", "password_text_field": ""},
+        url="https://idmsa.apple.com/signin",
+    )
     live.attach(FakeContext([FakePage([frame])]), None)
 
     executable = browser_path()
@@ -161,41 +240,39 @@ def main():
         return 0
 
     import uvicorn
-    from playwright.sync_api import sync_playwright
+    from playwright.async_api import async_playwright
 
     port = free_port()
-    config = uvicorn.Config(server.app, host="127.0.0.1", port=port, log_level="warning")
-    httpd = uvicorn.Server(config)
-    thread = threading.Thread(target=httpd.run, daemon=True)
-    thread.start()
-
+    httpd = uvicorn.Server(uvicorn.Config(server.app, host="127.0.0.1", port=port,
+                                           log_level="warning"))
+    asyncio.create_task(httpd.serve())
     for _ in range(100):
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.2):
                 break
         except OSError:
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
 
-    console = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=executable, args=["--no-sandbox"])
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(executable_path=executable, args=["--no-sandbox"])
+        page = await browser.new_page(viewport={"width": 1280, "height": 800})
+        console = []
         page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
         page.on("pageerror", lambda e: console.append(f"pageerror: {e}"))
 
-        page.goto(f"http://127.0.0.1:{port}/src/1.html", wait_until="load")
-        page.wait_for_timeout(1500)
+        await page.goto(f"http://127.0.0.1:{port}/src/1.html", wait_until="load")
+        await page.wait_for_timeout(1500)
 
         # ---- the engine runs at all --------------------------------------
         check("the engine is running in the page",
-              page.evaluate("!!window.__icloudSync"), console[:4])
+              await page.evaluate("!!window.__icloudSync"), console[:4])
 
         refusals = [m for m in console if "Content Security Policy" in m]
         check("the capture's policy does not refuse the engine",
               not refusals, refusals[:2])
 
         # ---- the form inside the frame is reached ------------------------
-        reachable = page.evaluate(
+        reachable = await page.evaluate(
             """() => {
               const frame = document.getElementById('aid-auth-widget-iFrame');
               if (!frame || !frame.contentDocument) return false;
@@ -207,23 +284,23 @@ def main():
         # ---- typing in the capture reaches the browser -------------------
         field = page.frame_locator("#aid-auth-widget-iFrame").locator(
             "#account_name_text_field")
-        field.click()
-        field.type("someone@example.com", delay=20)
-        page.wait_for_timeout(900)
+        await field.click()
+        await field.type("someone@example.com", delay=20)
+        await page.wait_for_timeout(900)
 
         check("what is typed in the capture is written into the browser",
-              ("account_name_text_field", "someone@example.com") in frame.written,
-              frame.written)
+              ("account_name_text_field", "someone@example.com") in frame.typed,
+              frame.typed)
 
         # ---- pressing a button in the capture presses it in the browser --
-        page.frame_locator("#aid-auth-widget-iFrame").locator("#sign-in").click()
-        page.wait_for_timeout(700)
+        await page.frame_locator("#aid-auth-widget-iFrame").locator("#sign-in").click()
+        await page.wait_for_timeout(700)
         check("a button pressed in the capture is pressed in the browser",
-              "sign-in" in frame.pressed, frame.pressed)
+              "sign-in" in frame.clicks, frame.clicks)
 
         # ---- and the browser's state comes back --------------------------
-        page.wait_for_timeout(1200)
-        shown = page.frame_locator("#aid-auth-widget-iFrame").locator(
+        await page.wait_for_timeout(1200)
+        shown = await page.frame_locator("#aid-auth-widget-iFrame").locator(
             "#account_name_text_field").input_value()
         check("what the browser holds is shown in the capture",
               shown == "someone@example.com", shown)
@@ -232,44 +309,101 @@ def main():
         # The bridge runs three scripts in the browser. A stub that answers
         # for them proves nothing about whether the scripts work: a script
         # that takes its argument in the wrong shape finds nothing and says
-        # so, and the stub would have said it was fine. So they are run here,
-        # in a page, as they are run in the browser.
-        plain = browser.new_page()
-        plain.set_content(
+        # so, and the stub would have said it was fine. So they are run
+        # here, in a page, as they are run in the browser.
+        plain = await browser.new_page()
+        await plain.set_content(
             '<input id=account_name_text_field type=text>'
             '<input id=password_text_field type=password>'
             '<button id=sign-in>Continue</button>'
         )
 
-        written = plain.evaluate(live._WRITE, ["account_name_text_field", "someone@example.com"])
-        value = plain.evaluate("document.getElementById('account_name_text_field').value")
+        written = await plain.evaluate(live._WRITE, [{"id": "account_name_text_field"}, "someone@example.com"])
+        value = await plain.evaluate("document.getElementById('account_name_text_field').value")
         check("the write script writes into the field it is given",
-              written is True and value == "someone@example.com",
-              (written, value))
+              written is True and value == "someone@example.com", (written, value))
 
-        pressed = plain.evaluate(live._PRESS, "sign-in")
-        check("the press script presses the button it is given",
-              pressed is True, pressed)
+        pressed = await plain.evaluate(live._PRESS, "sign-in")
+        check("the press script presses the button it is given", pressed is True, pressed)
 
-        read = plain.evaluate(live._READ)
+        read = await plain.evaluate(live._READ)
         check("the read script reads the field back",
               read["fields"]["account_name_text_field"]["value"] == "someone@example.com",
               read)
 
-        missing = plain.evaluate(live._WRITE, ["no_such_field", "x"])
+        missing = await plain.evaluate(live._WRITE, [{"id": "no_such_field"}, "x"])
         check("the write script says so when there is no such field",
               missing is False, missing)
 
-        plain.close()
+        await plain.close()
 
-        browser.close()
+        # ---- the bridge, typing into a real page -------------------------
+        # The value has to arrive as keys, not as an assignment: Apple's
+        # sign-in widget watches for keys, and a value put in behind its
+        # back leaves the page looking like nobody has touched it - the
+        # Continue button never appears.
+        typed = await browser.new_page()
+        await typed.set_content(
+            "<input id=account_name_text_field type=text>"
+            "<script>window.__keys = [];"
+            "document.addEventListener('keydown', (e) => window.__keys.push(e.key));"
+            "</script>"
+        )
+
+        # The bridge reaches the browser through its frames, so the frame is
+        # what is handed over - the same thing Playwright's page.frames
+        # gives.
+        live.attach(FakeContext([FakePage([typed.main_frame])]), None)
+
+        wrote = await live.write_field("account_name_text_field", "hello")
+        keys = await typed.evaluate("window.__keys")
+        value = await typed.input_value("#account_name_text_field")
+        check("a value is written into the live browser", wrote and value == "hello",
+              (wrote, value))
+        check("...and it is typed, key by key, the way a person types it",
+              keys == ["h", "e", "l", "l", "o"], keys)
+
+        live.detach()
+        await typed.close()
+
+        # ---- a control with no id, in a real page ------------------------
+        # Apple's verification code boxes have no ids at all: six inputs and
+        # a hidden one. They are named by their place - the third input of
+        # the page - and only written when the page has the same number of
+        # them, because otherwise the right box cannot be told from the
+        # wrong one.
+        boxes = await browser.new_page()
+        await boxes.set_content(
+            "".join(
+                f'<input class=form-security-code-input aria-label="Digit {i}">'
+                for i in range(1, 7)
+            )
+            + "<input type=hidden>"
+        )
+
+        live.attach(FakeContext([FakePage([boxes.main_frame])]), None)
+
+        wrote = await live.write_at("input", 3, 7, "7")
+        values = await boxes.evaluate(
+            "[...document.querySelectorAll('input')].map(i => i.value)")
+        check("a control with no id is written by its place",
+              wrote and values[2] == "7", (wrote, values))
+        check("...and the other boxes are left alone",
+              values[:2] == ["", ""] and values[3:] == ["", "", "", ""], values)
+
+        refused = await live.write_at("input", 3, 6, "7")
+        check("a control is not written when the page has a different number of them",
+              refused is False, refused)
+
+        live.detach()
+        await boxes.close()
+        await browser.close()
 
     httpd.should_exit = True
-    live.detach()
-
+    await asyncio.sleep(0.3)      # let the server shut down tidily
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(asyncio.run(main()))

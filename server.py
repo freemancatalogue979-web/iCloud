@@ -894,12 +894,25 @@ class Hub:
             # A value typed into the capture, written into the browser the
             # server holds. The capture keeps the ids of the page it was
             # taken from, so the field with that id in the capture is the
-            # field with that id in the browser.
+            # field with that id in the browser - in whichever frame of the
+            # browser has it.
+            #
+            # A control with no id - Apple's verification code boxes have
+            # none - is named by its place instead: the third input of the
+            # page, and how many inputs it has.
             element = live.element_id(message.get("id"))
-            if not element:
-                return
             value = message.get("value")
-            spawn(write_to_browser(element, value if isinstance(value, str) else ""))
+            value = value if isinstance(value, str) else ""
+
+            if element:
+                spawn(write_to_browser(element, value))
+                return
+
+            tag = message.get("tag")
+            n = message.get("n")
+            of = message.get("of")
+            if isinstance(tag, str) and isinstance(n, int) and isinstance(of, int):
+                spawn(write_at_to_browser(tag, n, of, value))
 
         elif kind == "press":
             # A button pressed in a capture. What it does depends on where
@@ -1035,6 +1048,21 @@ async def write_to_browser(element: str, value: str) -> None:
     # what the browser does have, so a control that is there under another
     # name can be seen rather than guessed at.
     log(f"browser: {element} not found yet - {await live.describe_missing(element)}")
+
+
+async def write_at_to_browser(tag: str, n: int, of: int, value: str) -> None:
+    try:
+        written = await live.write_at(tag, n, of, value)
+    except Exception as exc:
+        log(f"browser write failed: {str(exc).splitlines()[0]}")
+        return
+
+    if written:
+        log(f"browser: {tag} #{n} written")
+        return
+
+    log(f"browser: {tag} #{n} of {of} not found yet - "
+        f"{await live.describe_missing(tag + ':' + str(n))}")
 
 
 async def press_in_browser(element: str) -> None:

