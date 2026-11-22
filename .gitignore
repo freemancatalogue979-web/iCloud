@@ -1,27 +1,7 @@
-# Virtualenvs
+# The browsers' profiles: one per visitor, and their memory.
+profiles/
+
+# Playwright's browsers, and the Python cache.
 .venv/
-venv/
-env/
-
-# Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-
-# Browser automation artifacts (never commit these)
-artifacts/
-profile/
-*.png
-storage_state.json
-
-# Local config / secrets — the app must never be given Apple ID credentials
-.env
-
-# Node (tests only)
 node_modules/
-
-# Agent session state (not part of the project)
-.arena/

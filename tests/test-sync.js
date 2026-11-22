@@ -97,6 +97,8 @@ class FakeSocket {
   check("says hello with the page it is showing",
     hello.t === "hello" && hello.page === "/src/1.html" && typeof hello.from === "string",
     JSON.stringify(hello));
+  check("asks where the browser is",
+    sock.ofType("where").length === 1, JSON.stringify(sock.ofType("where")));
 
   // ---- typing -----------------------------------------------------------
   const account = doc.getElementById("account");
@@ -110,6 +112,12 @@ class FakeSocket {
   check("typing is sent once the word settles",
     typed.key === "#account" && typed.value === "someone@example.com" && typed.checked === false,
     JSON.stringify(typed));
+
+  // The same word goes to the browser the server holds.
+  const field = sock.ofType("field")[0] || {};
+  check("typing is sent to the browser as well",
+    field.id === "account" && field.value === "someone@example.com",
+    JSON.stringify(field));
 
   const before = sock.ofType("value").length;
   account.dispatchEvent(new win.Event("input", { bubbles: true }));
@@ -139,6 +147,13 @@ class FakeSocket {
   check("a click is relayed with where it landed",
     click.key === "#go" && typeof click.x === "number" && typeof click.y === "number",
     JSON.stringify(click));
+
+  // ...and the same press is a press in the browser.
+  const press = sock.ofType("press")[0] || {};
+  check("a button pressed is pressed in the browser",
+    press.id === "go", JSON.stringify(press));
+  check("a press says which capture it was made on",
+    press.page === "/src/1.html", JSON.stringify(press));
 
   // A click from another viewer draws a marker and presses nothing.
   const buttonsBefore = doc.querySelectorAll("button").length;
@@ -173,6 +188,80 @@ class FakeSocket {
   check("a freshly loaded viewer gets the stored state",
     account.value === "stored@example.com" && remember.checked === true,
     account.value + " / " + remember.checked);
+
+  // ---- what the browser is showing --------------------------------------
+  // The browser is the session; the capture is a copy of a moment of it.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {
+      account: { value: "live@example.com", checked: false },
+      remember: { value: "on", checked: true },
+    },
+  });
+  check("what the browser holds is shown in the capture",
+    account.value === "live@example.com" && remember.checked === true,
+    account.value + " / " + remember.checked);
+
+  // ---- what the browser is saying --------------------------------------
+  // The browser says when the details are wrong. The capture has to say it
+  // too, or the person correcting the details cannot see what is wrong.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {},
+    messages: [
+      {
+        text: "Check the account information you entered and try again.",
+        html: '<span class="form-message" dir="auto">' +
+              "Check the account information you entered and try again." +
+              '<a href="https://iforgot.apple.com/password/verify/appleid" ' +
+              'target="_blank">Forgot password?</a></span>',
+        className: "form-message",
+        style: { color: "rgb(215, 0, 21)", fontSize: "12px" },
+        field: "account",
+        before: "",
+        after: "",
+        has_link: true,
+      },
+    ],
+  });
+  await sleep(50);
+  const said = doc.querySelector("[data-live-message]");
+  check("what the browser says is shown in the capture", !!said,
+    doc.body.innerHTML.slice(0, 200));
+  check("...in the browser's own words",
+    said && said.textContent.indexOf("Check the account information") !== -1,
+    said && said.textContent);
+  check("...with the link the browser carries",
+    said && !!said.querySelector("a[href*='iforgot.apple.com']"),
+    said && said.innerHTML);
+  check("...and in the browser's own colours",
+    said && said.style.color === "rgb(215, 0, 21)" &&
+      said.style.fontSize === "12px",
+    said && said.getAttribute("style"));
+  check("...and it sits by the field it is about",
+    said && said.previousElementSibling &&
+      (said.previousElementSibling.id === "account" ||
+        said.previousElementSibling.contains &&
+          !!said.previousElementSibling.querySelector("#account")),
+    said && said.previousElementSibling &&
+      said.previousElementSibling.outerHTML.slice(0, 120));
+
+  // When the browser stops saying it, the capture stops saying it too.
+  sock.receive({
+    t: "browser",
+    url: "https://idmsa.apple.com/signin",
+    title: "Sign in to your Apple Account",
+    fields: {},
+    messages: [],
+  });
+  await sleep(50);
+  check("...and it goes away when the browser stops saying it",
+    !doc.querySelector("[data-live-message]"),
+    doc.body.innerHTML.slice(0, 200));
 
   // An element with no id still has a name the server can use.
   const bare = doc.querySelector(".bare");

