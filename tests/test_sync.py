@@ -463,6 +463,47 @@ async def main():
     check("the viewer that arrived is told where it is",
           bob.sent[-1] == {"t": "state", "page": "/src/3.html", "values": {}}, bob.sent[-1])
 
+    # ---- the client's own state ------------------------------------------
+    # How far this person has got is kept in their own browser, and the
+    # server is told about it when the engine says hello. Somebody who has
+    # already got in is sent to iCloud; somebody whose browser has no state,
+    # or whose state does not say they finished, starts the process as
+    # usual.
+    session.hub.page = "/src/1.html"
+    session.hub.finished = False
+    count = len(alice.sent)
+
+    bob.feed({"t": "hello", "page": "/src/1.html",
+              "state": {"stage": "Address", "finished": False}})
+    await settle()
+    check("a hello with a state that is not finished starts the process as usual",
+          session.hub.page == "/src/1.html" and not session.hub.finished,
+          (session.hub.page, session.hub.finished))
+    check("...and the viewer is told where it is",
+          bob.sent[-1]["t"] == "state", bob.sent[-1])
+
+    bob.feed({"t": "hello", "page": "/src/1.html"})
+    await settle()
+    check("a hello with no state at all starts the process as usual",
+          session.hub.page == "/src/1.html" and not session.hub.finished,
+          (session.hub.page, session.hub.finished))
+
+    count = len(alice.sent)
+    bob.feed({"t": "hello", "page": "/src/1.html",
+              "state": {"stage": "Signed in", "finished": True}})
+    await settle()
+    check("a hello that says they have finished sends them to iCloud",
+          alice.sent[-1] == {"t": "finished", "page": server.ICLOUD},
+          alice.sent[-1:])
+    check("...and the session knows they have finished",
+          session.hub.finished is True, session.hub.finished)
+    check("...and the captures are closed to them",
+          session.hub.page == server.ICLOUD, session.hub.page)
+
+    # Back to the beginning, for the tests that follow.
+    session.hub.finished = False
+    session.hub.page = "/src/1.html"
+
     # ---- leaving ---------------------------------------------------------
     bob.drop()
     await settle()
@@ -804,7 +845,7 @@ async def main():
     session.hub.go_to_icloud()
     await settle()
     check("a person who has finished is sent to iCloud",
-          alice.sent[-1] == {"t": "nav", "page": server.ICLOUD}, alice.sent[-1:])
+          alice.sent[-1] == {"t": "finished", "page": server.ICLOUD}, alice.sent[-1:])
     check("...and the session knows they have finished",
           session.hub.finished is True)
 

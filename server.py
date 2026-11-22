@@ -990,7 +990,10 @@ class Hub:
         # Form values belong to the page they were typed on.
         self.values = {}
         log("going to icloud.com")
-        self.broadcast({"t": "nav", "page": ICLOUD})
+        # The client is told it has finished before it goes, so that its
+        # own browser keeps the fact: that is what sends it back to iCloud
+        # next time instead of through the whole thing again.
+        self.broadcast({"t": "finished", "page": ICLOUD})
 
     def handle(self, viewer: Viewer, message, session=None) -> None:
         if not isinstance(message, dict):
@@ -1002,6 +1005,18 @@ class Hub:
             # A viewer that has just loaded asks what it should be showing.
             # If it got there by following a link, that is a navigation - the
             # beacon may have been lost on the way - so the hub follows it.
+            #
+            # Their own browser says where they got to. Somebody who has
+            # already got in is sent to iCloud and not through the whole
+            # thing again; somebody whose browser has no state, or whose
+            # state does not say they finished, starts the process as
+            # usual.
+            state = message.get("state")
+            if isinstance(state, dict) and state.get("finished"):
+                log(f"session {session.id if session else '?'} has finished "
+                    f"- going to icloud.com")
+                self.go_to_icloud()
+                return
             if came_from_a_capture(message.get("from")):
                 self.navigate(message.get("page"), sender=viewer)
             viewer.send(self.snapshot())

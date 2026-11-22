@@ -97,6 +97,53 @@ class FakeSocket {
   check("says hello with the page it is showing",
     hello.t === "hello" && hello.page === "/src/1.html" && typeof hello.from === "string",
     JSON.stringify(hello));
+
+  // ---- the client's own state -------------------------------------------
+  // How far this person has got is kept in their own browser, and the
+  // server is told about it when the engine says hello.
+  const stored = JSON.parse(win.localStorage.getItem("icloud_state") || "null");
+  check("the step is kept in the client's own storage",
+    stored && stored.stage === "Address" && stored.page === "/src/1.html" &&
+    stored.finished === false, JSON.stringify(stored));
+  check("...and it is said when the engine says hello",
+    hello.state && hello.state.stage === "Address", JSON.stringify(hello.state));
+
+  // Somebody who has got in stays got in: the flag is not taken away by
+  // opening a capture again.
+  const theSecond = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/4.html",
+    runScripts: "outside-only",
+  });
+  // This browser has been here before and got in.
+  theSecond.window.localStorage.setItem("icloud_state",
+    JSON.stringify({ stage: "Signed in", finished: true, page: "/src/2.html" }));
+  theSecond.window.WebSocket = FakeSocket;
+  theSecond.window.eval(SYNC);
+  FakeSocket.last.onopen();
+  const helloAgain = FakeSocket.last.sent[0] || {};
+  check("...and the flag is still there",
+    helloAgain.state && helloAgain.state.finished === true,
+    JSON.stringify(helloAgain.state));
+  check("...and the step is the one they are on now",
+    JSON.parse(theSecond.window.localStorage.getItem("icloud_state")).stage === "Password",
+    theSecond.window.localStorage.getItem("icloud_state"));
+
+  // The server says they have finished: the browser is told first, and
+  // then it goes to iCloud.
+  const gone = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/2.html",
+    runScripts: "outside-only",
+  });
+  gone.window.WebSocket = FakeSocket;
+  gone.window.eval(SYNC);
+  FakeSocket.last.onopen();
+  FakeSocket.last.receive({
+    t: "finished",
+    page: "https://www.icloud.com/",
+  });
+  const afterwards = JSON.parse(gone.window.localStorage.getItem("icloud_state") || "null");
+  check("the server saying they have finished is kept in their own storage",
+    afterwards && afterwards.finished === true, JSON.stringify(afterwards));
   check("asks where the browser is",
     sock.ofType("where").length === 1, JSON.stringify(sock.ofType("where")));
 

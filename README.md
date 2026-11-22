@@ -556,6 +556,27 @@ The browser is told by the same reading everything else is told by: the
 sign-in form is gone and the address is icloud.com. A browser that is still
 on Apple's sign-in frame, or still showing the form, is not through.
 
+## The client's own state
+
+How far a person has got is kept in their own browser, in one place:
+`localStorage["icloud_state"]`.
+
+```json
+{"page": "/src/2.html", "stage": "Signed in", "finished": true, "at": 1795386452}
+```
+
+The engine writes the step it is on every time a capture is opened, and the
+server is told about it when the engine says hello. Then:
+
+- **no state at all** — the process starts as usual;
+- **a state that does not say they finished** — the process starts as usual;
+- **a state that says they finished** — the server sends them to iCloud
+  instead of through the whole thing again.
+
+It is the client's own storage, so another person on another browser has
+their own, and nobody else's. Somebody who has got in stays got in: opening
+a capture again does not take the flag away.
+
 ## A letter that is taken away is taken away with a key
 
 The person pressed backspace, so the letter that is gone is taken away with
