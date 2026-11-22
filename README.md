@@ -142,11 +142,10 @@ navigation is cancelled.
 **A viewer that is not reading misses a message, it does not stall the page.**
 Each viewer has its own queue; a full one drops the message.
 
-**What is not carried.** Scroll position, focus, file inputs, and anything
-the capture's own scripts would have done — a menu opening, a tab switching,
-the site re-rendering itself. Those scripts are removed on the way out (see
-below), so the page stays the document that was captured. Only what you do to
-the captured controls travels.
+**What is not carried.** Scroll position, focus, file inputs, and changes
+made by the capture's own scripts — a menu opening, a tab switching, the site
+re-rendering itself. Only what you do to the captured controls is relayed: the
+page itself is not mirrored.
 
 The state is in memory. Restarting the server clears it, and it is never
 written back into `src/` — those files are the captures.
@@ -163,47 +162,39 @@ written back into `src/` — those files are the captures.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
   empty `src/` is not a blank page.
-- **The capture's own scripts are removed.** A capture is a finished
-  document: the DOM a script would build is already in the file. Its
-  JavaScript, though, was written against the live site, and run against a
-  copy it does damage — Apple's sign-in app bootstraps and replaces the very
-  form that was captured, leaving a blank panel; other pages navigate away or
-  open dialogs. Nothing it does can work here anyway, because there is no
-  backend behind the copy. The tags are dropped; the markup is not touched.
-  The only script left is `/sync.js`.
-
-  A page that needs them back can say so, three ways:
+- **The capture is served as it was captured.** Its own scripts are kept —
+  the page that renders correctly is the one to trust. A few captures do
+  damage themselves when their JavaScript runs against a copy (Apple's
+  sign-in app can replace the form it was captured with), and for those the
+  scripts can be taken out:
 
   | | |
   |---|---|
-  | `touch src/1.html.keep-scripts` | that page only, permanent (marker file) |
-  | `ICLOUD_KEEP_SCRIPTS=1 python server.py` | every page |
-  | `/src/1.html?scripts=1` | one request, for trying it out |
+  | `touch src/1.html.strip-scripts` | that page only, permanent (marker file) |
+  | `ICLOUD_STRIP_SCRIPTS=1 python server.py` | every page |
+  | `/src/1.html?static=1` | one request, for trying it out |
 
-  Keeping them is a trade, not a fix: the site's JS runs against a copy and
-  may blank the captured markup again. The CSP is still removed either way
-  (the scripts are useless if it is not), and the engine is still added. The
-  `X-Capture-Scripts` response header says `kept` or `removed` for the page
-  being looked at.
-- **The capture's Content-Security-Policy is removed.** A policy captured from
-  the site was written for the site's origin. Served from here it blocks
-  `/sync.js` (leaving a dead file), the socket, and Chrome's own request to
+  The `X-Capture-Scripts` response header says `kept` or `stripped`.
+- **The capture's Content-Security-Policy is extended, not removed.** The
+  policy was written for the site's origin, and on this one it blocks
+  `/sync.js`, the socket, and Chrome's request to
   `/.well-known/appspecific/com.chrome.devtools.json` — the
-  `default-src 'none'` violation in the console. The `<meta>` is dropped on the
-  way out; other metas, including the Apple one, are left alone.
+  `default-src 'none'` violation in the console. So
+  `script-src 'self'; connect-src 'self' ws: wss:` is appended to the policy
+  and nothing else changes: whatever the capture forbade (its own scripts,
+  remote styles) stays forbidden, which is why the page looks the same as
+  `?raw=1` and not one thing more.
+
+  A policy that already pins scripts with a `script-src` of its own is left
+  alone — appending after it would be ignored and `/sync.js` would only log a
+  violation — and the engine is not added: `X-Capture-Sync: blocked`.
 - **The standard web-app meta is added** when the capture does not have it,
   as the first thing in the head — before the deprecated Apple meta, so Chrome
   never sees the Apple name without the standard one and has nothing to warn
   about.
-- **`?raw=1` serves the file untouched** — no engine, scripts and CSP
-  included. It is the thing to open when a served page does not look like the
-  file it came from. `?scripts=1` and the `.keep-scripts` marker are the
-  switch for the scripts alone.
-
-The removals happen in that order — scripts first — because a capture can
-contain `</head>` or a `<meta>` inside a script string, and an edit made
-before the scripts were gone could land inside the script instead of the
-document.
+- **`?raw=1` serves the file untouched** — no engine, no meta, no policy
+  change. It is the reference: if it renders, the served page must render the
+  same way, and now does.
 
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
@@ -215,19 +206,21 @@ There are three versions of the same file to compare, cheapest first:
 | URL | What it is |
 |---|---|
 | `/src/1.html?raw=1` | the file, byte for byte — nothing added, nothing removed |
-| `/src/1.html?scripts=1` | prepared, but the capture's own scripts left in |
-| `/src/1.html` | prepared, scripts removed |
+| `/src/1.html` | the file with the engine, the standard meta and the policy extended |
+| `/src/1.html?static=1` | the same, with the capture's own scripts taken out |
 
-If raw looks right and the prepared page does not, the difference is one of
-the transformations above — and `?scripts=1` says whether the scripts were
-the one. If all three look wrong, the capture itself is missing something,
-usually the site's CSS: a page that points at stylesheets which were never
-saved renders as bare markup.
+The first two must look the same. If they do not, the difference is the
+engine, the meta, or the policy extension — nothing else is touched. If both
+look wrong, the capture itself is missing something, usually the site's CSS: a
+page that points at stylesheets which were never saved renders as bare markup.
 
-The console is the other place to look. A served capture that has no scripts
-left will not log anything about the site it came from; if something is still
-running there, it came from an inline handler (`onclick=`) on the captured
-markup.
+`?static=1` is the third thing to try when a capture damages itself: if the
+page only behaves with scripts gone, leave a `.strip-scripts` marker next to
+it and stop thinking about it.
+
+The console is the other place to look. `X-Capture-Sync: blocked` means the
+capture's policy pins scripts, so the page runs none of the engine and none of
+its own: a capture like that cannot be synced without changing its policy.
 
 ## The socket
 
@@ -299,10 +292,12 @@ Three suites, none of which needs Chromium or a network:
   followed, a submit is cancelled, and a dropped socket reconnects and asks
   for the state again.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
-  injected once and only into HTML, the capture's scripts and CSP are removed,
-  the standard web-app meta is added before the Apple one, `?raw=1` serves the
-  file untouched, assets keep their type, nothing outside `src/` is readable, a
-  missing capture says so, and the hub really is the
+  injected once and only into HTML, the capture is otherwise served as
+  captured, its CSP is extended rather than replaced (and the engine skipped
+  when the policy pins scripts), scripts can be stripped on request, the
+  standard web-app meta is added before the Apple one, `?raw=1` serves the
+  file untouched, assets keep their type, nothing outside `src/` is readable,
+  a missing capture says so, and the hub really is the
   shared state — a value reaches the other viewer and the next one to join, a
   click is relayed but a click with no position is dropped, a link moves every
   viewer and clears form state, an off-site page is refused, a viewer that
