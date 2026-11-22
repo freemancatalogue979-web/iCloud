@@ -822,8 +822,14 @@ class Hub:
             if viewer is not sender:
                 viewer.send(message)
 
-    def navigate(self, page, sender: Viewer | None = None) -> bool:
-        """Follow the viewer that moved to another captured page."""
+    def navigate(self, page, sender: Viewer | None = None, everyone: bool = False) -> bool:
+        """Follow the viewer that moved to another captured page.
+
+        ``everyone`` is for a move that the viewer itself did not make: a
+        button press that leads to the next step. The viewer that pressed
+        it has to be told as well, or it stays where it was while everybody
+        else moves on.
+        """
         page = clean_page(page)
         if not page or page == self.page:
             return False
@@ -831,7 +837,8 @@ class Hub:
         # Form values belong to the page they were typed on.
         self.values = {}
         log(f"page: {page}")
-        self.broadcast({"t": "nav", "page": page}, sender=sender)
+        self.broadcast({"t": "nav", "page": page},
+                       sender=None if everyone else sender)
         return True
 
     def handle(self, viewer: Viewer, message) -> None:
@@ -895,11 +902,95 @@ class Hub:
             spawn(write_to_browser(element, value if isinstance(value, str) else ""))
 
         elif kind == "press":
-            # A button pressed in the capture, pressed in the browser.
+            # A button pressed in a capture. What it does depends on where
+            # it was pressed: the flow says which capture leads to which,
+            # and whether the press also happens in the browser.
             element = live.element_id(message.get("id"))
             if not element:
                 return
-            spawn(press_in_browser(element))
+
+            page = message.get("page")
+            if not isinstance(page, str) or not page:
+                page = self.page
+
+            step = flow_step(page, element)
+            if step is None:
+                # No flow says otherwise, so the press happens in the
+                # browser, as it always did.
+                spawn(press_in_browser(element))
+                return
+
+            if step.get("live"):
+                spawn(press_in_browser(element))
+
+            go = step.get("go")
+            if isinstance(go, str) and go:
+                log(f"flow: {page} {element} -> {go}")
+                # Everyone moves, including the viewer that pressed: it did
+                # not follow a link, so nothing else would take it there.
+                self.navigate(go, sender=viewer, everyone=True)
+
+
+# --------------------------------------------------------------------------
+# The flow
+#
+# A capture is a step of a journey, and the journey is the user's: which
+# capture leads to which, and whether a button pressed on one of them is
+# also pressed in the browser.
+#
+# It is said in a file next to the captures, src/flow.json:
+#
+#   {
+#     "steps": [
+#       {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html"},
+#       {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+#        "live": true}
+#     ]
+#   }
+#
+# "page" is the capture the press happened on and "press" is the id of the
+# control that was pressed ("*" for any control on that page). "go" is the
+# capture the app moves to - every viewer follows - and "live" says whether
+# the press also happens in the browser. A step without "live" does not
+# touch the browser: pressing Continue on a capture that has not asked for
+# a password yet would submit an empty form to the site.
+#
+# A press the flow does not mention still happens in the browser, as it
+# always did. There is no flow file, there is no flow.
+# --------------------------------------------------------------------------
+
+FLOW_FILE = "flow.json"
+
+
+def flow_steps() -> list:
+    """The steps the captures are put through, if the folder says."""
+    try:
+        raw = (SRC / FLOW_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return []
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        log(f"flow: {FLOW_FILE} is not json - ignored")
+        return []
+
+    steps = data.get("steps") if isinstance(data, dict) else data
+    if not isinstance(steps, list):
+        return []
+    return [step for step in steps if isinstance(step, dict)]
+
+
+def flow_step(page: str, element: str) -> dict | None:
+    """What pressing this control on this page does, if the flow says."""
+    for step in flow_steps():
+        if step.get("page") != page:
+            continue
+        wanted = step.get("press")
+        if wanted not in (element, "*"):
+            continue
+        return step
+    return None
 
 
 hub = Hub()

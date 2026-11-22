@@ -164,6 +164,47 @@ view of the browser itself, the mirror — an agent in the real browser that
 streams the live document — is the other design, and it is a different
 branch.
 
+## The flow
+
+Which capture leads to which is the user's, and it is said in a file next to
+the captures: `src/flow.json`.
+
+```json
+{
+  "steps": [
+    {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html"},
+    {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+     "live": true}
+  ]
+}
+```
+
+`page` is the capture the press happened on, `press` is the id of the
+control that was pressed (`"*"` for any control on that page), `go` is the
+capture the app moves to, and `live` says whether the press also happens in
+the browser.
+
+**Everyone moves, including the viewer that pressed.** A button press is not
+a link, so nothing else would take the viewer that pressed it to the next
+capture while everybody else went on without it.
+
+**A step without `live` does not touch the browser.** Pressing Continue on a
+capture that has not asked for a password yet would submit an empty form to
+the site. A step with `live` presses it in the browser as well — which is
+what you want on the step where the form is filled in.
+
+A press the flow does not mention still happens in the browser, as it always
+did. There is no flow file, there is no flow.
+
+The captures that are in `src/` are steps of the sign-in, and the flow file
+that comes with them is:
+
+| Capture | What it is | Pressing Continue |
+|---|---|---|
+| `1.html` | the sign-in form | moves the app to `4.html`; the browser is left alone |
+| `4.html` | the sign-in form, with "remember me" | moves the app to `2.html` and presses Continue in the browser |
+| `2.html` | the verification code step | — |
+
 ## What stays in sync
 
 A static page cannot know that anyone else is typing into it. So the server
@@ -382,7 +423,8 @@ the project virtualenv by itself.
   its id, writes a value into it, presses it, and reads back what the browser
   is showing
 - `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
-- `src/` — the captures (yours; `1.html` is the one the app opens)
+- `src/` — the captures (yours; `1.html` is the one the app opens) and
+  `src/flow.json`, which says which capture leads to which
 - `run.bat` — Windows launcher
 - `tests/` — the suites above
 

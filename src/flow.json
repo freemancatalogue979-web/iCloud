@@ -1,0 +1,15 @@
+{
+  "steps": [
+    {
+      "page": "/src/1.html",
+      "press": "sign-in",
+      "go": "/src/4.html"
+    },
+    {
+      "page": "/src/4.html",
+      "press": "sign-in",
+      "go": "/src/2.html",
+      "live": true
+    }
+  ]
+}

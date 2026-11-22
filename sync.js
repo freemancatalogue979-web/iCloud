@@ -470,7 +470,9 @@
     // The same press, in the browser the server holds.
     var press = pressable(clickable(target));
     if (press) {
-      send({ t: "press", id: press.id });
+      // The page is sent with it: what a press does can depend on where it
+      // was pressed - the flow says which page leads to which.
+      send({ t: "press", id: press.id, page: location.pathname });
     }
   }
 

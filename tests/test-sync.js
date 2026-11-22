@@ -152,6 +152,8 @@ class FakeSocket {
   const press = sock.ofType("press")[0] || {};
   check("a button pressed is pressed in the browser",
     press.id === "go", JSON.stringify(press));
+  check("a press says which capture it was made on",
+    press.page === "/src/1.html", JSON.stringify(press));
 
   // A click from another viewer draws a marker and presses nothing.
   const buttonsBefore = doc.querySelectorAll("button").length;

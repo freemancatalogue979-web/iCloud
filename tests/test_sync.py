@@ -442,6 +442,66 @@ async def main():
           carol.sent[-1] == {"t": "value", "key": "#account",
                              "value": "still here", "checked": False}, carol.sent[-1])
 
+    # ---- the flow --------------------------------------------------------
+    # Which capture leads to which is the user's, and it is said in a file
+    # next to the captures: src/flow.json.
+    flow_root = Path(tempfile.mkdtemp()).resolve()
+    (flow_root / "flow.json").write_text(
+        json.dumps({
+            "steps": [
+                {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html"},
+                {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+                 "live": True},
+            ]
+        }),
+        encoding="utf-8",
+    )
+    server.SRC = flow_root
+
+    check("the flow is read from the folder of captures",
+          len(server.flow_steps()) == 2, server.flow_steps())
+    check("a step is found for a press on a capture",
+          (server.flow_step("/src/1.html", "sign-in") or {}).get("go") == "/src/4.html",
+          server.flow_step("/src/1.html", "sign-in"))
+    check("a step is not found for a press it does not mention",
+          server.flow_step("/src/1.html", "create-link") is None)
+    check("a step is not found for another capture",
+          server.flow_step("/src/3.html", "sign-in") is None)
+
+    server.hub = server.Hub()
+    server.hub.page = "/src/1.html"
+    alice, alice_task = await open_viewer()
+    bob, bob_task = await open_viewer()
+
+    count = len(alice.sent)
+    bob.feed({"t": "press", "id": "sign-in", "page": "/src/1.html"})
+    await settle()
+    check("a press the flow mentions moves the app to the next capture",
+          server.hub.page == "/src/4.html", server.hub.page)
+    check("...and the viewer that pressed it moves too",
+          alice.sent[count:] == [{"t": "nav", "page": "/src/4.html"}],
+          alice.sent[count:])
+    check("...and the other viewer moves as well",
+          bob.sent[-1] == {"t": "nav", "page": "/src/4.html"}, bob.sent[-1])
+
+    # A press the flow says nothing about is still a press in the browser.
+    count = len(alice.sent)
+    bob.feed({"t": "press", "id": "create-link", "page": "/src/4.html"})
+    await settle()
+    check("a press the flow does not mention does not move the app",
+          server.hub.page == "/src/4.html" and len(alice.sent) == count,
+          (server.hub.page, alice.sent[count:]))
+
+    # No flow file, no flow.
+    (flow_root / "flow.json").unlink()
+    check("with no flow file there are no steps", server.flow_steps() == [])
+    check("...and a press is not found in it",
+          server.flow_step("/src/1.html", "sign-in") is None)
+
+    for viewer in (alice, bob):
+        viewer.drop()
+    await asyncio.gather(alice_task, bob_task, return_exceptions=True)
+
     for viewer in (alice, carol):
         viewer.drop()
     await asyncio.gather(alice_task, carol_task, bob_task, return_exceptions=True)

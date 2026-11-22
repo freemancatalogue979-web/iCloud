@@ -104,3 +104,26 @@ the id `account_name_text_field` here is the field with that id there.
 
 So a capture is not a copy you work in — it is the controls for the session
 the browser holds. What it cannot do is show a page it has no capture of.
+
+## The flow between the captures
+
+`flow.json` in this folder says which capture leads to which:
+
+```json
+{
+  "steps": [
+    {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html"},
+    {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+     "live": true}
+  ]
+}
+```
+
+`page` is the capture, `press` is the id of the control that was pressed
+(`"*"` for any), `go` is the capture the app moves to, and `live` says
+whether the press also happens in the browser. A step without `live` leaves
+the browser alone — pressing Continue before the form is filled in would
+submit an empty form to the site.
+
+Edit it to change the order. A press it does not mention still happens in
+the browser, as it always did.

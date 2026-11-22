@@ -18,6 +18,7 @@ ones; only the browser that answers them is not real.
 """
 
 import asyncio
+import tempfile
 import sys
 from pathlib import Path
 
@@ -236,6 +237,12 @@ async def main():
 
     # ---- through the hub --------------------------------------------------
     # The same two things, as the socket carries them.
+    #
+    # The captures are pointed at an empty folder: with the app's own flow
+    # file in place, a press on a capture it mentions moves the app instead
+    # of reaching the browser, and that is the flow's business (and
+    # test_sync.py's).
+    server.SRC = Path(tempfile.mkdtemp()).resolve()
     server.hub = server.Hub()
     form = FakeFrame(
         ids=["account_name_text_field", "sign-in"],
