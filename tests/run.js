@@ -3,15 +3,17 @@
  *   npm install   (once, pulls jsdom)
  *   npm test
  *
- * The test-*.js suites exercise agent.js and mirror.js in jsdom, and the
- * test_*.py suites exercise server.py.
+ * test-sync.js runs sync.js - the engine injected into a captured page - in
+ * jsdom, with a stubbed WebSocket: what it sends when the page is typed into,
+ * what it does with what comes back, and that it neither echoes an applied
+ * value nor replays a click.
  *
- * jsdom is not a browser. It has no layout, no style resolution, no shadow-DOM
- * parser, and it is more permissive than Chromium about how built-in methods
- * are called - a green jsdom run has twice hidden a real defect. So
- * test_real_browser.py runs the same paths in an actual Chromium. It needs a
- * browser executable: it uses $CHROME_PATH, else whatever Playwright has
- * installed, else it skips rather than failing.
+ * test_sync.py runs the rest of server.py without a browser: the src/ routes,
+ * the engine injection, and the hub that carries values, clicks and page
+ * changes between viewers.
+ *
+ * Neither suite needs Chromium or a network. The browser the app opens for
+ * the sign-in is not part of what is tested here.
  */
 const { execFileSync } = require("child_process");
 const fs = require("fs");
@@ -67,8 +69,7 @@ for (const suite of entries) {
   try {
     out = execFileSync(suite.cmd, [path.join(dir, suite.file)], {
       encoding: "utf8",
-      // The browser suites launch Chromium, which is slow to start.
-      timeout: /^test_(real_browser|e2e|server_flow|fidelity|cross_origin)\.py$/.test(suite.file) ? 300000 : 120000,
+      timeout: 120000,
     });
   } catch (e) {
     code = e.status === undefined ? 1 : e.status;

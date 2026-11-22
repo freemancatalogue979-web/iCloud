@@ -1,3 +1,5 @@
 fastapi
-uvicorn
+# [standard] brings the WebSocket implementation uvicorn needs for /ws.
+# Without one it treats an upgrade request as plain HTTP and answers 404.
+uvicorn[standard]
 playwright

@@ -1,42 +1,53 @@
 """FastAPI server on port 9002.
 
-Visiting http://localhost:9002 serves client.html. That page calls /start,
-which opens a browser, loads icloud.com and clicks Sign In.
+Visiting http://localhost:9002 serves client.html. That page opens the real
+browser (icloud.com, Sign In pressed) and loads a page that was captured
+earlier - ``src/1.html`` - in an iframe.
+
+The mirrored capture pipeline is gone. There is no agent in the real browser,
+no document stream, no resource proxy and no engine rebuilding a page from a
+capture: the captured HTML in ``src/`` *is* the page. What the server does now
+is keep every viewer of it in step, because a static file cannot:
+
+* it injects ``/sync.js`` into every captured page it serves, and
+* it holds the shared state - which page everyone is on, and every form value
+  that has been typed - and relays changes over ``/ws``.
+
+So anything done in the iframe is reflected server-side: it is stored by the
+hub and handed to the next viewer (and to the next reload) instead of living
+only in one browser tab.
 
     python server.py
 """
 
 import asyncio
+import html as html_module
 import json
 import logging
+import mimetypes
+import os
 import re
 import sys
-import time
-from collections import OrderedDict
 from pathlib import Path
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urlsplit
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, Response
-from playwright.async_api import async_playwright
-from pydantic import BaseModel
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 HERE = Path(__file__).parent
 
-# The Sign In button on the icloud.com landing page.
-SIGNIN_BUTTON = "ui-button.sign-in-button"
+# Where the captured pages live. The environment variable exists so the tests
+# can point at a scratch folder; in normal use it is just ``./src``.
+SRC = Path(os.environ.get("ICLOUD_SRC") or (HERE / "src")).resolve()
 
-# How long the page is given to settle after Sign In is pressed, before the
-# first capture is taken.
-#
-# The first capture is a snapshot of the DOM, not a stream of changes, so it
-# has to be taken when the page is the page the user is looking at. Right
-# after the click the sign-in form is still arriving - it is a navigation,
-# and the form itself is a cross-origin frame that has not answered yet - and
-# a snapshot taken then is a half-built page that the mirror never recovers
-# from on its own. Once the snapshot has been taken, the DOM is kept up to
-# date by the mutation stream.
-SETTLE_SECONDS = 4
+# The page the client loads once the app is up. Everything in src/ is served,
+# but this is the one the iframe asks for first.
+START_PAGE = "/src/1.html"
+
+# The Sign In button on the icloud.com landing page. The browser still opens
+# and this is still clicked - the user signs in there themselves - but nothing
+# is captured from it any more.
+SIGNIN_BUTTON = "ui-button.sign-in-button"
 
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
@@ -55,228 +66,21 @@ state = {
     "browser_open": False,
 }
 
-
-class Click(BaseModel):
-    x: float
-    y: float
-
-
-class Keys(BaseModel):
-    text: str
-
-
-class Key(BaseModel):
-    key: str
-
+# The real browser. It is opened so the user can sign in; it is not mirrored.
 pw = None
 ctx = None
 page = None
 
-# The first capture is a snapshot taken after the page has settled. Until it
-# is taken nothing is sent to the mirror: a viewer would seed itself from a
-# half-loaded page and would then have to be told to start again.
-_capture_ready = False
+# The one script a captured page gets, put into it as it is served rather than
+# written into the file on disk. The file stays exactly what was captured.
+SYNC_TAG = '<script src="/sync.js"></script>'
 
-# Set once Sign In has been pressed, so that a tab opened by the sign-in flow
-# can be recognised as the page to mirror.
-_signin_clicked = False
-
-# Injected into every page the browser loads. Mirrors the live DOM out to us.
-AGENT_JS = (HERE / "agent.js").read_text(encoding="utf-8")
-
-# Connected /ws viewers, each with its own queue.
-clients: set[asyncio.Queue] = set()
-last_doc: dict | None = None
-
-# The external page. The capture is written out as a real HTML file, and
-# that file is what the client loads - the mirror is the captured page
-# itself, not a picture of it inside a frame.
-MIRROR_FILE = HERE / "1.html"
-
-# The engine that runs inside the captured page: it keeps the page in step
-# with the real browser and forwards clicks and keystrokes back to it.
-ENGINE_TAG = '<script id="rb-engine" src="/mirror.js"></script>'
+NO_STORE = {"Cache-Control": "no-store"}
 
 
-def mirror_page(doc: dict | None) -> str:
-    """The captured page, with the mirror engine put into its head.
-
-    The engine is injected here rather than written into the file, so the
-    file on disk is the capture itself and the served page is the capture
-    plus the one script that makes it live.
-    """
-    frames = (doc or {}).get("frames") or []
-    top = next((f for f in frames if f.get("windowId") == "0"), None)
-    if top is None and frames:
-        top = frames[0]
-    html = (top or {}).get("html") or ""
-    if not html:
-        html = "<!DOCTYPE html><html><head></head><body></body></html>"
-    if "</head>" in html:
-        return html.replace("</head>", ENGINE_TAG + "</head>", 1)
-    if "<body" in html:
-        cut = html.index(">", html.index("<body")) + 1
-        return html[:cut] + ENGINE_TAG + html[cut:]
-    return ENGINE_TAG + html
-
-
-def write_mirror_file(doc: dict | None) -> None:
-    """Keep 1.html on disk equal to the capture that is on screen."""
-    page = mirror_page(doc)
-    try:
-        if MIRROR_FILE.exists() and MIRROR_FILE.read_text(encoding="utf-8") == page:
-            return
-        MIRROR_FILE.write_text(page, encoding="utf-8")
-    except OSError:
-        # The file is a convenience, not the product. A read-only directory
-        # must not stop the mirror.
-        pass
-
-# Frame identity is the agent's job, not the server's. Each frame is told its
-# windowId by its parent over postMessage, the way SingleFile does it, and puts
-# that id on every message. The server just relays.
-
-
-async def broadcast(message: dict):
-    for queue in list(clients):
-        try:
-            queue.put_nowait(message)
-        except asyncio.QueueFull:
-            pass  # a slow viewer drops frames rather than stalling the page
-
-
-# Mirror telemetry. Without this a broken page is indistinguishable from a
-# working one: the console shows only HTTP lines, and "the mirror is blank" and
-# "the mirror is stale" need different fixes. All of it is throttled, because a
-# live page mutates constantly and a log line per change buries everything.
-_stats = {"captures": 0, "values": 0, "resyncs": 0, "last_beat": 0.0}
-
-
-def _describe(frames) -> str:
-    """One line summarising a capture: enough to see a missing frame."""
-    if not frames:
-        return "0 frames"
-    parts = []
-    for frame in frames:
-        size = len(frame.get("html") or "")
-        parts.append(f"{frame.get('windowId')}:{size // 1024}KB")
-    return f"{len(frames)} frame(s) [{', '.join(parts)}]"
-
-
-def source_page(source):
-    """The page a binding call came from, or None.
-
-    Playwright hands the binding a source that names the page, the frame and
-    the context - but how it hands it over has changed: it used to be an
-    object with attributes, and it is a dict now. Asking an attribute of a
-    dict answers None every time, which is how the check below used to let
-    every tab in the context speak for the mirror.
-    """
-    if source is None:
-        return None
-    if isinstance(source, dict):
-        return source.get("page")
-    return getattr(source, "page", None)
-
-
-async def on_emit(source, message):
-    """Called from inside the real page via the Playwright binding."""
-    global last_doc
-    kind = message.get("kind")
-
-    # Only the page being mirrored speaks for the mirror. Another tab in the
-    # same context has its own agent and sends a document of its own under
-    # the same windowId.
-    if page is not None:
-        spoke = source_page(source)
-        if spoke is not None and spoke is not page:
-            return
-
-    deliver = True
-
-    if kind == "doc":
-        if not _capture_ready:
-            # The capture is deferred until the page has settled. An early one
-            # would be a half-loaded page.
-            return
-        last_doc = message
-        frames = message.get("frames") or []
-        _stats["captures"] += 1
-        write_mirror_file(message)
-        log(f"capture: {_describe(frames)}")
-    elif kind == "value":
-        # The one thing that is not a change to the page: a form control's
-        # live value. It is a message of its own, and it only means anything
-        # once there is a capture to put it on.
-        _stats["values"] += 1
-        if not _capture_ready:
-            # Nothing to apply them to. The snapshot taken at the end of the
-            # settle window already contains these changes.
-            deliver = False
-
-    if deliver:
-        await broadcast(message)
-
-    now = time.monotonic()
-    if now - _stats["last_beat"] >= 10.0 and (_stats["captures"] or _stats["values"]):
-        elapsed = now - _stats["last_beat"] if _stats["last_beat"] else 10.0
-        log(
-            f"stream: {_stats['captures']} captures, {_stats['values']} values, "
-            f"{_stats['resyncs']} resyncs in {elapsed:.0f}s"
-        )
-        _stats.update(captures=0, values=0, resyncs=0, last_beat=now)
-
-
-async def install_agent(context):
-    """Give every document the mirror script and a way to send it out."""
-    await context.expose_binding("__rbEmit", on_emit)
-    await context.add_init_script(AGENT_JS)
-
-
-async def capture_now():
-    """Take a snapshot of the page and send it to the mirror.
-
-    The agent answers by emitting a document of its own, which is what the
-    mirror seeds itself from. This is the deliberate first capture, not a
-    recovery from a desync, so it is not counted as a resync.
-    """
-    if page is None:
-        return
-    try:
-        await page.evaluate("() => window.__rbResync && window.__rbResync()")
-    except Exception as exc:
-        log(f"capture failed: {str(exc).splitlines()[0]}")
-
-
-async def request_resync():
-    """Ask the page to re-send its whole document."""
-    if page is None:
-        return
-    _stats["resyncs"] += 1
-    try:
-        await page.evaluate("() => window.__rbResync && window.__rbResync()")
-    except Exception as exc:
-        log(f"resync failed: {str(exc).splitlines()[0]}")
-
-
-async def follow_new_tab(new_page):
-    """The sign-in form may open in a tab of its own.
-
-    When it does, that tab is the page the user is looking at, so it is the
-    page the mirror shows. The tab that was open before stays open, and its
-    agent keeps sending documents - they are ignored, because they are not
-    the page being mirrored.
-    """
-    global page
-    if not _signin_clicked or new_page is page:
-        return
-    page = new_page
-    log("the sign-in form opened in a new tab - mirroring that")
-    try:
-        await new_page.bring_to_front()
-    except Exception:
-        pass
-
+# --------------------------------------------------------------------------
+# Console output
+# --------------------------------------------------------------------------
 
 # The page polls /status every 2s, which buries everything else in the console.
 # The rendered line looks like: 127.0.0.1:5900 - "GET /status HTTP/1.1" 200
@@ -293,6 +97,10 @@ def log(message):
     print(f"[icloud] {message}", flush=True)
     state["step"] = message
 
+
+# --------------------------------------------------------------------------
+# The real browser: opened for the sign-in, and nothing else
+# --------------------------------------------------------------------------
 
 async def install_chromium():
     """Download Chromium, streaming the progress so a stall is visible."""
@@ -350,7 +158,7 @@ async def launch():
     for label, extra in BROWSERS:
         try:
             log(f"launching {label}")
-            ctx = await pw.chromium.launch_persistent_context(
+            browser_ctx = await pw.chromium.launch_persistent_context(
                 str(HERE / "profile"),
                 headless=False,
                 no_viewport=True,
@@ -363,38 +171,51 @@ async def launch():
             reasons.append(reason)
             continue
 
-        page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+        browser_page = browser_ctx.pages[0] if browser_ctx.pages else await browser_ctx.new_page()
         log(f"browser open ({label})")
-        return ctx, page
+        return browser_ctx, browser_page
 
     raise RuntimeError(" | ".join(reasons) or "no browser could be launched")
+
+
+def bring_new_tab_to_front(new_page):
+    """The sign-in flow may open a tab of its own; the user should see it."""
+    if new_page is page:
+        return
+
+    async def front():
+        try:
+            await new_page.bring_to_front()
+        except Exception:
+            pass
+
+    asyncio.create_task(front())
 
 
 @app.get("/")
 async def index():
     # no-store, so an edit to client.html shows up on refresh instead of
     # serving the browser's cached copy.
-    return FileResponse(HERE / "client.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(HERE / "client.html", headers=NO_STORE)
 
 
 @app.get("/start")
 async def start():
-    """Launch the browser, open iCloud, press Sign In, then capture.
-
-    The capture is a snapshot, taken once the page has settled. Everything
-    after that is a stream of changes.
-    """
-    global pw, ctx, page, _capture_ready, _signin_clicked
+    """Launch the browser and press Sign In. Nothing is captured."""
+    global pw, ctx, page
 
     if state["status"] in ("running", "done"):
         log(f"/start ignored, already {state['status']}")
         return state
 
-    state.update(status="running", error="")
-    _capture_ready = False
-    _signin_clicked = False
+    state.update(status="running", error="", browser_open=False)
 
     try:
+        # Imported here rather than at module load: serving the captured pages
+        # does not need Playwright, and a machine without it should still be
+        # able to open the app and read the error on /status.
+        from playwright.async_api import async_playwright
+
         pw = await async_playwright().start()
 
         try:
@@ -408,30 +229,15 @@ async def start():
 
         state["browser_open"] = True
 
-        await install_agent(ctx)
-
-        # The sign-in form may open in a tab of its own. From here on, a tab
-        # that opens is the page the user is looking at.
-        ctx.on("page", follow_new_tab)
+        # A tab the sign-in flow opens is where the user will be typing.
+        ctx.on("page", bring_new_tab_to_front)
 
         log("going to icloud.com")
         await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
         await page.bring_to_front()
 
         log("clicking Sign In")
-        _signin_clicked = True
         await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
-
-        # Let the page settle before taking the snapshot. The sign-in form is
-        # a navigation and a cross-origin frame that has to arrive and
-        # answer; a snapshot taken now would be of a half-built page.
-        log(f"waiting {SETTLE_SECONDS}s for the page to settle")
-        await asyncio.sleep(SETTLE_SECONDS)
-
-        # The first capture: a snapshot of the settled page. From here on the
-        # DOM is kept up to date by the mutation stream.
-        _capture_ready = True
-        await capture_now()
 
         state["status"] = "done"
         log("done - sign in yourself in the browser window")
@@ -450,270 +256,353 @@ async def status():
 
 
 # --------------------------------------------------------------------------
-# Remote view: stream the real rendered page, forward input straight to it.
+# The captured pages
 #
-# Nothing here knows what page is loaded. There are no page-specific selectors
-# and no copy of any site's markup - the client sees the live screenshot and
-# its clicks and keystrokes land on whatever actually has focus.
+# src/ is served as it is, with one addition: every HTML page gets /sync.js in
+# its head. That script is how what the user does in the iframe reaches the
+# server. Without it the page is just a file and nothing leaves the tab.
 # --------------------------------------------------------------------------
-@app.get("/1.html")
-async def mirror_page_route():
-    """The captured page, as a document of its own.
 
-    This is the file the client loads. It is the capture - the page as the
-    real browser is showing it - with the engine that keeps it in step and
-    forwards input added to it.
-    """
+_HEAD_END = re.compile(r"</head\s*>", re.IGNORECASE)
+_BODY_OPEN = re.compile(r"<body[^>]*>", re.IGNORECASE)
+_HTML_SUFFIXES = (".html", ".htm")
+
+
+def inject_sync(page_html: str) -> str:
+    """Put the sync engine into a captured page, once."""
+    if "/sync.js" in page_html:
+        return page_html
+
+    match = _HEAD_END.search(page_html)
+    if match:
+        return page_html[: match.start()] + SYNC_TAG + page_html[match.start():]
+
+    # A capture with no head still has to run the engine. Before the body is
+    # as good a place as any: the script defers its DOM work until the
+    # document has been parsed.
+    match = _BODY_OPEN.search(page_html)
+    if match:
+        return page_html[: match.end()] + SYNC_TAG + page_html[match.end():]
+
+    return SYNC_TAG + page_html
+
+
+def captured_files(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    return sorted(
+        p for p in folder.iterdir()
+        if p.is_file() and p.suffix.lower() in _HTML_SUFFIXES
+    )
+
+
+def page_links(folder: Path) -> str:
+    pages = captured_files(folder)
+    if not pages:
+        return (
+            "<p>No captured pages yet. Put them in <code>src/</code>, "
+            "starting with <code>1.html</code>.</p>"
+        )
+    links = "".join(
+        f'<li><a href="/src/{quote(p.name)}">{html_module.escape(p.name)}</a></li>'
+        for p in pages
+    )
+    return f"<ul>{links}</ul>"
+
+
+PAGE_STYLE = """
+  :root { color-scheme: dark; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center;
+         justify-content:center; background:#000; color:#f5f5f7;
+         font:16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { max-width:44rem; padding:2.5rem 1.5rem; }
+  h1 { font-size:1.35rem; margin:0 0 .75rem; font-weight:600; }
+  p { color:#a1a1a6; margin:.6rem 0; }
+  code { background:#1c1c1e; padding:.1rem .35rem; border-radius:.3rem; color:#f5f5f7; }
+  ul { padding-left:1.2rem; }
+  li { margin:.25rem 0; }
+  a { color:#0a84ff; }
+"""
+
+
+def page_document(title: str, body: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_module.escape(title)}</title>
+<style>{PAGE_STYLE}</style>
+</head>
+<body><main>{body}</main></body>
+</html>
+"""
+
+
+def listing_page(folder: Path) -> str:
+    body = (
+        "<h1>Captured pages</h1>"
+        "<p>The client loads <code>1.html</code> in an iframe. Every page here "
+        "runs <code>/sync.js</code>, so what you type and click is reflected "
+        "server-side and follows you between viewers.</p>"
+        + page_links(folder)
+    )
+    return page_document("Captured pages", body)
+
+
+def missing_page(path: str, folder: Path) -> str:
+    where = (
+        f"<code>src/{html_module.escape(path)}</code>" if path else "<code>src/</code>"
+    )
+    body = (
+        f"<h1>Nothing captured at {where} yet</h1>"
+        "<p>This route serves the HTML files that were captured earlier. Drop "
+        "the capture into <code>src/</code> - starting with <code>1.html</code> "
+        "- and reload.</p>"
+        + page_links(folder)
+    )
+    return page_document("No captured page", body)
+
+
+@app.get("/src")
+@app.get("/src/{path:path}")
+async def captured(path: str = ""):
+    """Serve a captured page (with the sync engine) or one of its assets."""
+    folder = SRC
+    path = path.lstrip("/")
+
+    if not path:
+        if folder.is_dir():
+            return HTMLResponse(listing_page(folder))
+        return HTMLResponse(missing_page("", folder), status_code=404)
+
+    target = (folder / path).resolve()
+    try:
+        target.relative_to(folder)
+    except ValueError:
+        # ../ or an absolute path: never read outside src/.
+        return HTMLResponse(missing_page(path, folder), status_code=404)
+
+    if target.is_dir():
+        return HTMLResponse(listing_page(target))
+
+    if not target.is_file():
+        return HTMLResponse(missing_page(path, folder), status_code=404)
+
+    if target.suffix.lower() in _HTML_SUFFIXES:
+        source = target.read_text(encoding="utf-8", errors="replace")
+        return HTMLResponse(inject_sync(source), headers=NO_STORE)
+
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(
-        content=mirror_page(last_doc),
-        media_type="text/html; charset=utf-8",
+        content=target.read_bytes(),
+        media_type=media_type,
         headers={"Cache-Control": "no-store"},
     )
 
 
-@app.get("/mirror.js")
-async def mirror_js():
-    """The engine that runs inside the captured page."""
+@app.get("/sync.js")
+async def sync_js():
+    """The engine that runs inside every captured page."""
     return FileResponse(
-        HERE / "mirror.js",
-        media_type="application/javascript",
-        headers={"Cache-Control": "no-store"},
-    )
-
-
-@app.get("/capture")
-async def capture_route():
-    """The capture as it stands, for a mirror that has just loaded."""
-    return JSONResponse(
-        last_doc or {},
-        headers={"Cache-Control": "no-store"},
+        HERE / "sync.js",
+        media_type="text/javascript",
+        headers=NO_STORE,
     )
 
 
 # --------------------------------------------------------------------------
-# Resource proxy.
+# Live sync
 #
-# The mirror is served from localhost, so it cannot just point at the real
-# origin: fonts need CORS headers, and anything session-scoped needs the
-# site's cookies. Fetching here through the browser context's own request
-# client solves both, and lets us rewrite url()s inside proxied stylesheets so
-# their relatives resolve against the sheet they came from.
+# The captured page is a file, so nothing in it can know what anyone else is
+# doing. The server is the shared state instead: which page is on screen, and
+# every form value that has been typed into it. A viewer that connects is given
+# that state; changes are broadcast to the other viewers; a click is relayed as
+# a marker rather than replayed, because replaying it would press the button a
+# second time.
 # --------------------------------------------------------------------------
-CSS_URL_RE = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""")
+
+def clean_page(value) -> str:
+    """A page we are willing to send a viewer to: inside /src/, and HTML."""
+    if not isinstance(value, str):
+        return ""
+    if not value.startswith("/src/") or ".." in value:
+        return ""
+    if not value.lower().endswith(_HTML_SUFFIXES):
+        return ""
+    return value
 
 
-def proxy_path(absolute: str) -> str:
-    return "/res?url=" + quote(absolute, safe="")
+def came_from_a_capture(referrer) -> bool:
+    """Was this document reached from another captured page?
+
+    A viewer that has just loaded ``/src/2.html`` from a link on ``/src/1.html``
+    is following a link, and the page it came from says so. A viewer that has
+    just opened the app has the parent page as its referrer, and is not.
+    """
+    if not isinstance(referrer, str) or not referrer:
+        return False
+    try:
+        path = urlsplit(referrer).path
+    except ValueError:
+        return False
+    return path.startswith("/src/") and path.lower().endswith(_HTML_SUFFIXES)
 
 
-def rewrite_css(css: str, base: str) -> str:
-    """Point every url() in a proxied stylesheet back through the proxy."""
+class Viewer:
+    """One browser tab watching a captured page.
 
-    def replace(match):
-        quote_char = match.group(1)
-        raw = match.group(2).strip()
-        if raw.startswith(("data:", "blob:", "#", "/res?")):
-            return match.group(0)
-        absolute = urljoin(base, raw)
-        return f'url("{proxy_path(absolute)}")'
+    Messages go through a queue so a viewer that has stopped reading cannot
+    block the others: it misses a keystroke rather than stalling the page.
+    """
 
-    return CSS_URL_RE.sub(replace, css)
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self.task = asyncio.create_task(self._pump())
 
-
-# Proxied assets are static in practice, and one page asks for the same font or
-# sprite from several rules at once. Without a cache every mirror load re-fetches
-# every asset through the browser's request API, and concurrent requests for the
-# same URL each pay for it separately.
-_RES_TTL = 600.0
-_RES_MAX_ENTRIES = 256
-_RES_MAX_BYTES = 8 * 1024 * 1024
-_res_cache: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()
-_res_inflight: dict[str, "asyncio.Future[tuple[bytes, str]]"] = {}
-
-
-def _res_get(url: str):
-    hit = _res_cache.get(url)
-    if not hit:
-        return None
-    at, body, content_type = hit
-    if time.monotonic() - at > _RES_TTL:
-        _res_cache.pop(url, None)
-        return None
-    _res_cache.move_to_end(url)  # least recently used falls off first
-    return body, content_type
-
-
-def _res_put(url: str, body: bytes, content_type: str):
-    if len(body) > _RES_MAX_BYTES:
-        return  # one huge asset should not evict everything else
-    _res_cache[url] = (time.monotonic(), body, content_type)
-    _res_cache.move_to_end(url)
-    while len(_res_cache) > _RES_MAX_ENTRIES:
-        _res_cache.popitem(last=False)
-
-
-async def _res_fetch(url: str) -> tuple[bytes, str]:
-    """Fetch through the browser context and rewrite CSS url()s."""
-    response = await ctx.request.get(url)
-    body = await response.body()
-    content_type = response.headers.get("content-type", "application/octet-stream")
-    if "text/css" in content_type.lower():
-        body = rewrite_css(body.decode(errors="replace"), url).encode("utf-8")
-    return body, content_type
-
-
-@app.get("/res")
-async def proxy(url: str):
-    # Validate before anything else, so this can never be pointed at a local
-    # file or an internal address.
-    if not url.startswith(("http://", "https://")):
-        return Response(status_code=400, content=b"only http(s) urls may be proxied")
-    if ctx is None:
-        return Response(status_code=503, content=b"no browser session")
-
-    cached = _res_get(url)
-    if cached is None:
-        # Several rules can ask for the same asset in the same instant; let the
-        # first one fetch and the rest wait on it. A failure resolves the shared
-        # future to None rather than raising or cancelling: CancelledError
-        # descends from BaseException, so an `except Exception` in the waiter
-        # would not catch it and it would escape the request handler.
-        inflight = _res_inflight.get(url)
-        if inflight is None:
-            inflight = asyncio.get_running_loop().create_future()
-            _res_inflight[url] = inflight
-            try:
-                fetched = await _res_fetch(url)
-            except Exception as exc:
-                reason = str(exc).splitlines()[0].encode()[:300]
-                _res_inflight.pop(url, None)
-                if not inflight.done():
-                    inflight.set_result(None)
-                return Response(status_code=502, content=reason)
-            _res_inflight.pop(url, None)
-            _res_put(url, *fetched)
-            if not inflight.done():
-                inflight.set_result(fetched)
-            cached = fetched
-        else:
-            cached = await inflight
-            if cached is None:
-                return Response(status_code=502, content=b"upstream fetch failed")
-
-    body, content_type = cached
-    return Response(
-        content=body,
-        media_type=content_type,
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
-
-
-@app.websocket("/ws")
-async def stream(websocket: WebSocket):
-    """Push DOM documents and mutation patches to the mirror."""
-    await websocket.accept()
-
-    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
-    clients.add(queue)
-
-    async def push():
+    async def _pump(self):
         while True:
-            message = await queue.get()
-            await websocket.send_json(message)
+            message = await self.queue.get()
+            await self.websocket.send_json(message)
 
-    task = asyncio.create_task(push())
+    def send(self, message: dict) -> None:
+        try:
+            self.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass
+
+    def close(self) -> None:
+        self.task.cancel()
+
+
+class Hub:
+    """The page everyone is on, and what has been done to it."""
+
+    def __init__(self):
+        self.viewers: set[Viewer] = set()
+        self.page = START_PAGE
+        self.values: dict[str, dict] = {}
+
+    def snapshot(self) -> dict:
+        # A copy: the message sits in a queue, and a navigation in the meantime
+        # must not empty the values the viewer was promised.
+        return {
+            "t": "state",
+            "page": self.page,
+            "values": {key: dict(entry) for key, entry in self.values.items()},
+        }
+
+    def join(self, viewer: Viewer) -> None:
+        self.viewers.add(viewer)
+        viewer.send(self.snapshot())
+
+    def leave(self, viewer: Viewer) -> None:
+        self.viewers.discard(viewer)
+        viewer.close()
+
+    def broadcast(self, message: dict, sender: Viewer | None = None) -> None:
+        for viewer in list(self.viewers):
+            if viewer is not sender:
+                viewer.send(message)
+
+    def navigate(self, page, sender: Viewer | None = None) -> bool:
+        """Follow the viewer that moved to another captured page."""
+        page = clean_page(page)
+        if not page or page == self.page:
+            return False
+        self.page = page
+        # Form values belong to the page they were typed on.
+        self.values = {}
+        log(f"page: {page}")
+        self.broadcast({"t": "nav", "page": page}, sender=sender)
+        return True
+
+    def handle(self, viewer: Viewer, message) -> None:
+        if not isinstance(message, dict):
+            return
+
+        kind = message.get("t")
+
+        if kind == "hello":
+            # A viewer that has just loaded asks what it should be showing.
+            # If it got there by following a link, that is a navigation - the
+            # beacon may have been lost on the way - so the hub follows it.
+            if came_from_a_capture(message.get("from")):
+                self.navigate(message.get("page"), sender=viewer)
+            viewer.send(self.snapshot())
+
+        elif kind == "nav":
+            self.navigate(message.get("page"), sender=viewer)
+
+        elif kind == "value":
+            key = message.get("key")
+            if not isinstance(key, str) or not key or len(key) > 2000:
+                return
+            raw_value = message.get("value")
+            entry = {
+                "value": raw_value[:10000] if isinstance(raw_value, str) else "",
+                "checked": bool(message.get("checked")),
+            }
+            self.values[key] = entry
+            self.broadcast({"t": "value", "key": key, **entry}, sender=viewer)
+
+        elif kind == "click":
+            x, y = message.get("x"), message.get("y")
+            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                return
+            self.broadcast(
+                {
+                    "t": "click",
+                    "key": str(message.get("key") or "")[:2000],
+                    "x": x,
+                    "y": y,
+                },
+                sender=viewer,
+            )
+
+
+hub = Hub()
+
+
+async def sync_socket(websocket: WebSocket):
+    """The captured page's line to the server."""
+    await websocket.accept()
+    viewer = Viewer(websocket)
+    hub.join(viewer)
 
     try:
-        # A viewer that joins late still gets the current document at once.
-        if last_doc is not None:
-            await websocket.send_json(last_doc)
-
         while True:
             raw = await websocket.receive_text()
             try:
                 message = json.loads(raw)
             except json.JSONDecodeError:
                 continue
-            if message.get("cmd") == "resync":
-                await request_resync()
+            hub.handle(viewer, message)
     except WebSocketDisconnect:
         pass
     except Exception as exc:
         log(f"viewer disconnected: {str(exc).splitlines()[0]}")
     finally:
-        task.cancel()
-        clients.discard(queue)
+        hub.leave(viewer)
 
 
-@app.get("/shot.png")
-async def shot():
-    if page is None:
-        return Response(status_code=404)
-    try:
-        png = await page.screenshot()
-    except Exception as exc:
-        log(f"screenshot failed: {str(exc).splitlines()[0]}")
-        return Response(status_code=503)
-    return Response(png, media_type="image/png", headers={"Cache-Control": "no-store"})
+app.websocket("/ws")(sync_socket)
 
 
-# The size of the page the mirror is a copy of. The browser window is opened
-# maximised, so it is whatever size the screen is - and the mirror has to
-# scale its clicks to that, not to a size guessed at build time.
-_viewport = {"w": 0, "h": 0}
+@app.post("/nav")
+async def nav(request: Request):
+    """A link click, reported by ``sendBeacon`` as the page unloads.
 
-
-async def viewport_size():
-    """The real page's viewport, in CSS pixels."""
-    if page is None:
-        return 0, 0
-    now = time.monotonic()
-    if _viewport["w"] and now - _viewport.get("at", 0) < 2.0:
-        return _viewport["w"], _viewport["h"]
-    try:
-        size = await page.evaluate("() => [window.innerWidth, window.innerHeight]")
-    except Exception:
-        return _viewport["w"], _viewport["h"]
-    if size and size[0]:
-        _viewport.update(w=size[0], h=size[1], at=now)
-    return _viewport["w"], _viewport["h"]
-
-
-@app.post("/click")
-async def click(where: Click):
-    """A click on the mirror, as a fraction of the page.
-
-    The mirror sends a proportion of its own area rather than pixels, so the
-    click lands in the same place on the real page whatever size the browser
-    window is.
+    Waiting for the WebSocket to carry it would race the navigation; a beacon
+    is delivered whether or not the document survives.
     """
-    if page is None:
-        return {"ok": False, "error": "no browser"}
-    width, height = await viewport_size()
-    if not width or not height:
-        # No size to scale by: take the coordinates as they are.
-        await page.mouse.click(where.x, where.y)
-        return {"ok": True}
-    await page.mouse.click(where.x * width, where.y * height)
-    return {"ok": True}
-
-
-@app.post("/keys")
-async def keys(body: Keys):
-    """Type into whatever currently has focus."""
-    if page is None:
-        return {"ok": False, "error": "no browser"}
-    await page.keyboard.type(body.text)
-    return {"ok": True}
-
-
-@app.post("/key")
-async def key(body: Key):
-    """A named key: Enter, Tab, Backspace, ArrowDown, ..."""
-    if page is None:
-        return {"ok": False, "error": "no browser"}
-    await page.keyboard.press(body.key)
-    return {"ok": True}
+    try:
+        message = json.loads(await request.body() or b"{}")
+    except json.JSONDecodeError:
+        return Response(status_code=400)
+    hub.navigate(message.get("page") if isinstance(message, dict) else None)
+    return Response(status_code=204)
 
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json")
@@ -726,6 +615,4 @@ if __name__ == "__main__":
     import uvicorn
 
     log("server on http://localhost:9002")
-    # One capture carries every frame's document in a single message, so the
-    # default 1 MB WebSocket frame is far too small.
-    uvicorn.run(app, host="0.0.0.0", port=9002, ws_max_size=64 * 1024 * 1024)
+    uvicorn.run(app, host="0.0.0.0", port=9002)

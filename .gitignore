@@ -13,7 +13,7 @@ __pycache__/
 
 # Browser automation artifacts (never commit these)
 artifacts/
-.profile/
+profile/
 *.png
 storage_state.json
 
@@ -25,6 +25,3 @@ node_modules/
 
 # Agent session state (not part of the project)
 .arena/
-
-# The captured page, written by the server as the capture changes
-1.html
