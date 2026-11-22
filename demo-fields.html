@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apple ID (local demo)</title>
+<style>
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin:0; padding:18px 20px; color:#1d1d1f; background:#fff;
+  }
+  label { display:block; font-size:13px; color:#6e6e73; margin:10px 0 4px; }
+  input {
+    width:300px; padding:8px 10px; font-size:15px; font-family:inherit;
+    border:1px solid #d2d2d7; border-radius:8px;
+  }
+  button {
+    margin-top:16px; padding:9px 18px; font-size:15px; font-family:inherit;
+    background:#0071e3; color:#fff; border:0; border-radius:980px; cursor:pointer;
+  }
+  #status { font-size:13px; color:#6e6e73; margin-top:14px; min-height:16px; }
+</style>
+</head>
+<body>
+  <form onsubmit="return false">
+    <label for="acct">Apple ID</label>
+    <input id="acct" type="text" autocomplete="off">
+    <label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="off">
+    <button id="go">Sign In</button>
+    <p id="status"></p>
+  </form>
+
+  <script>
+    /* Something on the page changes when the user types, so the whole loop
+     * can be seen: a keystroke in the mirror reaches the real browser, the
+     * real page changes, the change is captured, and the mirror shows it. */
+    document.getElementById('acct').addEventListener('input', (ev) => {
+      document.getElementById('status').textContent =
+        'the real browser says: ' + ev.target.value;
+    });
+  </script>
+</body>
+</html>

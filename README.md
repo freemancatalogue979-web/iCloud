@@ -142,6 +142,28 @@ the top frame captures everything - itself and every frame under it. That is
 the only path a change inside the cross-origin sign-in form can take, and it
 works across the origin boundary because `postMessage` does.
 
+**Input goes out one request at a time, in the order it was made.** A
+keystroke is one character and it is sent as its own request, so two
+requests in flight at once reach the browser in whatever order the network
+delivers them, and the text comes out scrambled - the user types "hello"
+and the field says "hleol". The mirror therefore sends one input request at
+a time, and the server applies input to the browser one action at a time,
+so a click and the characters around it cannot overtake each other.
+
+**A frame's document is updated in place, never navigated.** Putting a
+capture into a frame by setting `srcdoc` navigates the frame: the old
+document is thrown away and a new one is built over several milliseconds,
+and for those milliseconds there is no document in the frame that anything
+is listening on. A keystroke that lands in that moment is lost - the
+mirror showed `someone@iclud.com` for `someone@icloud.com`, and it lost
+the same character every time, because the capture always arrives in the
+same place in the typing. So the capture is written into the frame's
+document with `document.open()` and `document.write()`. The document stays
+the same document, so there is never a moment without one;
+`document.open()` does take the document's listeners with it, so the input
+is wired again straight afterwards, and because that is all in one go there
+is no moment in between either.
+
 ## How the capture works
 
 Modelled on the [SingleFile](https://github.com/gildas-lormeau/singlefile)

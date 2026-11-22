@@ -16,6 +16,7 @@ without one. Set CHROME_PATH to run it.
 
 import asyncio
 import os
+import time
 import sys
 from pathlib import Path
 
@@ -101,6 +102,26 @@ SLOW_PAGE = """<!DOCTYPE html>
   <iframe sandbox="allow-same-origin" src="/__frame" style="width:10px;height:10px"></iframe>
 </body></html>"""
 
+# A page whose frame holds a field. The frame is same-origin, so it is a
+# frame the agent runs inside - the case where the agent has to notice that
+# the frame's document was replaced.
+FRAMED_PAGE = """<!DOCTYPE html>
+<html><head><title>framed</title></head>
+<body>
+  <div id="root">root</div>
+  <iframe src="/__inner" style="width:400px;height:200px"></iframe>
+</body></html>"""
+
+INNER_PAGE = """<!DOCTYPE html>
+<html><head><title>inner</title></head>
+<body><input id="acct" type="text"><p id="status"></p>
+<script>
+  document.getElementById('acct').addEventListener('input', (ev) => {
+    document.getElementById('status').textContent = 'typed: ' + ev.target.value;
+  });
+</script>
+</body></html>"""
+
 
 async def run():
     from playwright.async_api import async_playwright
@@ -125,7 +146,22 @@ async def run():
 
         # ------------------------------------------------ source page
         messages = []
-        await context.expose_binding("__rbEmit", lambda source, msg: messages.append(msg))
+        # What the agent sent, and which page it came from. The page's own
+        # copy of the binding cannot be used to watch this: the binding is
+        # put back into a frame when the frame is created, and this page has
+        # a frame - so a wrapper installed on the page is quietly replaced.
+        sent_by_page = []
+
+        def collect(source, msg):
+            messages.append(msg)
+            frame = source.get("frame") if isinstance(source, dict) else None
+            url = frame.url if frame is not None else "?"
+            # Every frame's document, not just the top one: a change inside
+            # a frame shows up in the frame's own capture.
+            html = "".join(f.get("html", "") for f in (msg.get("frames") or []))
+            sent_by_page.append((url, msg.get("kind"), html))
+
+        await context.expose_binding("__rbEmit", collect)
         await context.add_init_script(AGENT_JS)
 
         src = await context.new_page()
@@ -262,6 +298,99 @@ async def run():
             )
             check("the change reached the real mirror", items == ["a", "b"], str(items))
 
+        # ------------------------------------ a frame that is updated
+        # The mirror shows the captured page, and a capture that arrives
+        # replaces it. A frame's document must not be replaced under the
+        # user while they are typing into it: a keystroke that lands in
+        # that moment reaches a document with nothing listening on it, and
+        # the character is lost.
+        #
+        # It was lost every time, and it was always the same character,
+        # because the capture always arrives in the same place in the
+        # typing. The mirror showed "someone@iclud.com" for
+        # "someone@icloud.com", and the real browser had the same wrong
+        # value - the two agreed with each other and both were wrong.
+        framed_mirror = await context.new_page()
+        await framed_mirror.set_content(MIRROR_PAGE)
+        await framed_mirror.wait_for_timeout(200)
+        # Record what the mirror forwards. set_content() does not run init
+        # scripts, so the stub goes in afterwards - before anything is
+        # forwarded.
+        await framed_mirror.evaluate(
+            """() => {
+                 window.__sent = [];
+                 window.fetch = (path, opts) => {
+                   if (String(path).indexOf('/keys') !== -1) {
+                     window.__sent.push(JSON.parse(opts.body).text);
+                   }
+                   return Promise.resolve({ ok: true, json: () => Promise.resolve(null) });
+                 };
+               }""")
+
+        top_html = ('<!DOCTYPE html><html><body>'
+                    '<iframe data-rb-frame="0.0" style="width:300px;height:200px">'
+                    '</iframe></body></html>')
+        inner_html = ('<!DOCTYPE html><html><body><input id="acct" type="text">'
+                      '</body></html>')
+
+        async def seed_mirror(round_no):
+            await framed_mirror.evaluate(
+                "(a) => window.seed(a.frames, a.viewport)",
+                {"frames": [
+                    {"windowId": "0", "html": top_html},
+                    {"windowId": "0.0",
+                     "html": inner_html.replace(
+                         "</body>", "<p id=r>%d</p></body>" % round_no)},
+                ], "viewport": {"w": 800, "h": 600}})
+
+        await seed_mirror(0)
+        await framed_mirror.wait_for_timeout(300)
+
+        # Right after a capture, the frame's document must already be
+        # there and already listening. There must be no moment in which a
+        # keystroke has nowhere to go.
+        watched = await framed_mirror.evaluate(
+            """() => {
+                 const f = document.querySelector('iframe[data-rb-frame="0.0"]');
+                 const doc = f && f.contentDocument;
+                 if (!doc) return { doc: false };
+                 const input = doc.getElementById('acct');
+                 if (!input) return { doc: true, input: false };
+                 window.__before = window.__sent.length;
+                 input.dispatchEvent(new doc.defaultView.KeyboardEvent(
+                   'keydown', { key: 'x', bubbles: true, cancelable: true }));
+                 return { doc: true, input: true };
+               }""")
+        check("the capture put the frame's document in place",
+              watched.get("doc") is True and watched.get("input") is True,
+              str(watched))
+        # The mirror sends input on, one request at a time, so the request
+        # has made its way out before the count is read.
+        await framed_mirror.wait_for_timeout(200)
+        heard = await framed_mirror.evaluate(
+            "() => window.__sent.length > window.__before")
+        check("the frame's document is listening the moment it is in place",
+              heard is True, str(watched))
+
+        # And typing while captures keep arriving must not lose anything.
+        await framed_mirror.evaluate("() => { window.__sent = []; }")
+        for i, ch in enumerate("abcdefgh"):
+            await seed_mirror(i + 1)
+            for f in framed_mirror.frames:
+                if f == framed_mirror.main_frame:
+                    continue
+                try:
+                    loc = f.locator("#acct").first
+                    if await loc.count():
+                        await loc.press(ch)
+                        break
+                except Exception:
+                    pass
+        await framed_mirror.wait_for_timeout(500)
+        sent = await framed_mirror.evaluate("() => window.__sent")
+        check("no keystroke is lost while captures arrive",
+              "".join(sent) == "abcdefgh", repr(sent))
+
         # ------------------------------------ bare text-node replacement
         # This is the bug class that caused "the dom is not updating": a
         # childList mutation whose added/removed nodes are TEXT_NODE was
@@ -343,13 +472,25 @@ async def run():
         # it waits for the frame that never answers.
         await slow.wait_for_timeout(2200)
 
-        # The agent emits through __rbEmit; record the order of what it sends.
-        await slow.evaluate(
-            """() => {
-                 window.__order = [];
-                 const real = window.__rbEmit;
-                 window.__rbEmit = (m) => { window.__order.push(m.kind); return real(m); };
-               }""")
+        # The scenario has to start from a quiet agent, or the request below
+        # lands on a capture that is already running and nothing that
+        # happens afterwards can be told apart from what was already in
+        # flight. The agent says what it is doing.
+        async def wait_idle(page, timeout=20.0):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                state = await page.evaluate(
+                    "() => window.__rbInternals ? window.__rbInternals.state() : null")
+                if state and not state["capturing"] and not state["pending"] \
+                        and not state["dirty"]:
+                    return True
+                await page.wait_for_timeout(50)
+            return False
+
+        check("the agent settles before the scenario",
+              await wait_idle(slow), "the agent was still busy")
+
+        before = len(sent_by_page)
 
         # Started but not awaited: the capture is in the middle of its frame
         # timeout, and the change has to happen while it is.
@@ -360,28 +501,74 @@ async def run():
             " d.id = 'during'; document.body.appendChild(d); }"
         )
         # Long enough for the capture to finish and the change to be sent.
-        await slow.wait_for_timeout(2000)
+        # Each capture waits for the frame that never answers, so this is
+        # two capture round-trips, not one.
+        await slow.wait_for_timeout(4000)
 
-        order = await slow.evaluate("() => window.__order")
-        check("a change made during a capture is not lost",
-              order.count("doc") >= 2, str(order))
-        last = [m for m in messages if m.get("kind") == "doc"]
+        sent = [m for m in sent_by_page[before:]
+                if m[0].endswith("__slowpage") and m[1] == "doc"]
+        check("a change made during a capture is not lost", len(sent) >= 2, str(sent))
         check("the last capture carries the change that happened during the first",
-              bool(last) and "during" in last[-1]["frames"][0]["html"],
-              str(last[-1]["frames"][0]["html"][:200]) if last else "no capture")
+              bool(sent) and "during" in sent[-1][2],
+              str(sent[-1][2][:200]) if sent else "no capture")
 
         # A capture asked for while another one is still running. The running
         # one read the document before the request, so it may already be out
         # of date - dropping the request would leave the mirror stale with
         # nothing to show for it.
-        await slow.evaluate("() => { window.__order = []; }")
+        check("the agent settles again", await wait_idle(slow), "the agent was still busy")
+        before = len(sent_by_page)
         await slow.evaluate("() => { window.__rbResync(); }")
         await slow.wait_for_timeout(150)
         await slow.evaluate("() => { window.__rbResync(); }")
-        await slow.wait_for_timeout(3000)
-        order = await slow.evaluate("() => window.__order")
+        await slow.wait_for_timeout(4000)
+        sent = [m for m in sent_by_page[before:]
+                if m[0].endswith("__slowpage") and m[1] == "doc"]
         check("a capture asked for during a capture is not lost",
-              order.count("doc") >= 2, str(order))
+              len(sent) >= 2, str(sent))
+
+        # ------------------------- a frame's document is replaced underneath
+        # A frame is born as an empty document and then navigates to the page
+        # it is really going to show. Chromium keeps the SAME window across
+        # that swap, and the script that started the agent is not run again
+        # for it - so an agent that only ever looked at the document it
+        # started with is left watching a document that is no longer on
+        # screen. Its observer sees nothing, and the form controls it
+        # listens to are not the ones the user is typing into.
+        #
+        # The mirror has to notice, and the capture that follows has to
+        # carry what changed.
+        framed = await context.new_page()
+        await framed.route("**/__framed", lambda r: r.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=FRAMED_PAGE))
+        await framed.route("**/__inner", lambda r: r.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=INNER_PAGE))
+        await framed.goto("http://127.0.0.1:9002/__framed")
+        await framed.wait_for_timeout(2500)
+
+        inner = None
+        for f in framed.frames:
+            if f.url.endswith("__inner"):
+                inner = f
+        check("the frame is loaded", inner is not None,
+              str([f.url for f in framed.frames]))
+        if inner is None:
+            await browser.close()
+            return True
+
+        before = len(sent_by_page)
+        # Type into the field in the frame, in the real browser.
+        await inner.locator("#acct").click()
+        await inner.locator("#acct").press_sequentially("hello", delay=40)
+        await framed.wait_for_timeout(3000)
+
+        frames_seen = [m for m in sent_by_page[before:] if m[1] == "doc"]
+        check("a change inside a frame produces a capture",
+              len(frames_seen) > 0,
+              str([m[0] for m in sent_by_page[before:]]))
+        check("the capture carries what changed inside the frame",
+              any("typed: hello" in m[2] for m in frames_seen),
+              str([m[2][-200:] for m in frames_seen])[-300:])
 
         await browser.close()
         return True

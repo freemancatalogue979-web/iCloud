@@ -45,12 +45,24 @@
   /* windowId -> { el, doc } for the frames under the top one. */
   const frameDocs = new Map();
 
+  /* Input goes to the real browser in the order the user made it.
+   *
+   * A keystroke is a single character, and a fetch is a single request. If
+   * two of them are in flight at once, the browser receives them in
+   * whatever order the network happens to deliver them, and the text comes
+   * out scrambled - the user types "hello" and the field says "hleol".
+   * The requests are therefore sent one at a time, in the order they were
+   * made. */
+  let sending = Promise.resolve();
+
   function post(path, body) {
-    fetch(path, {
+    const next = sending.then(() => fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }).catch(() => {});
+    })).catch(() => {});
+    sending = next;
+    return next;
   }
 
   function tell(message) {
@@ -84,6 +96,37 @@
     }
   }
 
+  /* A frame's document is a different document from this one, and putting
+   * a capture into it is not as simple as setting srcdoc.
+   *
+   * Setting srcdoc navigates the frame. The navigation replaces the
+   * frame's document: the old one is thrown away and a new one is built,
+   * and that happens over several milliseconds. For those milliseconds
+   * there is no document in the frame that anything is listening on, and a
+   * keystroke that arrives then is lost - the mirror shows
+   * "someone@iclud.com" for "someone@icloud.com", and it loses the same
+   * character every time because the capture always lands in the same
+   * place in the typing.
+   *
+   * So the capture is written into the frame's document in place, with
+   * document.open() and document.write(). The document stays the same
+   * document, so there is no moment without one. document.open() does
+   * take the document's listeners with it, so the input is wired again
+   * straight afterwards - and because that is all in one go, there is no
+   * moment in between either.
+   *
+   * The frame's document ends up with the URL about:blank rather than
+   * about:srcdoc. That does not matter: the agent makes every URL in a
+   * capture absolute, so nothing in the frame has anything to resolve. */
+  function setFrameHtml(doc, html) {
+    // document.open() removes the listeners on the document, so the
+    // document is marked as unwired and the input is wired again after.
+    doc.__rbWired = false;
+    doc.open();
+    doc.write(html);
+    doc.close();
+  }
+
   function attachFrames(frames) {
     for (const frame of frames) {
       const id = frame.windowId;
@@ -93,17 +136,26 @@
       const known = frameDocs.get(id);
       if (known && known.el === el && known.html === frame.html) continue;
       el.setAttribute("sandbox", "allow-same-origin");
-      el.onload = () => {
-        const doc = el.contentDocument;
-        if (!doc) return;
+      const doc = el.contentDocument;
+      if (doc) {
+        setFrameHtml(doc, frame.html);
         frameDocs.set(id, { el: el, doc: doc, html: frame.html });
         prepareCanvases(doc);
         wireInput(doc);
-        // A frame's own frames go in after it has loaded.
-        const mine = (frames || []).filter((f) => f.windowId && f.windowId.startsWith(id + "."));
-        if (mine.length) attachFrames(mine);
-      };
-      el.srcdoc = frame.html;
+      } else {
+        // No document to write into yet: load the frame the long way.
+        el.onload = () => {
+          const loaded = el.contentDocument;
+          if (!loaded) return;
+          frameDocs.set(id, { el: el, doc: loaded, html: frame.html });
+          prepareCanvases(loaded);
+          wireInput(loaded);
+        };
+        el.srcdoc = frame.html;
+      }
+      // A frame's own frames go in after it has loaded.
+      const mine = (frames || []).filter((f) => f.windowId && f.windowId.startsWith(id + "."));
+      if (mine.length) attachFrames(mine);
     }
   }
 
@@ -291,14 +343,20 @@
    * A click inside a frame is reported by that frame, so its coordinates are
    * relative to the frame. Each frame's own offset is added as the frames are
    * climbed out of, which gives the position in the page - the only
-   * coordinates the server can use. */
+   * coordinates the server can use.
+   *
+   * The climb stops at this document. This document *is* the captured page,
+   * laid out at the size it was captured at, so its own coordinates are
+   * already the captured page's coordinates. Climbing past it would add the
+   * offset of the frame this page is shown in - the client's - which is a
+   * position in somebody else's page and has no business being here. */
   function pointInPage(ev) {
     let x = ev.clientX;
     let y = ev.clientY;
     let win = ev.target && ev.target.ownerDocument
       ? ev.target.ownerDocument.defaultView
       : null;
-    while (win && win.frameElement) {
+    while (win && win !== window && win.frameElement) {
       const r = win.frameElement.getBoundingClientRect();
       x += r.left;
       y += r.top;

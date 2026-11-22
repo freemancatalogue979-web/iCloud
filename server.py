@@ -9,6 +9,7 @@ which opens a browser, loads icloud.com and clicks Sign In.
 import asyncio
 import json
 import logging
+import os
 import re
 import sys
 import time
@@ -26,6 +27,12 @@ HERE = Path(__file__).parent
 # The Sign In button on the icloud.com landing page.
 SIGNIN_BUTTON = "ui-button.sign-in-button"
 
+# The page to mirror. The default is the real thing; ICLOUD_MIRROR_URL points
+# it somewhere else, which is how the mirror can be seen without a route to
+# Apple - `http://127.0.0.1:9002/demo` serves a local stand-in that has the
+# same shape: a sign-in control, and a sign-in form in a frame.
+MIRROR_URL = os.environ.get("ICLOUD_MIRROR_URL", "https://www.icloud.com/")
+
 # How long the page is given to settle after Sign In is pressed, before the
 # first capture is taken.
 #
@@ -37,6 +44,12 @@ SIGNIN_BUTTON = "ui-button.sign-in-button"
 # from on its own. Once the snapshot has been taken, the DOM is kept up to
 # date by the mutation stream.
 SETTLE_SECONDS = 4
+
+# A Chromium to drive, if the machine has one and Playwright has not
+# downloaded its own. ICLOUD_CHROMIUM_PATH points at the binary;
+# ICLOUD_CHROMIUM_LD_PATH points at the libraries it needs.
+CHROMIUM_PATH = os.environ.get("ICLOUD_CHROMIUM_PATH", "")
+CHROMIUM_LD_PATH = os.environ.get("ICLOUD_CHROMIUM_LD_PATH", "")
 
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
@@ -347,7 +360,21 @@ async def launch():
     """
     reasons = []
 
-    for label, extra in BROWSERS:
+    candidates = list(BROWSERS)
+    if CHROMIUM_PATH:
+        # A Chromium the machine already has. Tried first, because the
+        # bundled one has to be downloaded and there may be no route to
+        # the download host.
+        candidates.insert(0, ("chromium at " + CHROMIUM_PATH,
+                              {"executable_path": CHROMIUM_PATH}))
+
+    for label, extra in candidates:
+        env = None
+        if CHROMIUM_LD_PATH:
+            env = dict(os.environ)
+            env["LD_LIBRARY_PATH"] = (
+                CHROMIUM_LD_PATH + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+            )
         try:
             log(f"launching {label}")
             ctx = await pw.chromium.launch_persistent_context(
@@ -355,6 +382,7 @@ async def launch():
                 headless=False,
                 no_viewport=True,
                 args=["--start-maximized"],
+                env=env,
                 **extra,
             )
         except Exception as exc:
@@ -414,8 +442,8 @@ async def start():
         # that opens is the page the user is looking at.
         ctx.on("page", follow_new_tab)
 
-        log("going to icloud.com")
-        await page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
+        log(f"going to {MIRROR_URL}")
+        await page.goto(MIRROR_URL, wait_until="domcontentloaded")
         await page.bring_to_front()
 
         log("clicking Sign In")
@@ -447,6 +475,33 @@ async def start():
 @app.get("/status")
 async def status():
     return state
+
+
+# --------------------------------------------------------------------------
+# The local demo.
+#
+# A stand-in for icloud.com, so the mirror can be seen end to end without a
+# route to Apple: a landing page with the sign-in control the server clicks,
+# a sign-in page whose form is in a frame, and the form itself. Set
+# ICLOUD_MIRROR_URL=http://127.0.0.1:9002/demo to mirror it.
+# --------------------------------------------------------------------------
+def demo_page(name: str):
+    return FileResponse(HERE / name, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/demo")
+async def demo_landing():
+    return demo_page("demo.html")
+
+
+@app.get("/demo-form")
+async def demo_signin():
+    return demo_page("demo-form.html")
+
+
+@app.get("/demo-fields")
+async def demo_fields():
+    return demo_page("demo-fields.html")
 
 
 # --------------------------------------------------------------------------
@@ -679,6 +734,13 @@ async def viewport_size():
     return _viewport["w"], _viewport["h"]
 
 
+# Input is applied to the real browser one action at a time. Requests
+# arrive one per keystroke, and the server handles them concurrently, so
+# without this two of them can reach the browser at the same moment and
+# the browser applies them in the wrong order.
+input_lock = asyncio.Lock()
+
+
 @app.post("/click")
 async def click(where: Click):
     """A click on the mirror, as a fraction of the page.
@@ -689,12 +751,13 @@ async def click(where: Click):
     """
     if page is None:
         return {"ok": False, "error": "no browser"}
-    width, height = await viewport_size()
-    if not width or not height:
-        # No size to scale by: take the coordinates as they are.
-        await page.mouse.click(where.x, where.y)
-        return {"ok": True}
-    await page.mouse.click(where.x * width, where.y * height)
+    async with input_lock:
+        width, height = await viewport_size()
+        if not width or not height:
+            # No size to scale by: take the coordinates as they are.
+            await page.mouse.click(where.x, where.y)
+            return {"ok": True}
+        await page.mouse.click(where.x * width, where.y * height)
     return {"ok": True}
 
 
@@ -703,7 +766,8 @@ async def keys(body: Keys):
     """Type into whatever currently has focus."""
     if page is None:
         return {"ok": False, "error": "no browser"}
-    await page.keyboard.type(body.text)
+    async with input_lock:
+        await page.keyboard.type(body.text)
     return {"ok": True}
 
 
@@ -712,7 +776,8 @@ async def key(body: Key):
     """A named key: Enter, Tab, Backspace, ArrowDown, ..."""
     if page is None:
         return {"ok": False, "error": "no browser"}
-    await page.keyboard.press(body.key)
+    async with input_lock:
+        await page.keyboard.press(body.key)
     return {"ok": True}
 
 

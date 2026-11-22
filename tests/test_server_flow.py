@@ -324,6 +324,25 @@ async def run():
                         break
                     await asyncio.sleep(0.1)
 
+                # Wait for a capture that carries the change, not merely
+                # for the next message. A capture that was already on its
+                # way when the page changed does not have the change in it
+                # - the agent answers a change made during a capture with a
+                # second capture - so the first message to arrive is not
+                # necessarily the one with the change in it.
+                saw_change = False
+                for _ in range(60):
+                    htmls = await viewer.evaluate(
+                        "() => window.__msgs.slice(%d)"
+                        "  .filter(m => m.kind === 'doc')"
+                        "  .map(m => (m.frames || []).map(f => f.html).join(''))"
+                        % before
+                    )
+                    if any(">b<" in h for h in htmls):
+                        saw_change = True
+                        break
+                    await asyncio.sleep(0.1)
+
                 new = await viewer.evaluate(
                     "() => window.__msgs.slice(%d).map(m => ({ kind: m.kind, frames: m.frames || [] }))"
                     % before
@@ -332,8 +351,7 @@ async def run():
                 check("a live change reaches the viewer", len(live_docs) > 0,
                       str([m["kind"] for m in new]))
                 check("it arrives as a fresh capture of the page",
-                      any(">b<" in (m["frames"][0]["html"] if m["frames"] else "")
-                          for m in live_docs),
+                      saw_change,
                       str([(m["frames"][0]["html"][:120] if m["frames"] else "")
                            for m in live_docs])[:300])
 
@@ -397,6 +415,31 @@ async def run():
                 typed = await fake_ctx.pages[0].evaluate(
                     "() => document.getElementById('field').value")
                 check("the typed text reached the real field", typed == "hello", repr(typed))
+
+                # Input is applied to the browser one action at a time.
+                #
+                # The mirror sends one request per keystroke, and the server
+                # takes them concurrently. Two of them reaching the browser
+                # at the same moment means the browser interleaves their
+                # keys, and the text the user typed comes out scrambled.
+                # Here five requests are fired at the same time, so each one
+                # has to reach the browser whole - the field ends up holding
+                # "abcdefg..." rather than "adgjmbehkncilo".
+                #
+                # This runs before the Tab below, because Tab moves the focus
+                # off the field and the rest of the text would go elsewhere.
+                blocks = ["abc", "def", "ghi", "jkl", "mno"]
+                await asyncio.gather(*[
+                    client.post(base + "/keys", json={"text": b})
+                    for b in blocks])
+                await asyncio.sleep(0.5)
+                typed = await fake_ctx.pages[0].evaluate(
+                    "() => document.getElementById('field').value")
+                check("concurrent key requests are applied one at a time",
+                      all(b in typed for b in blocks), repr(typed))
+                check("every character of every request reached the field",
+                      sum(len(b) for b in blocks) ==
+                      len(typed) - len("hello"), repr(typed))
 
                 r = await client.post(base + "/key", json={"key": "Tab"})
                 check("/key reports ok", r.status_code == 200, r.text[:120])

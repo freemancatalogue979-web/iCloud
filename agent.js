@@ -618,6 +618,12 @@
    * finished string instead would mean cutting them out with a regular
    * expression, which is how the shadow content used to go missing. */
   function serialiseDocumentOf(doc, frameIds = new Map()) {
+    /* The mirror's own elements - the fallback stylesheet - are numbered per
+     * capture, from one again every time. A counter that ran on would give
+     * the stylesheet a new id in every capture, so two captures of the same
+     * page would never be identical, and the agent could never tell that
+     * nothing had changed. */
+    nextOwnId = 1;
     const clone = doc.documentElement.cloneNode(true);
     cleanClone(clone);
     const ctx = { frameIds, styles: new Map() };
@@ -765,6 +771,53 @@
   let observer = null;
   const observedRoots = new Set();
 
+  /* The document the agent is watching.
+   *
+   * A frame is born as an empty document and then navigates to the page it
+   * is really going to show. Chromium keeps the SAME window across that
+   * swap - the new document arrives in the old window - and the script that
+   * started the agent is not run again for it. So the agent is left watching
+   * a document that is no longer on screen: its observer sees nothing, and
+   * the form controls it listens to are not the ones the user is typing
+   * into. The frame looks alive and is deaf.
+   *
+   * The repair is to notice. `document` is looked up on the window every
+   * time it is used, so it is always the current one; what goes stale is
+   * the agent's own binding to it. When the two stop being the same thing,
+   * the agent re-binds: the observer moves to the new document, the
+   * listeners move with it, and the mirror is told the page changed - it
+   * is showing the old one. */
+  let boundDocument = null;
+
+  function rebind() {
+    const previous = boundDocument;
+    boundDocument = document;
+    if (previous && previous !== boundDocument) {
+      try {
+        previous.removeEventListener("input", onValueEvent, true);
+        previous.removeEventListener("change", onValueEvent, true);
+      } catch (e) {
+        /* the old document is gone; nothing to detach from */
+      }
+    }
+    observer = new MutationObserver(onMutate);
+    observedRoots.clear();
+    observeRoot(document);
+    if (document.body) observeRoot(document.body);
+    document.addEventListener("input", onValueEvent, true);
+    document.addEventListener("change", onValueEvent, true);
+    scanShadowRoots();
+  }
+
+  /* Is the agent still watching the document it is supposed to watch? */
+  function checkBinding() {
+    if (boundDocument === document) return;
+    rebind();
+    /* The page under the agent is a different page now. The mirror is
+     * showing the old one, so it has to be told. */
+    markDirty(null);
+  }
+
   function onMutate(records) {
     // The observer is only a signal that the page changed. What is sent is a
     // fresh capture of the whole page.
@@ -904,8 +957,15 @@
   /* A capture asked for while another one is running. The running one read
    * the document before the request, so it may already be out of date, and
    * dropping the request would leave the mirror stale with nothing to show
-   * for it. The capture is repeated once the running one finishes. */
+   * for it. The capture is repeated once the running one finishes.
+   *
+   * The repeat is not always forced. A change that arrived during the
+   * capture only needs the page if the page came out different - a change
+   * that does not show up in the markup needs nothing. A resync that arrived
+   * during the capture does need the page whatever it looks like, because
+   * the point of a resync is to send the page again. */
   let captureAgain = false;
+  let forceAgain = false;
 
   // A hash of the whole capture. A shorter fingerprint - the length and the
   // first few dozen characters - does not notice a change in the middle of
@@ -922,6 +982,7 @@
   async function sendDocument(always) {
     if (capturing) {
       captureAgain = true;
+      forceAgain = forceAgain || always;
       return;
     }
     lastDocSent = Date.now();
@@ -939,18 +1000,36 @@
        * for no reason at all. */
       const fingerprint = viewport.w + "x" + viewport.h + "|" +
         frames.map((f) => (f.windowId || "") + ":" + hashOf(f.html || "")).join("|");
-      if (!always && fingerprint === lastFingerprint) return;
-      lastFingerprint = fingerprint;
-      // A frame that does not know its windowId yet cannot be addressed by the
-      // mirror; its parent asks it again once ids are assigned.
-      if (windowId && TOP) emit({ kind: "doc", windowId: "0", frames, viewport });
+      /* A capture that came out the same as the last one is not sent. The
+       * observer can fire for a change that does not show up in the markup -
+       * a script's text, say - and sending the page again for nothing would
+       * make the mirror flicker for no reason at all.
+       *
+       * The comparison is a branch and not an early return on purpose: an
+       * early return out of the try block skipped the end of the function,
+       * so `capturing` was never cleared and every later capture was
+       * treated as "one is already running". The agent went quiet after the
+       * first unchanged capture, and nothing after that was ever sent. */
+      if (always || fingerprint !== lastFingerprint) {
+        lastFingerprint = fingerprint;
+        // A frame that does not know its windowId yet cannot be addressed by
+        // the mirror; its parent asks it again once ids are assigned.
+        if (windowId && TOP) emit({ kind: "doc", windowId: "0", frames, viewport });
+      }
     } catch (e) {
       /* never break the page we are mirroring */
     }
     capturing = false;
     if (captureAgain) {
+      const force = forceAgain;
       captureAgain = false;
-      sendDocument(true);
+      forceAgain = false;
+      /* The change that asked for this may be in this capture or it may
+       * not. Either way the capture decides: if the page came out the same,
+       * there is nothing to send, and sending it anyway would make the
+       * mirror rebuild a page it already has. A resync is the exception -
+       * it asked for the page, so it gets the page. */
+      sendDocument(force);
     }
   }
 
@@ -958,14 +1037,19 @@
   // a genuine desync is never swallowed by the rate limit.
   window.__rbResync = () => sendDocument(true);
 
+  let started = false;
+
   function start() {
-    if (observer) return; // started once, however many ways we get triggered
-    observer = new MutationObserver(onMutate);
-    observeRoot(document);
-    if (document.body) observeRoot(document.body);
-    document.addEventListener("input", onValueEvent, true);
-    document.addEventListener("change", onValueEvent, true);
-    scanShadowRoots();
+    if (started) return; // started once, however many ways we get triggered
+    started = true;
+    rebind();
+    /* A frame that navigates keeps its window, so the agent is still here
+     * when the new document arrives - and the agent has to notice that the
+     * document under it changed. `load` is the moment it changes; the
+     * interval is the backstop for a swap that arrives quietly. */
+    window.addEventListener("load", checkBinding);
+    window.addEventListener("pageshow", checkBinding);
+    setInterval(checkBinding, 1000);
     sendDocument(true);
   }
 
@@ -985,5 +1069,14 @@
     computedStyleText,
     WIN_ID,
     FRAME_SELECTOR,
+    /* What the agent is doing right now. A caller that wants the agent to
+     * be quiet - a test that has to make a change land inside a capture,
+     * say - has to be able to tell that a capture is not in flight. */
+    state: () => ({
+      capturing,
+      dirty,
+      pending: !!captureTimer,
+      again: captureAgain,
+    }),
   };
 })();

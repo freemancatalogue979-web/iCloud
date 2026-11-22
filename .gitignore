@@ -14,6 +14,7 @@ __pycache__/
 # Browser automation artifacts (never commit these)
 artifacts/
 .profile/
+profile/
 *.png
 storage_state.json
 

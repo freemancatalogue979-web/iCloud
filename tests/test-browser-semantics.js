@@ -74,13 +74,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("a change that shows up in the markup produces a capture",
     again.length > 0, "no doc message");
 
-  // A second burst, to be sure the scheduler re-arms rather than working once.
+  // A change that does not show up in the markup. The capture of a script's
+  // text is the same as the capture before it - scripts are not mirrored -
+  // so the capture is not sent. That must not silence the agent: the next
+  // change that does show up still has to be sent.
+  const script = win.document.createElement("script");
+  script.textContent = "var a = 1;";
+  win.document.body.appendChild(script);
+  sent.length = 0;
+  script.textContent = "var a = 2;";
+  await sleep(1200);
+  const unchanged = sent.filter((m) => m.kind === "doc");
+  check("a change that is not in the markup does not send the page again",
+    unchanged.length === 0, unchanged.length + " captures sent");
+
   sent.length = 0;
   win.document.getElementById("s").textContent = "three";
   await sleep(1200);
   const third = sent.filter((m) => m.kind === "doc");
-  check("scheduler re-arms for later changes", third.length > 0,
-    "only the first change after load was delivered");
+  check("the agent still speaks after an unchanged capture", third.length > 0,
+    "the agent went quiet - only the first change after load was delivered");
   const thirdHtml = third.length ? (third[third.length - 1].frames || [])[0].html : "";
   check("the later capture has the later change in it",
     thirdHtml.includes("three"), thirdHtml.slice(0, 200));

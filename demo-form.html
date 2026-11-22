@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in - iCloud (local demo)</title>
+<style>
+  html, body { height:100%; margin:0; }
+  body {
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background:#fbfbfd; color:#1d1d1f;
+  }
+  .wrap { padding:48px 40px; }
+  h2 { font-size:28px; margin:0 0 20px; font-weight:600; }
+  /* The form is in a frame, exactly as the real sign-in form is. */
+  iframe {
+    width:440px; height:280px; border:0; border-radius:12px;
+    background:#fff; box-shadow:0 2px 14px rgba(0,0,0,.12);
+    display:block;
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h2>Sign in</h2>
+    <iframe id="form" src="/demo-fields" title="Apple ID"></iframe>
+  </div>
+</body>
+</html>
