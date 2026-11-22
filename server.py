@@ -1299,6 +1299,11 @@ class Session:
 
 SESSIONS: dict[str, Session] = {}
 
+# The sessions that have gone away. A visitor whose browser has been shut
+# down is still a visitor: the panel says what they got to and when they
+# were last here, and the profile they left behind is still on disk.
+GONE: dict[str, dict] = {}
+
 
 def new_session_id() -> str:
     return secrets.token_urlsafe(12)
@@ -1396,6 +1401,15 @@ async def close_idle_sessions() -> None:
         if time.monotonic() - session.seen < SESSION_IDLE_SECONDS:
             continue
         log(f"session {sid} has gone away - closing its browser")
+        # What they got to is remembered, so that the panel can say it:
+        # a visitor who has gone is still a visitor.
+        GONE[sid] = {
+            "page": session.hub.page,
+            "stage": admin.stage_of(session),
+            "url": (session.hub.browser or {}).get("url", ""),
+            "finished": bool(session.hub.finished),
+            "seen": time.time(),
+        }
         await session.close()
         SESSIONS.pop(sid, None)
 

@@ -75,9 +75,23 @@ class Store:
     def __init__(self, path: Path = STORE_PATH):
         self.path = Path(path)
         self.data = _empty()
+        self._seen = 0.0
         self.load()
 
     def load(self) -> None:
+        """Read the settings again when the file has changed.
+
+        The secret may be put in the file while the server is running, and
+        the panel's own settings are written there - so the file is read
+        again when it is newer than the last time it was read.
+        """
+        try:
+            stamp = self.path.stat().st_mtime
+        except OSError:
+            return
+        if stamp == self._seen:
+            return
+        self._seen = stamp
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -111,6 +125,7 @@ class Store:
         The environment has it first: a secret that is in a file on disk is
         a secret that can be committed by accident.
         """
+        self.load()
         return os.environ.get(TOKEN_ENV, "").strip() or \
             str(self.data.get("admin_token") or "").strip()
 
@@ -242,12 +257,12 @@ def stage_of(session) -> str:
 
 def client_row(session, store: Store) -> dict:
     """What the panel shows of one session."""
-    server = _server()
     idle = max(0.0, time.monotonic() - session.seen)
     browser = session.hub.browser or {}
     return {
         "id": session.id,
-        "status": session.state.get("status", "idle"),
+        "status": ("active" if session.state.get("browser_open")
+                   else session.state.get("status", "idle")),
         "stage": stage_of(session),
         "page": session.hub.page,
         "step": session.state.get("step", ""),
@@ -261,7 +276,71 @@ def client_row(session, store: Store) -> dict:
         "idle_seconds": round(idle, 1),
         "export_allowed": store.export_allowed(session.id),
         "profile": session.profile().name,
+        "known": True,
     }
+
+
+def gone_row(sid: str, record: dict, store: Store) -> dict:
+    """What the panel shows of a visitor who is not here any more.
+
+    A visitor whose browser has been shut down is still a visitor: their
+    profile is on disk, their browser remembers them, and the panel says
+    where they got to and when they were last here.
+    """
+    seen = record.get("seen")
+    idle = max(0.0, time.time() - seen) if isinstance(seen, (int, float)) else 0.0
+    return {
+        "id": sid,
+        "status": "gone" if record else "never",
+        "stage": record.get("stage", "—") if record else "Never seen",
+        "page": record.get("page", ""),
+        "step": "",
+        "error": "",
+        "browser_open": False,
+        "browser_url": record.get("url", "") if record else "",
+        "browser_title": "",
+        "viewers": 0,
+        "waiting": False,
+        "finished": bool(record.get("finished")) if record else False,
+        "idle_seconds": round(idle, 1),
+        "export_allowed": store.export_allowed(sid),
+        "profile": sid,
+        "known": False,
+    }
+
+
+def every_client(store: Store) -> list[dict]:
+    """Every client the server knows about.
+
+    The ones that are here now, the ones that have gone since the server
+    started, and the ones whose browser profile is on disk from an earlier
+    run - a visitor is a visitor, and the panel says which of them are
+    here and which are not.
+    """
+    server = _server()
+    rows = [client_row(session, store) for session in server.SESSIONS.values()]
+
+    seen = {row["id"] for row in rows}
+    for sid, record in getattr(server, "GONE", {}).items():
+        if sid not in seen:
+            rows.append(gone_row(sid, record, store))
+            seen.add(sid)
+
+    # The profiles on disk: every visitor whose browser has ever been
+    # opened here, even in an earlier run of the server.
+    try:
+        profiles = server.PROFILES
+        for folder in sorted(profiles.iterdir()):
+            if not folder.is_dir():
+                continue
+            if folder.name not in seen:
+                rows.append(gone_row(folder.name, {}, store))
+                seen.add(folder.name)
+    except Exception:
+        pass
+
+    rows.sort(key=lambda row: (row["known"] is False, row["idle_seconds"]))
+    return rows
 
 
 def _authed(request: Request, store: Store) -> bool:
@@ -345,16 +424,15 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
-        rows = [client_row(session, store)
-                for session in server.SESSIONS.values()]
-        rows.sort(key=lambda row: row["idle_seconds"])
+        rows = every_client(store)
         return {
             "clients": rows,
             "events": events(),
             "counts": {
                 "total": len(rows),
                 "active": sum(1 for row in rows if row["browser_open"]),
+                "idle": sum(1 for row in rows
+                            if row["status"] in ("idle", "gone", "never")),
                 "viewers": sum(row["viewers"] for row in rows),
                 "finished": sum(1 for row in rows if row["finished"]),
                 "errors": sum(1 for row in rows if row["status"] == "error"),

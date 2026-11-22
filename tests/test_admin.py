@@ -210,6 +210,56 @@ async def main():
     check("...and that its cookies are closed",
           row["export_allowed"] is False, row)
 
+    # ---- the clients who are not here any more --------------------------
+    # A visitor whose browser has been shut down is still a visitor. The
+    # panel says they have gone, and where they got to - rather than
+    # dropping them off the list and leaving the panel looking empty.
+    server.GONE["the-admin-gone"] = {
+        "page": "/src/2.html", "stage": "Verification code",
+        "url": "https://idmsa.apple.com/signin", "finished": False,
+        "seen": 1000.0,
+    }
+    answer = await endpoint("/admin/api/clients")(
+        make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    gone = [row for row in data.get("clients", [])
+            if row["id"] == "the-admin-gone"]
+    check("a client who has gone is still listed",
+          len(gone) == 1, data.get("clients"))
+    check("...and says they have gone",
+          gone[0]["status"] == "gone", gone)
+    check("...and where they got to",
+          gone[0]["stage"] == "Verification code", gone)
+    check("...and that they are not here now",
+          gone[0]["browser_open"] is False and gone[0]["known"] is False, gone)
+
+    # A visitor whose browser profile is on disk from an earlier run is
+    # listed too: the profile is what is left of them.
+    profile = server.PROFILES / "the-admin-before"
+    profile.mkdir(parents=True, exist_ok=True)
+    answer = await endpoint("/admin/api/clients")(
+        make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    before = [row for row in data.get("clients", [])
+              if row["id"] == "the-admin-before"]
+    check("a client from an earlier run is listed",
+          len(before) == 1, data.get("clients"))
+    check("...and is marked as being from before",
+          before[0]["status"] == "never", before)
+
+    # ---- the secret in the file is read again ----------------------------
+    # The secret may be put in the file while the server is running.
+    late = admin.Store(scratch / "late.json")
+    check("a store with no secret has none",
+          late.token() == "", late.token())
+    (scratch / "late.json").write_text(
+        json.dumps({"admin_token": "written-later"}), encoding="utf-8")
+    import os as _os
+    stamp = _os.stat(scratch / "late.json").st_mtime
+    _os.utime(scratch / "late.json", (stamp + 10, stamp + 10))
+    check("...and the file is read again when it changes",
+          late.token() == "written-later", late.token())
+
     # ---- the Telegram settings -------------------------------------------
     the_panel.set_telegram("123456789:AAsecretsecretsecret", "42", True)
     answer = await endpoint("/admin/api/telegram")(

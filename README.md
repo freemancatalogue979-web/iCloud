@@ -53,12 +53,27 @@ a cookie of its own (`HttpOnly`, `SameSite=Strict`) for a week.
 **The secret.** `ICLOUD_ADMIN_TOKEN` in the environment has it first: a
 secret in a file on disk is a secret that can be committed by accident. It
 can also live in `admin.json`, next to the app, which is written with the
-permissions of a secret (0600) and is in `.gitignore`.
+permissions of a secret (0600) and is in `.gitignore`. A secret put in
+`admin.json` while the server is running is picked up — the file is read
+again when it changes — but a secret put in the *environment* has to be
+there before the server starts, because that is what an environment is.
 
 **The dashboard** shows what the server actually knows — the sessions it has,
 what each one's browser is doing, the step it is on, and how long ago it was
 seen — and it refreshes every two seconds. Nothing in it is made up: it is
 the same `SESSIONS` the app itself works with.
+
+**The clients who have gone** are on the list too. A visitor whose browser
+has been shut down is still a visitor: the panel says they have gone, where
+they got to, and when they were last here. So are the visitors whose
+browser profile is on disk from an earlier run — they are marked *before*.
+The list says how many are here now and how many were before.
+
+**The panel says why it is empty.** A refused answer used to look exactly
+like a room with nobody in it: the counters stayed at zero and the table
+said "no clients yet". Now a refusal is said out loud — the secret is
+needed, or the server cannot be reached — with a button to give the secret
+again.
 
 **Telegram.** Put the bot token and the chat id in the Telegram tab and a
 message goes out when a new client connects. The message is sent in the

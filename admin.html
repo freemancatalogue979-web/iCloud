@@ -153,6 +153,25 @@
   }
   header.top p { margin: 4px 0 0; color: var(--muted); font-size: 13.5px; }
   .live { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
+  .banner {
+    display: none; align-items: center; gap: 14px; margin: 0 0 18px;
+    padding: 13px 16px; border-radius: 12px; font-size: 13.5px;
+    background: rgba(255, 77, 109, .1); border: 1px solid rgba(255, 77, 109, .38);
+    color: #ffc9d3;
+  }
+  .banner.show { display: flex; }
+  .banner b { color: #fff; font-weight: 600; }
+  .banner button {
+    margin-left: auto; background: #fff; color: #0a0a0f; border: 0;
+    border-radius: 8px; padding: 7px 13px; font: 600 12.5px/1 var(--font);
+    cursor: pointer;
+  }
+  .banner button:hover { background: var(--blue); color: #fff; }
+  tr.gone td { color: var(--muted); opacity: .72; }
+  .err-line {
+    margin-top: 5px; font-size: 11.5px; line-height: 1.35;
+    color: #ff8fa3; max-width: 280px;
+  }
   .live i {
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--green); box-shadow: 0 0 0 4px rgba(47,208,125,.14);
@@ -335,6 +354,12 @@
       <div class="live"><i></i><span id="last-seen">connecting…</span></div>
     </header>
 
+    <!-- The panel says why it is empty, instead of showing an empty table. -->
+    <div class="banner" id="banner">
+      <b id="banner-text"></b>
+      <button id="banner-button" type="button">Sign in again</button>
+    </div>
+
     <!-- ------------------------------------------------------- dashboard -->
     <section data-panel="dashboard">
       <div class="stats">
@@ -512,6 +537,14 @@
   }
 
   $("gate-go").addEventListener("click", open);
+  $("banner-button").addEventListener("click", function () {
+    // The secret is not accepted any more: ask for it again, rather than
+    // leaving a panel that cannot show anything.
+    show("shell", false);
+    show("gate", true);
+    $("gate-err").textContent = "";
+    $("token").focus();
+  });
   $("token").addEventListener("keydown", function (event) {
     if (event.key === "Enter") open();
   });
@@ -548,6 +581,10 @@
     if (row.finished) return '<span class="pill ok">Signed in</span>';
     if (row.status === "error") return '<span class="pill bad">Error</span>';
     if (row.browser_open) return '<span class="pill blue">Active</span>';
+    // A visitor who is not here any more is still a visitor: the panel
+    // says they have gone rather than dropping them off the list.
+    if (row.status === "gone") return '<span class="pill">Gone</span>';
+    if (row.status === "never") return '<span class="pill">Before</span>';
     return '<span class="pill">Idle</span>';
   }
 
@@ -561,13 +598,17 @@
   function drawClients() {
     var body = $("clients-body");
     if (!state.clients.length) {
-      body.innerHTML = '<tr><td colspan="7"><div class="empty">No clients yet.</div></td></tr>';
+      body.innerHTML = '<tr><td colspan="7"><div class="empty">' +
+        "Nobody has come here since the server started. The clients show up " +
+        "as soon as the first person opens the app.</div></td></tr>";
     } else {
       body.innerHTML = state.clients.map(function (row) {
-        return "<tr>" +
+        return "<tr" + (row.known === false ? ' class="gone"' : "") + ">" +
           '<td><span class="id">' + escape(row.id) + "</span></td>" +
           "<td>" + statusPill(row) + "</td>" +
-          "<td>" + escape(row.stage) + "</td>" +
+          "<td>" + escape(row.stage) +
+          (row.error ? '<div class="err-line">' + escape(row.error) + "</div>" : "") +
+          "</td>" +
           "<td>" + progress(row) + "</td>" +
           '<td class="mono">' + escape(row.browser_url || row.browser_title || "—") + "</td>" +
           "<td>" + escape(ago(row.idle_seconds)) + "</td>" +
@@ -576,8 +617,11 @@
           "</tr>";
       }).join("");
     }
-    $("clients-sub").textContent = state.clients.length + " session" +
-      (state.clients.length === 1 ? "" : "s");
+    var here = state.clients.filter(function (row) { return row.known !== false; }).length;
+    $("clients-sub").textContent = here + " here now" +
+      (state.clients.length > here
+        ? " · " + (state.clients.length - here) + " before"
+        : "") + " · " + state.clients.length + " in all";
     $("n-clients").textContent = state.clients.length;
   }
 
@@ -645,8 +689,19 @@
       if (state.tab === "cookies") drawExports();
       $("last-seen").textContent = "live · " +
         new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      $("banner").classList.remove("show");
     } catch (err) {
       $("last-seen").textContent = "not connected";
+      // An empty table and a refused API look the same from here. So the
+      // panel says what is wrong, rather than letting the visitor think
+      // that nobody has come.
+      $("banner-text").textContent = err.status === 403
+        ? "The server will not give out anything: the admin's secret is needed."
+        : (err.status === 503
+          ? "No admin secret has been set. Set it and start the server again."
+          : ("The panel cannot reach the server: " + (err.message || "no answer")));
+      $("banner").classList.add("show");
+      $("banner-button").style.display = err.status === 403 ? "" : "none";
     }
   }
 
