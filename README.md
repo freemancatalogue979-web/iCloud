@@ -115,6 +115,22 @@ which reaches the same conclusions from the same problem — including its
 documented bug where gating the childList branch on element nodes silently
 drops `textContent =` edits, reproduced and fixed here as the `children` op.
 
+## Console output
+
+The console reports what the mirror is actually doing, because a blank mirror and
+a stale one need different fixes and look identical from the outside:
+
+```
+[icloud] capture: 2 frame(s) [0:292KB, 0.0:39KB]
+[icloud] stream: 41 updates, 268 ops, 0 resyncs in 10s
+```
+
+The capture line lists every frame by windowId with its size, so a missing
+cross-origin frame shows up as one entry instead of two. The stream line is a
+throttled tally - updates, ops and resyncs - so "nothing is moving" is
+distinguishable from "moving but wrong". A rising resync count means the mirror
+keeps losing sync with the page.
+
 ## Tests
 
 ```bash
@@ -122,11 +138,17 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-Four suites run `agent.js` and `view.html` inside a real DOM: serialisation,
-the frame-tree handshake over postMessage, inline SVG and web components, and a
+`test-*.js` runs `agent.js` and `view.html` inside a real DOM: serialisation,
+the frame-tree handshake over postMessage, inline SVG and web components, a
 differential test that captures in one document, rebuilds in a second, and
 applies the ops using the applier lifted out of the shipped `view.html` rather
-than a copy of it.
+than a copy of it, and a browser-semantics suite that stubs Chromium's stricter
+behaviour where jsdom is lenient. `test_telemetry.py` covers the server side.
+
+`test-browser-semantics.js` exists because of a specific failure: calling
+`requestAnimationFrame` unbound is fine in jsdom and throws `Illegal invocation`
+in Chromium, which would have frozen the mirror after its first update with
+every other suite green.
 
 They exist because no browser can be installed in the development sandbox. Every
 serious bug here was found by jsdom, not by reasoning: text nodes being deleted

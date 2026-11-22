@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote, urljoin
 
@@ -78,12 +79,47 @@ async def broadcast(message: dict):
             pass  # a slow viewer drops frames rather than stalling the page
 
 
+# Mirror telemetry. Without this a broken page is indistinguishable from a
+# working one: the console shows only HTTP lines, and "the mirror is blank" and
+# "the mirror is stale" need different fixes. All of it is throttled, because a
+# live page mutates constantly and a log line per change buries everything.
+_stats = {"ops": 0, "muts": 0, "resyncs": 0, "last_beat": 0.0}
+
+
+def _describe(frames) -> str:
+    """One line summarising a capture: enough to see a missing frame."""
+    if not frames:
+        return "0 frames"
+    parts = []
+    for frame in frames:
+        size = len(frame.get("html") or "")
+        parts.append(f"{frame.get('windowId')}:{size // 1024}KB")
+    return f"{len(frames)} frame(s) [{', '.join(parts)}]"
+
+
 async def on_emit(source, message):
     """Called from inside the real page via the Playwright binding."""
     global last_doc
-    if message.get("kind") == "doc":
+    kind = message.get("kind")
+
+    if kind == "doc":
         last_doc = message
+        frames = message.get("frames") or []
+        log(f"capture: {_describe(frames)}")
+    elif kind == "mut":
+        _stats["muts"] += 1
+        _stats["ops"] += len(message.get("ops") or [])
+
     await broadcast(message)
+
+    now = time.monotonic()
+    if now - _stats["last_beat"] >= 10.0 and _stats["muts"]:
+        elapsed = now - _stats["last_beat"] if _stats["last_beat"] else 10.0
+        log(
+            f"stream: {_stats['muts']} updates, {_stats['ops']} ops, "
+            f"{_stats['resyncs']} resyncs in {elapsed:.0f}s"
+        )
+        _stats.update(muts=0, ops=0, resyncs=0, last_beat=now)
 
 
 async def install_agent(context):
@@ -96,6 +132,7 @@ async def request_resync():
     """Ask the page to re-send its whole document."""
     if page is None:
         return
+    _stats["resyncs"] += 1
     try:
         await page.evaluate("() => window.__rbResync && window.__rbResync()")
     except Exception as exc:
