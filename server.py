@@ -282,10 +282,66 @@ async def status():
 # no head, or at the top when it has neither.
 # --------------------------------------------------------------------------
 
-_HEAD_END = re.compile(r"</head\s*>", re.IGNORECASE)
-_BODY_OPEN = re.compile(r"<body[^>]*>", re.IGNORECASE)
 _SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.IGNORECASE)
 _HTML_SUFFIXES = (".html", ".htm")
+
+
+def _insert_point(page_html: str) -> int | None:
+    """Where the engine tag goes: before </head>, else after <body>, else None.
+
+    Tags inside a quoted attribute value are skipped. SingleFile captures keep
+    a whole nested document in an <iframe srcdoc="..."> attribute, so their
+    first </head> belongs to that inner document, not to the page: dropping a
+    tag there would end the attribute early and cut the frame open.
+    """
+    size = len(page_html)
+    i = 0
+    while i < size:
+        i = page_html.find("<", i)
+        if i < 0:
+            return None
+
+        if page_html.startswith("<!--", i):
+            end = page_html.find("-->", i + 4)
+            if end < 0:
+                return None
+            i = end + 3
+            continue
+
+        j = i + 1
+        closing = page_html.startswith("/", j)
+        if closing:
+            j += 1
+
+        name_at = j
+        while j < size and page_html[j] not in " \t\r\n/>":
+            j += 1
+        name = page_html[name_at:j].lower()
+
+        # Walk to the end of the tag, stepping over quoted attribute values.
+        k = j
+        while k < size:
+            char = page_html[k]
+            if char in "\"'":
+                k = page_html.find(char, k + 1)
+                if k < 0:
+                    return None
+                k += 1
+                continue
+            if char == ">":
+                break
+            k += 1
+        if k >= size:
+            return None
+
+        if closing and name == "head":
+            return i
+        if not closing and name == "body":
+            return k + 1
+
+        i = k + 1
+
+    return None
 
 
 def with_engine(page_html: str) -> str:
@@ -293,17 +349,10 @@ def with_engine(page_html: str) -> str:
     if _SYNC_PRESENT.search(page_html):
         return page_html
 
-    match = _HEAD_END.search(page_html)
-    if match:
-        return page_html[: match.start()] + SYNC_TAG + page_html[match.start():]
-
-    # A capture with no head still has to run the engine. After the body tag
-    # is as good a place as any: the engine waits for the document to parse.
-    match = _BODY_OPEN.search(page_html)
-    if match:
-        return page_html[: match.end()] + SYNC_TAG + page_html[match.end():]
-
-    return SYNC_TAG + page_html
+    at = _insert_point(page_html)
+    if at is None:
+        return SYNC_TAG + page_html
+    return page_html[:at] + SYNC_TAG + page_html[at:]
 
 
 def captured_files(folder: Path) -> list[Path]:

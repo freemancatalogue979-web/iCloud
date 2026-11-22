@@ -18,6 +18,7 @@ import asyncio
 import json
 import sys
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -140,6 +141,67 @@ async def main():
     bare = server.with_engine("no html wrapper at all")
     check("a capture with no head or body still gets it",
           bare == server.SYNC_TAG + "no html wrapper at all", bare)
+
+    # ---- a SingleFile capture -------------------------------------------
+    # SingleFile keeps a whole nested document inside an <iframe srcdoc="...">
+    # attribute, and the outer page has no head of its own. The nested </head>
+    # must not be mistaken for the page's: a tag inserted there ends the
+    # attribute at its first quote, which cuts the frame down to a fragment
+    # and drops the sign-in form the capture exists for.
+    inner = (
+        "<!DOCTYPE html> <html dir=ltr lang=en><meta charset=utf-8><title></title>"
+        "<style>.a{color:red}</style>"
+        '<meta http-equiv=content-security-policy content=&quot;default-src \'none\'&quot;>'
+        "</head><body class=tk-body>"
+        "<div class=signin-v2><input type=text id=account_name_text_field value=.>"
+        "<button id=sign-in>Continue</button></div></body></html>"
+    )
+    single_file = (
+        "<!DOCTYPE html> <html lang=en-us dir=ltr><!-- Page saved with SingleFile -->"
+        "<meta charset=utf-8><meta name=viewport content=\"width=device-width\">"
+        "<meta name=apple-mobile-web-app-capable content=yes><title>iCloud</title>"
+        "<style>.sf-hidden{display:none!important}</style>"
+        '<meta http-equiv=content-security-policy content="default-src \'none\'; '
+        'script-src \'unsafe-inline\' data:">'
+        "<body __processed_=true class=clicking><div id=root><header>logo</header>"
+        f'<iframe src width=100% height=365 srcdoc="{inner}"></iframe>'
+        "</div></body></html>"
+    )
+    single_served = server.with_engine(single_file)
+
+    check("a SingleFile capture is served with only the tag added",
+          single_served.replace(server.SYNC_TAG, "") == single_file, single_served[:200])
+    check("the tag lands in the capture's own body, not in an attribute",
+          single_served.index(server.SYNC_TAG) > single_served.index("<body")
+          and single_served.index(server.SYNC_TAG) < single_served.index("<iframe"),
+          single_served[:260])
+    check("the nested document keeps its own </head>",
+          single_served.count("</head>") == single_file.count("</head>")
+          == 1, single_served[:260])
+
+    class _Srcdoc(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.value = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "iframe":
+                self.value = dict(attrs).get("srcdoc")
+
+    def srcdoc_of(text):
+        grab = _Srcdoc()
+        grab.feed(text)
+        return grab.value
+
+    check("the iframe's srcdoc attribute is untouched",
+          srcdoc_of(single_served) == srcdoc_of(single_file),
+          str(srcdoc_of(single_served))[:200])
+    check("the sign-in form is still inside it",
+          "account_name_text_field" in (srcdoc_of(single_served) or "")
+          and "id=sign-in" in (srcdoc_of(single_served) or ""),
+          str(srcdoc_of(single_served))[:200])
+    check("a SingleFile capture is not tagged twice",
+          server.with_engine(single_served) == single_served)
 
     # ---- only captured pages may be navigated to -------------------------
     check("a captured page is a valid destination",

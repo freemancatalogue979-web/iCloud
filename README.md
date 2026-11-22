@@ -159,7 +159,9 @@ One URL, one rule: **the file, byte for byte, plus the sync script.**
 That tag is the only thing added — before `</head>`, or after `<body>` when the
 capture has no head, or at the top when it has neither. Nothing is removed, no
 meta is rewritten, no policy is touched, and the file on disk is never written
-to.
+to. The insertion point is found by reading tags, not by searching for text, so
+it can never land inside an attribute value: a SingleFile export keeps a whole
+nested document in `<iframe srcdoc="…">`, and that one is left untouched.
 
 - **Everything else is served as bytes**, with a content type from the file
   name. Keep a capture's stylesheets, scripts, images and fonts next to it.

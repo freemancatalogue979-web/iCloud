@@ -11,9 +11,16 @@ What the server does with them: **nothing, except add one tag.**
 ```
 
 That is the whole contract: the file is served byte for byte, with that tag
-before `</head>`, and the tag is how typing, clicks and navigation reach the
-server. No meta is rewritten, no script is stripped, no policy is edited — and
-the file on disk is never written to.
+before `</head>` (or after `<body>` when the page has no head), and the tag is
+how typing, clicks and navigation reach the server. No meta is rewritten, no
+script is stripped, no policy is edited — and the file on disk is never written
+to.
+
+The tag only ever lands in the page's own markup. Markup that sits inside a
+quoted attribute value is not a place to put it, and a SingleFile export is
+full of that: it keeps a whole nested document in `<iframe srcdoc="…">`. That
+inner document is left exactly as captured, so the frame still has everything
+in it.
 
 **Everything else is served as-is**, so keep stylesheets, scripts, images and
 fonts next to the page that references them (relative URLs resolve against
