@@ -47,10 +47,11 @@ async def settle():
 
 
 class FakeWebSocket:
-    def __init__(self):
+    def __init__(self, host="127.0.0.1:8000"):
         self.incoming: asyncio.Queue = asyncio.Queue()
         self.sent: list[dict] = []
         self.accepted = False
+        self.headers = {"host": host}
 
     async def accept(self):
         self.accepted = True

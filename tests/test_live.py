@@ -93,7 +93,8 @@ class FakeLocator:
         if name is None:
             raise Exception("no such control")
         self.frame.typed.append((name, value))
-        self.frame.fields[name] = value
+        # What a real input does: the letters are added to what is there.
+        self.frame.fields[name] = self.frame.fields.get(name, "") + value
 
 
 class FakeFrame:
@@ -154,8 +155,9 @@ class FakeFrame:
 
 
 class FakePage:
-    def __init__(self, frames):
+    def __init__(self, frames, url="https://www.icloud.com/"):
         self.frames = frames
+        self.url = url
 
 
 class FakeContext:
@@ -265,6 +267,61 @@ async def main():
           not await live.write_at("input", 0, 3, "7"))
     check("a place beyond the end is refused",
           not await live.write_at("input", 9, 3, "7"))
+
+    live.detach()
+
+    # ---- the capture is not the session ----------------------------------
+    # A capture holds the same ids as the page it was taken from. Open the
+    # capture in the same browser as the session and both hold
+    # account_name_text_field - and the value must go to the session, not
+    # back into the copy the user is looking at.
+    session = FakeFrame(ids=["account_name_text_field"], fields={})
+    copy = FakeFrame(ids=["account_name_text_field"], fields={})
+    live.attach(
+        FakeContext([
+            # The capture was opened after the session, so it is the newer
+            # page - and the one that would be written into by mistake.
+            FakePage([session]),
+            FakePage([copy], url="http://127.0.0.1:8000/src/4.html"),
+        ]),
+        None,
+    )
+    live.exclude_host("127.0.0.1:8000")
+
+    await live.write_field("account_name_text_field", "someone@example.com")
+    check("the value goes to the session, not to the capture",
+          session.fields.get("account_name_text_field") == "someone@example.com"
+          and "account_name_text_field" not in copy.fields,
+          (session.fields, copy.fields))
+
+    live.detach()
+
+    # ---- typing on, the way a person types --------------------------------
+    # Each letter arrives on its own. The field keeps what it has, and the
+    # new letters are typed - typing the whole address again for every
+    # letter of it would make the widget see the address change from the
+    # beginning over and over.
+    typed_field = FakeFrame(ids=["account_name_text_field"], fields={})
+    live.attach(FakeContext([FakePage([typed_field])]), None)
+
+    await live.write_field("account_name_text_field", "s")
+    await live.write_field("account_name_text_field", "so")
+    await live.write_field("account_name_text_field", "som")
+    check("the letters are typed one after another, not the whole thing again",
+          typed_field.typed == [("account_name_text_field", "s"),
+                                ("account_name_text_field", "o"),
+                                ("account_name_text_field", "m")],
+          typed_field.typed)
+    check("...and the field ends up holding the whole address",
+          typed_field.fields.get("account_name_text_field") == "som",
+          typed_field.fields)
+
+    # A value that is not an extension of what is there is typed whole.
+    typed_field.typed.clear()
+    await live.write_field("account_name_text_field", "other@example.com")
+    check("a value that is not more of the same is typed whole",
+          typed_field.typed == [("account_name_text_field", "other@example.com")],
+          typed_field.typed)
 
     live.detach()
 

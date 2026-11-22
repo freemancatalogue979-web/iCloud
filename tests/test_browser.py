@@ -103,7 +103,8 @@ class FakeLocator:
         if name is None:
             raise Exception("no such control")
         self.frame.typed.append((name, value))
-        self.frame.fields[name] = value
+        # What a real input does: the letters are added to what is there.
+        self.frame.fields[name] = self.frame.fields.get(name, "") + value
 
 
 class FakeFrame:
@@ -362,6 +363,31 @@ async def main():
               (wrote, value))
         check("...and it is typed, key by key, the way a person types it",
               keys == ["h", "e", "l", "l", "o"], keys)
+
+        # ---- typing on, the way a person types ----------------------------
+        # Each letter arrives on its own. The field keeps what it has and
+        # the new letters are typed - not the whole address again for every
+        # letter of it.
+        await typed.evaluate(
+            """() => {
+                window.__typed = [];
+                document.getElementById('account_name_text_field')
+                    .addEventListener('keydown', e => window.__typed.push(e.key));
+            }""")
+        await typed.fill("#account_name_text_field", "")
+        await typed.evaluate("() => { window.__typed = []; }")
+
+        await live.write_field("account_name_text_field", "s")
+        await live.write_field("account_name_text_field", "so")
+        await live.write_field("account_name_text_field", "som")
+
+        value = await typed.evaluate(
+            "() => document.getElementById('account_name_text_field').value")
+        check("the field ends up holding the whole address", value == "som", value)
+
+        keys = await typed.evaluate("() => window.__typed")
+        check("...and the keys went in one letter at a time",
+              keys == ["s", "o", "m"], keys)
 
         live.detach()
         await typed.close()

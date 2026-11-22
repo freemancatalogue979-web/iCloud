@@ -153,6 +153,12 @@ sits in the field and the page is not moved by it. Where typing cannot
 happen — the control is not on screen — the value is written the old way,
 so that something is better than nothing.
 
+**The typing carries on.** Each letter that arrives is typed on its own,
+and the field keeps what it has: the address is not typed again from the
+beginning for every letter of it. That matters to a widget — it is trying
+to work out what the address is, and an address that keeps changing from
+the start is one it never gets to the end of.
+
 **A control with no id is named by its place.** Apple's verification code
 boxes have no ids at all: six inputs and a hidden one. They are the third
 input of the page, the fourth input of the page, and so on — and they are
@@ -160,6 +166,12 @@ written only when the live page has the same number of them. If it does
 not, the right box cannot be told from the wrong one, and a code typed
 into the wrong box is worse than no code at all, so nothing is written and
 the console says so.
+
+**The capture is the copy; the browser is the session.** A capture holds
+the same ids as the page it was taken from, so a capture opened in the
+same browser as the session would be written into instead of the session
+— the value would go back into the copy on the screen. The pages the app
+serves are therefore left out of the way.
 
 **A value that has nowhere to go yet is kept.** The sign-in widget is a
 frame on another origin, and Apple loads it a second or two after Sign In

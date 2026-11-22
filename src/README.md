@@ -104,7 +104,9 @@ the id `account_name_text_field` here is the field with that id there.
 | what the browser is showing | put back into the page's fields |
 
 The value is typed, key by key, not assigned: the widget watches for keys,
-and a page nobody has touched does not move on.
+and a page nobody has touched does not move on. Each letter is typed on
+its own, and the field keeps what it has — the address is not typed again
+from the beginning for every letter of it.
 
 So a capture is not a copy you work in — it is the controls for the session
 the browser holds. What it cannot do is show a page it has no capture of.

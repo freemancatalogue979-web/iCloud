@@ -1128,6 +1128,19 @@ def start_watching() -> None:
 async def sync_socket(websocket: WebSocket):
     """The captured page's line to the server."""
     await websocket.accept()
+
+    # The capture holds the same ids as the page it was taken from - the
+    # form's fields have the same names in both - so a value written to the
+    # capture would be written to the capture. The pages the app serves are
+    # not the session the bridge writes into, and it says which host it
+    # serves them from.
+    host = ""
+    headers = getattr(websocket, "headers", None)
+    if headers:
+        host = headers.get("host", "")
+    if host:
+        live.exclude_host(host)
+
     viewer = Viewer(websocket)
     hub.join(viewer)
 

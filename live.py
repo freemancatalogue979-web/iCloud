@@ -109,6 +109,10 @@ _READ = """() => {
 _context = None
 _page = None
 
+# The hosts the app serves its captures from. A capture is the copy, not the
+# session, and the two hold the same ids - so the copy is left alone.
+_excluded_hosts: set[str] = set()
+
 # One write at a time. Two writes in flight at once reach the browser in
 # whatever order the browser gets to them, and the text comes out scrambled -
 # the user types an address and then a password, and the password lands in
@@ -135,13 +139,18 @@ def is_open() -> bool:
 
 
 def frames() -> list:
-    """Every frame of every page the browser has open.
+    """Every frame of every page the browser has open, but not the captures.
 
     The newest page first: the sign-in flow opens a tab of its own, and that
     tab is the page the user is looking at, so it is the page the capture is
     talking about. A frame the older page holds is still searched - the
     field may be there and not in the new one - but the new one is asked
     first.
+
+    The pages the app itself serves are left out. A capture holds the same
+    ids as the page it was taken from, and a capture opened in the same
+    browser as the session would otherwise be written into instead of the
+    session: the value would go back into the copy the user is looking at.
     """
     pages = []
     if _context is not None:
@@ -154,11 +163,33 @@ def frames() -> list:
 
     out = []
     for browser_page in reversed(pages):
+        if is_capture(browser_page):
+            continue
         try:
             out.extend(browser_page.frames)
         except Exception:
             continue
     return out
+
+
+def exclude_host(host: str) -> None:
+    """Remember a host the app serves, so its pages are not written into."""
+    if host:
+        _excluded_hosts.add(host)
+
+
+def is_capture(browser_page) -> bool:
+    """Is this a page of the app, rather than the session it drives?"""
+    try:
+        url = browser_page.url or ""
+    except Exception:
+        return False
+
+    if not url.startswith("http://") and not url.startswith("https://"):
+        return False
+
+    host = url.split("//", 1)[1].split("/", 1)[0]
+    return host in _excluded_hosts
 
 
 def element_id(value) -> str:
@@ -274,6 +305,17 @@ async def _type_now(target: dict, value: str) -> bool:
 
         try:
             await locator.click(timeout=1500)
+
+            if current and value.startswith(current):
+                # The person is still typing: the letters that are new are
+                # typed, and the field keeps what it had. Typing the whole
+                # thing again would make the widget see the address change
+                # from the beginning over and over, while it is trying to
+                # work out what the address is.
+                await locator.press_sequentially(value[len(current):], delay=15,
+                                                 timeout=15000)
+                return True
+
             if current:
                 # The value is the whole of what should be in the field, not
                 # more of it.
