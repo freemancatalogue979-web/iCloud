@@ -522,8 +522,13 @@
     for (const record of records) queued.push(record);
     // Batched to the paint cadence rather than a fixed timer, so a burst of
     // changes lands in one frame instead of a trickle of them.
+    // Called as a method of window on purpose: lifting requestAnimationFrame
+    // off the object and calling it unbound throws "Illegal invocation" in
+    // Chromium, which would silently stop every update after the first one.
     if (rafId === null) {
-      rafId = (window.requestAnimationFrame || setTimeout)(flush);
+      rafId = window.requestAnimationFrame
+        ? window.requestAnimationFrame.call(window, flush)
+        : setTimeout(flush, 16);
     }
   }
 
