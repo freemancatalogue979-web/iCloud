@@ -934,7 +934,16 @@ async def write_to_browser(element: str, value: str) -> None:
     except Exception as exc:
         log(f"browser write failed: {str(exc).splitlines()[0]}")
         return
-    log(f"browser: {element} {'written' if written else 'not found'}")
+
+    if written:
+        log(f"browser: {element} written")
+        return
+
+    # It had nowhere to go. That is usually the sign-in widget still
+    # loading, so the value is kept and tried again - and the console says
+    # what the browser does have, so a control that is there under another
+    # name can be seen rather than guessed at.
+    log(f"browser: {element} not found yet - {await live.describe_missing(element)}")
 
 
 async def press_in_browser(element: str) -> None:
@@ -943,7 +952,12 @@ async def press_in_browser(element: str) -> None:
     except Exception as exc:
         log(f"browser press failed: {str(exc).splitlines()[0]}")
         return
-    log(f"browser: {element} {'pressed' if pressed else 'not found'}")
+
+    if pressed:
+        log(f"browser: {element} pressed")
+        return
+
+    log(f"browser: {element} not found yet - {await live.describe_missing(element)}")
 
 
 LIVE_POLL_SECONDS = 0.6
@@ -959,6 +973,16 @@ async def watch_browser() -> None:
     last = None
     while True:
         await asyncio.sleep(LIVE_POLL_SECONDS)
+
+        # The values and presses that had nowhere to go yet are tried again
+        # first: the sign-in widget is a frame Apple loads a second or two
+        # after Sign In is clicked, and a value typed before it is there
+        # would otherwise be lost.
+        try:
+            await live.flush_pending()
+        except Exception:
+            pass
+
         try:
             state = await live.snapshot()
         except Exception:

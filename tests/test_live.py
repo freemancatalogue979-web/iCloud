@@ -57,6 +57,9 @@ class FakeFrame:
         self.pressed = []
 
     async def evaluate(self, script, argument=None):
+        if "ids.slice" in script:
+            return list(self.ids)
+
         if "querySelectorAll" in script:
             return {
                 "url": self.url,
@@ -133,6 +136,10 @@ async def main():
           not await live.press("no_such_button"))
 
     # ---- what the browser is showing -------------------------------------
+    # Every frame is read, not just the first one: the sign-in form is in a
+    # frame, and the document above it has no fields at all. Reading only
+    # the first frame is how a capture kept a stale value that the browser
+    # had already cleared.
     await live.write_field("account_name_text_field", "someone@example.com")
     state = await live.snapshot()
     check("the browser's url is read", state["url"] == "https://idmsa.apple.com/signin", state)
@@ -142,6 +149,23 @@ async def main():
           state["fields"].get("account_name_text_field", {}).get("value")
           == "someone@example.com", state)
 
+    # A browser whose top document has no fields at all, and whose form is
+    # in a frame below it.
+    bare_top = FakeFrame(url="https://www.icloud.com/", title="iCloud")
+    bare_form = FakeFrame(
+        ids=["account_name_text_field"],
+        fields={"account_name_text_field": "someone@example.com"},
+        url="https://idmsa.apple.com/signin",
+        title="Sign in to your Apple Account",
+    )
+    live.attach(FakeContext([FakePage([bare_top, bare_form])]), None)
+    merged = await live.snapshot()
+    check("the fields of a frame below the top one are read too",
+          merged["fields"].get("account_name_text_field", {}).get("value")
+          == "someone@example.com", merged)
+    check("...and the frame that has them says where the browser is",
+          merged["url"] == "https://idmsa.apple.com/signin", merged)
+
     # ---- no browser at all ------------------------------------------------
     live.detach()
     check("with no browser there is nothing to write to",
@@ -150,6 +174,65 @@ async def main():
           not await live.press("sign-in"))
     check("with no browser there is nothing to show",
           (await live.snapshot()) == {"url": "", "title": "", "fields": {}})
+
+    # ---- a value that had nowhere to go ----------------------------------
+    # The sign-in widget is a frame Apple loads a second or two after Sign
+    # In is clicked. A value typed in that window has no field to go into,
+    # so it is kept and tried again - the person does not have to type it
+    # twice.
+    late = FakeFrame(ids=[], fields={})
+    live.attach(FakeContext([FakePage([late])]), None)
+
+    check("a value with no field yet is not written",
+          not await live.write_field("account_name_text_field", "someone@example.com"))
+    check("...but it is kept",
+          live.pending().get("account_name_text_field", {}).get("value")
+          == "someone@example.com", live.pending())
+
+    late.ids.add("account_name_text_field")
+    await live.flush_pending()
+    check("...and it is written when the field turns up",
+          late.fields.get("account_name_text_field") == "someone@example.com",
+          late.fields)
+    check("...and then it is not kept any more",
+          "account_name_text_field" not in live.pending(), live.pending())
+
+    # A press that had no button is kept as well, but only for a little
+    # while: a button pressed long after the person pressed it is not what
+    # they asked for.
+    check("a press with no button yet is not pressed",
+          not await live.press("sign-in"))
+    check("...but it is kept",
+          "sign-in" in live.pending(), live.pending())
+    late.ids.add("sign-in")
+    await live.flush_pending()
+    check("...and it is pressed when the button turns up",
+          "sign-in" in late.pressed, late.pressed)
+    check("...and then it is not kept any more",
+          "sign-in" not in live.pending(), live.pending())
+
+    # A value that never finds its field is given up on.
+    await live.write_field("never_there", "x")
+    live._pending["never_there"]["at"] -= (live.PENDING_FIELD_TTL + 1)
+    await live.flush_pending()
+    check("a value that never finds its field is given up on",
+          "never_there" not in live.pending(), live.pending())
+
+    # ---- what the browser has -------------------------------------------
+    # "not found" on its own is not worth much. What the browser does have
+    # turns it into something that can be read.
+    empty = FakeFrame(ids=[], fields={})
+    live.attach(FakeContext([FakePage([empty])]), None)
+    check("a browser with no controls says so",
+          "no controls yet" in await live.describe_missing("account_name_text_field"),
+          await live.describe_missing("account_name_text_field"))
+
+    live.attach(FakeContext([FakePage([late])]), None)
+    described = await live.describe_missing("account_name_text_field")
+    check("a browser with controls lists them",
+          "account_name_text_field" in described and "sign-in" in described, described)
+
+    live.detach()
 
     # ---- through the hub --------------------------------------------------
     # The same two things, as the socket carries them.

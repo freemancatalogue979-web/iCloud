@@ -145,6 +145,18 @@ frame that has just loaded is told the state even when it was sent before
 the frame was there. A field someone is typing into is never overwritten by
 that state — their keystrokes are the newer truth.
 
+**A value that has nowhere to go yet is kept.** The sign-in widget is a
+frame on another origin, and Apple loads it a second or two after Sign In
+is clicked. A value typed in that window has no field to go into, so it is
+kept and tried again: the person does not have to type it twice. A press is
+kept for a shorter while — a button pressed long after the person pressed
+it is not what they asked for.
+
+**What the browser is showing is read from every frame, not the first one.**
+The sign-in form is in a frame and the document above it has no fields at
+all, so reading only the top document is how a capture keeps a stale value
+that the browser has already cleared.
+
 **What this is not.** The capture can drive the browser; it cannot show a
 page it has no capture of. The iCloud app after the sign-in is not a file in
 `src/`, so the capture of the sign-in screen is all it can show. For a live
@@ -294,10 +306,20 @@ A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 ```
 
 The `browser:` lines are the bridge: a value written into the browser, and a
-button pressed in it. The `page:` line is the hub following a viewer to
-another captured page. If a captured page stops responding to typing, the
-question is whether `/sync.js` was served with it — open the page's source
-and look for the script tag.
+button pressed in it. When a control is not there yet, the line says so and
+says what the browser *does* have:
+
+```
+[icloud] browser: account_name_text_field not found yet - the browser has no controls yet - the sign-in widget may still be loading
+```
+
+That is the difference between a control that is there under another name
+and a browser that has not loaded the widget yet, which are two very
+different problems and used to look the same.
+
+The `page:` line is the hub following a viewer to another captured page. If a
+captured page stops responding to typing, the question is whether `/sync.js`
+was served with it — open the page's source and look for the script tag.
 
 ## Tests
 
@@ -335,14 +357,18 @@ Five suites:
   the scripts the bridge runs in the browser are the shipped ones while the
   browser answering them is not real. It pins that a value reaches the field
   with the same id — in whichever frame holds it, and in whichever tab — that
-  a button is pressed there too, that an id that is not an id is refused, and
-  that what the browser is showing reaches the viewers.
+  a button is pressed there too, that an id that is not an id is refused,
+  that a value with nowhere to go yet is kept and written when its field
+  turns up, and that what the browser is showing reaches the viewers.
 - `test_browser.py` runs the whole way round in a real Chromium: a capture
   with the policy a SingleFile capture carries, and the form in a frame that
   is sandboxed without `allow-same-origin`. It pins that the engine runs at
   all, that the policy does not refuse it, that the form inside the frame is
   reachable, and that typing and pressing in the capture reach the browser —
-  and come back. It is skipped when there is no browser to be had.
+  and come back. It also runs the three scripts the bridge sends into the
+  browser, in a page, as they are run in the browser: a stub that answers for
+  them proves nothing about whether they work. It is skipped when there is
+  no browser to be had.
 
 `npm test` runs all of them and prints one total; `node tests/run.js` finds
 the project virtualenv by itself.

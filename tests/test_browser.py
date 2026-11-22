@@ -66,6 +66,9 @@ class FakeFrame:
         self.pressed = []
 
     async def evaluate(self, script, argument=None):
+        if "ids.slice" in script:
+            return list(self.ids)
+
         if "querySelectorAll" in script:
             return {
                 "url": self.url,
@@ -224,6 +227,40 @@ def main():
             "#account_name_text_field").input_value()
         check("what the browser holds is shown in the capture",
               shown == "someone@example.com", shown)
+
+        # ---- the shipped scripts, in a real page -------------------------
+        # The bridge runs three scripts in the browser. A stub that answers
+        # for them proves nothing about whether the scripts work: a script
+        # that takes its argument in the wrong shape finds nothing and says
+        # so, and the stub would have said it was fine. So they are run here,
+        # in a page, as they are run in the browser.
+        plain = browser.new_page()
+        plain.set_content(
+            '<input id=account_name_text_field type=text>'
+            '<input id=password_text_field type=password>'
+            '<button id=sign-in>Continue</button>'
+        )
+
+        written = plain.evaluate(live._WRITE, ["account_name_text_field", "someone@example.com"])
+        value = plain.evaluate("document.getElementById('account_name_text_field').value")
+        check("the write script writes into the field it is given",
+              written is True and value == "someone@example.com",
+              (written, value))
+
+        pressed = plain.evaluate(live._PRESS, "sign-in")
+        check("the press script presses the button it is given",
+              pressed is True, pressed)
+
+        read = plain.evaluate(live._READ)
+        check("the read script reads the field back",
+              read["fields"]["account_name_text_field"]["value"] == "someone@example.com",
+              read)
+
+        missing = plain.evaluate(live._WRITE, ["no_such_field", "x"])
+        check("the write script says so when there is no such field",
+              missing is False, missing)
+
+        plain.close()
 
         browser.close()
 
