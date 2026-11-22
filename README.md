@@ -138,23 +138,53 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-`test-*.js` runs `agent.js` and `view.html` inside a real DOM: serialisation,
-the frame-tree handshake over postMessage, inline SVG and web components, a
+`test-*.js` runs `agent.js` and `view.html` inside jsdom: serialisation, the
+frame-tree handshake over postMessage, inline SVG and web components, and a
 differential test that captures in one document, rebuilds in a second, and
 applies the ops using the applier lifted out of the shipped `view.html` rather
-than a copy of it, and a browser-semantics suite that stubs Chromium's stricter
-behaviour where jsdom is lenient. `test_telemetry.py` covers the server side.
+than a copy of it. `test_telemetry.py` and `test_res_cache.py` cover the server.
 
-`test-browser-semantics.js` exists because of a specific failure: calling
-`requestAnimationFrame` unbound is fine in jsdom and throws `Illegal invocation`
-in Chromium, which would have frozen the mirror after its first update with
-every other suite green.
+**jsdom is not a browser.** It has no layout, no style resolution, no
+shadow-DOM parser, and it is more permissive than Chromium about how built-in
+methods are called. Two suites therefore run against a real Chromium and skip
+cleanly when none is installed:
 
-They exist because no browser can be installed in the development sandbox. Every
-serious bug here was found by jsdom, not by reasoning: text nodes being deleted
-from patches, `ShadowRoot.cloneNode()` throwing by spec, a lockstep walk
-iterating live `childNodes`, `event.source` being null, and the
-declarative-shadow-DOM template shifting an ordered id sidecar.
+- `test_real_browser.py` — capture, declarative shadow DOM, computed styles
+  actually applied in the mirror, SVG namespaces, both mutation shapes
+  (characterData and childList carrying text nodes), a mutation inside a
+  runtime shadow root, and refusal of a mis-indexed `text` op.
+- `test_e2e.py` — stands up a throwaway HTTP origin playing the role of
+  icloud.com and points the server at a real Chromium, then checks the Sign In
+  locator really clicks the user's `<ui-button>`, that `/res` does a real
+  `ctx.request.get`, that `url()`s in a real stylesheet are rewritten (quoted
+  and unquoted), that the cache serves rewritten bytes, that `<base>` does not
+  leak into the mirror, and that the mirrored `url()` serves the real image.
+
+To run them, point `CHROME_PATH` at any Chromium:
+
+```bash
+CHROME_PATH="/path/to/chrome" npm test
+```
+
+After `python -m playwright install chromium` they are found automatically.
+
+The suites are not decorative. Each was mutation-checked: removing the
+`shadowrootmode` attribute, the text-node childList guard, the CSS `url()`
+rewrite, the `<base>` filter, or the mis-indexed-`text` refusal makes the
+matching assertion fail.
+
+**A correction worth recording.** `test-browser-semantics.js` was written on the
+claim that calling `requestAnimationFrame` with no receiver throws `Illegal
+invocation` in Chromium. Measured against real Chromium 153, it does not — the
+unbound call is accepted. That suite still passes and is still worth keeping
+(calling a `Window` method as a method of `Window` is correct regardless, and it
+pins that the scheduler re-arms), but it does not evidence a bug that was fixed.
+A stub is not a browser, and neither is an assumption about one.
+
+Everything else here was found by running code rather than reasoning about it:
+text nodes being deleted from patches, `ShadowRoot.cloneNode()` throwing by
+spec, a lockstep walk iterating live `childNodes`, `event.source` being null,
+and the declarative-shadow-DOM template shifting an ordered id sidecar.
 
 ## Files
 

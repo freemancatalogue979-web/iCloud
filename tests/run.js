@@ -3,10 +3,15 @@
  *   npm install   (once, pulls jsdom)
  *   npm test
  *
- * The test-*.js suites exercise agent.js and view.html in a real DOM; the
- * test_*.py suites exercise server.py. They are the only evidence any of this
- * works: no browser can be installed in the development sandbox, so nothing
- * here has ever run in Chromium.
+ * The test-*.js suites exercise agent.js and view.html in jsdom, and the
+ * test_*.py suites exercise server.py.
+ *
+ * jsdom is not a browser. It has no layout, no style resolution, no shadow-DOM
+ * parser, and it is more permissive than Chromium about how built-in methods
+ * are called - a green jsdom run has twice hidden a real defect. So
+ * test_real_browser.py runs the same paths in an actual Chromium. It needs a
+ * browser executable: it uses $CHROME_PATH, else whatever Playwright has
+ * installed, else it skips rather than failing.
  */
 const { execFileSync } = require("child_process");
 const fs = require("fs");
@@ -62,11 +67,17 @@ for (const suite of entries) {
   try {
     out = execFileSync(suite.cmd, [path.join(dir, suite.file)], {
       encoding: "utf8",
-      timeout: 120000,
+      // The browser suite launches Chromium, which is slow to start.
+      timeout: suite.file === "test_real_browser.py" ? 300000 : 120000,
     });
   } catch (e) {
     code = e.status === undefined ? 1 : e.status;
     out = (e.stdout || "") + (e.stderr || "");
+  }
+  if (/^SKIPPED:/m.test(out)) {
+    skipped++;
+    console.log(`skip ${suite.file.padEnd(24)} ${out.match(/^SKIPPED:.*$/m)[0].slice(9)}`);
+    continue;
   }
   const match = out.match(/(\d+) passed, (\d+) failed/);
   const passed = match ? +match[1] : 0;

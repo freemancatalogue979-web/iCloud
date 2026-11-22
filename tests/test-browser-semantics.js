@@ -1,8 +1,15 @@
-/* Browser semantics jsdom is lenient about.
+/* Strict-receiver discipline for requestAnimationFrame.
  *
- * jsdom accepts things Chromium rejects, so a green suite here does not mean a
- * green browser. Each test in this file pins a behaviour that differs, using a
- * stub that is as strict as the real thing.
+ * CORRECTION: this suite was written on the belief that Chromium throws
+ * "Illegal invocation" when requestAnimationFrame is called with no receiver.
+ * Measured against real Chromium 153.0.8010.0, it does not - the unbound call
+ * is accepted. So the strict stub below encodes a rule stricter than any
+ * browser actually enforces, not a real divergence.
+ *
+ * It is kept because calling a Window method as a method of Window is correct
+ * regardless, and because the suite also verifies the scheduler re-arms for
+ * later mutations, which is a real behaviour worth pinning. It is not evidence
+ * of a bug that was fixed.
  */
 const fs = require("fs");
 const { JSDOM } = require("jsdom");
