@@ -40,7 +40,10 @@
   window.__rbInstalled = true;
 
   const FRAME_REPLY_TIMEOUT = 1200;
-  const SHADOW_SCAN_MS = 500;
+  // A full sweep for shadow roots that appear with no DOM mutation to hang off.
+  // Expensive, so rare; the per-flush scan of newly added subtrees does the
+  // rest, and that one costs only what actually changed.
+  const SHADOW_FULL_SCAN_MS = 5000;
   const RESEED_MIN_GAP = 2000;
   const FRAME_SELECTOR = 'iframe, frame, object[type="text/html"][data]';
   const WIN_ID = "data-rb-frame";
@@ -540,6 +543,7 @@
 
     const ops = [];
     const seenAttr = new Set();
+    const addedElements = new Set();
     // Two passes: first find the parents whose children include bare text
     // nodes, because those have to be resynced as a unit and must not also get
     // granular add/rm ops for the same change.
@@ -560,6 +564,7 @@
           if (id) ops.push({ op: "rm", id });
         }
         for (const added of record.addedNodes) {
+          if (added.nodeType === 1) addedElements.add(added);
           const made = serialiseAdded(added);
           if (!made) continue;
           // Insertion point: the next element sibling still in the tree. Text
@@ -608,7 +613,7 @@
       ops.push({ op: "children", parent: id, html: made.html });
     }
 
-    scanShadowRoots();
+    scanShadowRoots(addedElements);
 
     if (ops.length === 0) return;
     send({ kind: "mut", windowId, ops });
@@ -639,15 +644,35 @@
   function observeRoot(root) {
     if (!root || observedRoots.has(root)) return;
     observedRoots.add(root);
-    observer.observe(root, OBSERVE);
+    // Defensive: every caller today runs after start() has built the observer,
+    // but this executes inside a page we do not control and a throw here would
+    // break that page rather than the mirror.
+    if (observer) observer.observe(root, OBSERVE);
   }
 
   // Shadow roots attach themselves without any observable DOM mutation, so they
   // are found by scanning on a slow tick.
   let lastScan = 0;
-  function scanShadowRoots() {
+  /* Shadow roots are not observable - attaching one is not a DOM mutation - so
+   * they have to be looked for. Walking the whole document twice a second on a
+   * page with thousands of elements taxes the site we are supposed to be
+   * watching, so the routine work is scanning only the subtrees a flush just
+   * saw added, with a slow full sweep as a backstop. */
+  function observeShadowRootsIn(root) {
+    if (!root || root.nodeType !== 1) return;
+    if (root.shadowRoot) observeRoot(root.shadowRoot);
+    if (!root.querySelectorAll) return;
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) observeRoot(el.shadowRoot);
+    }
+  }
+
+  function scanShadowRoots(added) {
+    if (added) {
+      for (const node of added) observeShadowRootsIn(node);
+    }
     const now = Date.now();
-    if (now - lastScan < SHADOW_SCAN_MS) return;
+    if (now - lastScan < SHADOW_FULL_SCAN_MS) return;
     lastScan = now;
     for (const el of document.querySelectorAll("*")) {
       if (el.shadowRoot) observeRoot(el.shadowRoot);

@@ -76,8 +76,12 @@
         const parent = ids.get(op.parent);
         if (!parent) return false;
         const target = parent.childNodes[op.index];
-        if (target && target.nodeType === 3) target.data = op.text;
-        else parent.textContent = op.text;
+        // If the index does not land on a text node the two documents have
+        // drifted. Setting textContent here would replace every child of the
+        // parent with one string - destroying the subtree and reporting
+        // success. Ask for a resync instead.
+        if (!target || target.nodeType !== 3) return false;
+        target.data = op.text;
 
       } else if (op.op === "value") {
         const el = ids.get(op.id);
