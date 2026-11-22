@@ -1,73 +1,71 @@
 # Captured pages
 
-Put the HTML files you captured in this folder. Once the browser is open and
-Sign In has been clicked, the app opens `src/1.html` as its own document; every
+Put the HTML files you captured in this folder, starting with `1.html`. Once the
+browser has the sign-in form on screen, the app shows `1.html` in a frame; every
 page here is reachable at `/src/<name>.html`.
 
-What the server does with them: **nothing, except add one tag.**
+What the server does with a captured page: **nothing.** It is served byte for
+byte.
 
-```html
-<script src="/sync.js"></script>
-```
+- No script is added. Nothing runs inside the capture — the mapping lives in the
+  app page and in the server.
+- No meta is rewritten, no policy is edited, no comment is removed.
+- The file on disk is never written to, and there is no write path for this
+  folder at all.
 
-That is the whole contract: the file is served byte for byte, with that tag
-before `</head>` (or after `<body>` when the page has no head), and the tag is
-how typing, clicks and navigation reach the server. No meta is rewritten, no
-script is stripped, no policy is edited — and the file on disk is never written
-to.
+**Images, stylesheets and fonts are served too**, at the relative paths the page
+already uses, so keep them next to it. `1_files/apple.png` in the capture is
+`/src/1_files/apple.png` here, which is the same relative URL — nothing has to
+be adjusted.
 
-The tag only ever lands in the page's own markup. Markup that sits inside a
-quoted attribute value is not a place to put it, and a SingleFile export is
-full of that: it keeps a whole nested document in `<iframe srcdoc="…">`. That
-inner document is left exactly as captured, so the frame still has everything
-in it.
+## How the mapping finds the fields
 
-**Everything else is served as-is**, so keep stylesheets, scripts, images and
-fonts next to the page that references them (relative URLs resolve against
-`/src/…`, the same shape the capture had).
+The capture kept the ids of the page it was taken from, so a field maps to the
+element with the same id in the real page: `#account_name_text_field` in the
+capture is `#account_name_text_field` in the browser window, and `#sign-in` is
+the real Continue. Keep those ids as they were captured and the mapping works;
+rename one and that field stops mapping.
+
+A SingleFile export keeps the sign-in form inside `<iframe srcdoc="…">`. That is
+fine: the app binds the frames inside the page as well as the page itself, and
+the server looks in every frame of the real browser.
 
 ## Capturing a file that renders
 
-A page saved with **"Webpage, HTML only"** is one file and nothing else: its
-CSS, fonts and images were never downloaded, so on the server it shows up
-unstyled with broken spacing. Save with **"Webpage, Complete"** instead and the
-stylesheet and images land in a `1_files/` folder beside the HTML; copy both
-into `src/` and the relative URLs line up again.
+Two things tend to go wrong, and both are fixed at capture time.
 
-The other half is the page's own JavaScript. A snapshot of a live page keeps the
-scripts that built it, and when the snapshot is served those scripts run a
-second time against a copy with no Apple backend behind it — which is how a
-form that was in the file gets replaced or removed on screen. Fix that at
-capture time, not on the server:
+**Assets.** A page saved with **"Webpage, HTML only"** is one file and nothing
+else: its CSS, fonts and images were never downloaded, so it shows up unstyled
+with broken spacing. Save with **"Webpage, Complete"** (or SingleFile) instead
+and the stylesheet and images come with it — put them beside the HTML and the
+relative URLs line up.
+
+**Scripts that re-run.** A snapshot of a live page keeps the scripts that built
+it, and when the snapshot is served those scripts run a second time against a
+copy with no Apple backend behind it, which can clear a form that is in the file.
+Fix that at capture time:
 
 1. Load the page in Chrome and let it finish rendering.
 2. DevTools → Console, on that page:
 
    ```js
    document.querySelectorAll("script").forEach((s) => s.remove());
-   document.querySelectorAll('meta[http-equiv="Content-Security-Policy"]').forEach((m) => m.remove());
    ```
 
 3. Elements → right-click `<html>` → **Copy → Copy outerHTML**, paste it into
    `1.html` under `<!DOCTYPE html>`.
-4. Copy in the `1_files/` folder from a "Webpage, Complete" save.
+4. Copy in the `_files` folder from a "Webpage, Complete" save.
 
-What is left is the markup exactly as the browser had rendered it, with nothing
-in it that can re-run and disturb it. `/sync.js` is then the only script on the
-page, and nothing is blocked from loading it.
+Leaving the capture's own policy meta (`Content-Security-Policy`) in place is
+fine: nothing needs to load inside the capture any more, and a policy only ever
+applies to the capture's own scripts.
 
-`/src/` (no file name) lists what is here, and a missing page says so instead
-of showing a bare 404, so a fresh clone with an empty `src/` still explains
-itself.
+`/src/` (no file name) lists what is here, and a missing page says so instead of
+showing a bare 404, so a fresh clone with an empty `src/` still explains itself.
 
-## What stays in sync
+## One capture per step
 
-| In the page | On the server |
-|---|---|
-| what you type into a field | the value, kept for the next viewer and the next reload |
-| a checkbox, radio or select | its state, same as above |
-| a click | relayed to the other viewers as a marker (not replayed) |
-| following a link to another `/src/*.html` page | the shared page, so every viewer follows |
-
-The state is in memory: restarting the server clears it. It is deliberately
-not written back into these files — these are the captures.
+The app shows `1.html`. When the real page in the browser moves on — password,
+then the two-factor step — the frame has to move on as well: that is what
+`2.html`, `3.html` and so on are for. Put them here with the ids of the step
+they mirror, and the mapping keeps working without being told anything.
