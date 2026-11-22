@@ -166,7 +166,20 @@ async def main():
           traversal.status_code == 404 and "TOP SECRET" not in leaked, traversal.status_code)
 
     client = await server.index()
-    check("/ serves the client page", str(client.path).endswith("client.html"), client.path)
+    check("/ serves the launcher while the browser is idle",
+          str(client.path).endswith("client.html"), client.path)
+
+    live = await server.status()
+    check("status names the page the app should open",
+          live.get("page") == server.hub.page, live)
+
+    server.state["status"] = "done"
+    redirect = await server.index()
+    check("/ becomes the capture once Sign In has been clicked",
+          redirect.status_code == 307 and
+          redirect.headers.get("location") == server.hub.page,
+          (redirect.status_code, redirect.headers.get("location")))
+    server.state["status"] = "idle"
 
     engine = await server.sync_js()
     check("/sync.js serves the engine", str(engine.path).endswith("sync.js"), engine.path)

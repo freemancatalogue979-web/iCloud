@@ -1,8 +1,9 @@
 # iCloud
 
 FastAPI on port 9002. Visiting the page still opens a browser, loads
-icloud.com and clicks Sign In. The page in the app is not that browser: it is
-a capture you made earlier, served from `src/` and loaded in an iframe.
+icloud.com and clicks Sign In. The page in the app is not that browser: once
+Sign In has been clicked it becomes a capture you made earlier, served from
+`src/` as a document of its own.
 
 ## Run
 
@@ -39,28 +40,58 @@ document stream, the resource proxy, the screenshots, the click and keystroke
 forwarding, and the `1.html` the server used to write out.
 
 What replaced it is a file. A page that was captured earlier sits in `src/`,
-the client loads it in an iframe, and nothing about it has to be reconstructed:
-it is the page, with the site's own markup, its own stylesheets and its own
-shadow roots, laid out by the browser from the capture itself.
+the app opens it as a document of its own, and nothing about it has to be
+reconstructed: it is the page, with the site's own markup, its own
+stylesheets and its own shadow roots, laid out by the browser from the
+capture itself.
 
 That removes the class of bug the old pipeline kept producing. A capture sent
 as patches has to address every patch to the right node, and nodes move; a
 capture rebuilt from markup can quietly lose what the serialiser did not
 carry. A static file cannot be addressed wrongly.
 
+## How the app gets to the capture
+
+There is no iframe. `/` is a launcher: it opens the browser (`/start`), says
+what it is doing, and — as soon as `/status` answers `done`, which is the
+moment Sign In has been clicked — replaces itself with the captured page:
+
+```js
+location.replace("/src/1.html")
+```
+
+After that the capture is the *top-level document*. It is laid out at the
+window's width, with its own scrollbars, fonts and title, instead of being a
+page inside a frame inside a page. That was the thing an iframe got wrong: a
+capture taken at 1440 px was being laid out at 900 px inside the frame, so it
+reflowed, clipped and scrolled differently from the page it came from.
+
+`/sync.js` does not change. It is injected into the page by the server and now
+runs at the top level, so everything in the next section still holds.
+
+Writing the capture into the launcher with `document.write` would have kept the
+URL at `/`, and `sync.js` uses the URL to say which captured page is on screen
+— every page would have called itself `/` and navigation between captures
+would break. A navigation is the honest swap: same URL, same document, same
+script behaviour as opening the file directly.
+
+While the run is `done`, `/` redirects to the capture, so a reload comes back
+to the page rather than to the launcher. If the browser cannot be opened, the
+launcher says so and offers the capture anyway.
+
 ## Sign in still happens, in the real browser
 
 `/start` launches a visible browser with a persistent profile, goes to
 icloud.com and clicks Sign In, so you can sign in there yourself. That browser
 is not mirrored any more: nothing is captured from it, and its window is not
-what the iframe shows.
+what the app shows.
 
 ## What stays in sync
 
 A static page cannot know that anyone else is typing into it. So the server
 holds the shared state and relays it over `/ws`:
 
-| In the iframe | On the server |
+| In the captured page | On the server |
 |---|---|
 | what you type into a field | the value, kept for the next viewer and the next reload |
 | a checkbox, radio or select | its state, the same way |
@@ -94,8 +125,8 @@ right place.
 
 **A link that leaves the captures is not followed, and a form is not
 submitted.** Neither has anything behind it any more: the first would take the
-iframe to some live page the server knows nothing about, the second would
-replace the capture with the app's own 404. A same-page `#anchor` is left
+page to some live site the server knows nothing about, the second would replace
+the capture with the app's own 404. A same-page `#anchor` is left
 alone, and the page's own click and submit handlers still run — only the
 navigation is cancelled.
 
@@ -121,7 +152,7 @@ written back into `src/` — those files are the captures.
   answered as a missing page, not as a file read.
 - **A missing page explains itself.** `/src/nope.html` is a 404 with a note
   saying where captures go and what is there now, so a fresh clone with an
-  empty `src/` is not a blank iframe.
+  empty `src/` is not a blank page.
 
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
@@ -173,7 +204,7 @@ A dropped socket reconnects with backoff, 500 ms doubling to 5 s, and says
 
 The `page:` line is the hub following a viewer to another captured page. If a
 captured page stops responding to typing, the question is whether `/sync.js`
-was served with it — open the iframe's document and look for the script tag.
+was served with it — open the page's source and look for the script tag.
 
 ## Tests
 
@@ -182,8 +213,13 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-Two suites, neither of which needs Chromium or a network:
+Three suites, none of which needs Chromium or a network:
 
+- `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
+  pins the hand-off: the caption follows the server's step, the spinner gives
+  way to the mark when the browser is open, the launcher navigates to the page
+  the server names as soon as the run is `done`, and a failed launch stops
+  polling, says why, and offers the capture instead.
 - `test-sync.js` runs `sync.js` in jsdom with a stubbed WebSocket. It pins the
   protocol: typing is not sent mid-word, an unchanged field is not sent again,
   a checkbox carries its state, a click carries its position, a remote value
@@ -196,10 +232,11 @@ Two suites, neither of which needs Chromium or a network:
   `src/` is readable, a missing capture says so, and the hub really is the
   shared state — a value reaches the other viewer and the next one to join, a
   click is relayed but a click with no position is dropped, a link moves every
-  viewer and clears form state, an off-site page is refused, and a viewer that
-  leaves is forgotten.
+  viewer and clears form state, an off-site page is refused, a viewer that
+  leaves is forgotten, and `/` is the launcher until the browser is up and the
+  capture afterwards.
 
-`npm test` runs both and prints one total; `node tests/run.js` finds the
+`npm test` runs all three and prints one total; `node tests/run.js` finds the
 project virtualenv by itself.
 
 What is deliberately not covered: a real browser loading `src/1.html`. There is
@@ -212,8 +249,8 @@ honest boundary.
 - `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
   and navigation
-- `client.html` — the one page; opens the browser and loads `/src/1.html`
-- `src/` — the captures (yours; `1.html` is the one the iframe opens)
+- `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
+- `src/` — the captures (yours; `1.html` is the one the app opens)
 - `run.bat` — Windows launcher
 - `tests/` — the two suites above
 
@@ -221,4 +258,6 @@ honest boundary.
 
 The app clicks Sign In and then stops. You type your Apple ID and two-factor
 code yourself in the browser window that opened — it never touches your
-password. The page in the app is the capture from `src/`, not that window.
+password. The page in the app is the capture from `src/`, not that window, and
+it does not wait for you to finish signing in: it appears as soon as Sign In
+has been clicked.

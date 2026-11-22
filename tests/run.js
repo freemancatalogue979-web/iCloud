@@ -8,12 +8,16 @@
  * what it does with what comes back, and that it neither echoes an applied
  * value nor replays a click.
  *
- * test_sync.py runs the rest of server.py without a browser: the src/ routes,
- * the engine injection, and the hub that carries values, clicks and page
- * changes between viewers.
+ * test-launcher.js runs client.html with a stubbed /status: when it replaces
+ * itself with the capture, and what it shows while the browser is opening or
+ * after a failed launch.
  *
- * Neither suite needs Chromium or a network. The browser the app opens for
- * the sign-in is not part of what is tested here.
+ * test_sync.py runs the rest of server.py without a browser: the src/ routes,
+ * the engine injection, the hub that carries values, clicks and page changes
+ * between viewers, and the launcher redirect.
+ *
+ * None of the suites needs Chromium or a network. The browser the app opens
+ * for the sign-in is not part of what is tested here.
  */
 const { execFileSync } = require("child_process");
 const fs = require("fs");

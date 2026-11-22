@@ -1,8 +1,8 @@
 # Captured pages
 
-Put the HTML files you captured in this folder. The client loads
-`src/1.html` in an iframe as soon as the app opens; every page here is
-reachable at `/src/<name>.html`.
+Put the HTML files you captured in this folder. Once the browser is open and
+Sign In has been clicked, the app opens `src/1.html` as its own document; every
+page here is reachable at `/src/<name>.html`.
 
 What the server does with them:
 
@@ -19,7 +19,7 @@ itself.
 
 ## What stays in sync
 
-| In the iframe | On the server |
+| In the page | On the server |
 |---|---|
 | what you type into a field | the value, kept for the next viewer and the next reload |
 | a checkbox, radio or select | its state, same as above |

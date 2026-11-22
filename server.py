@@ -1,8 +1,9 @@
 """FastAPI server on port 9002.
 
 Visiting http://localhost:9002 serves client.html. That page opens the real
-browser (icloud.com, Sign In pressed) and loads a page that was captured
-earlier - ``src/1.html`` - in an iframe.
+browser (icloud.com, Sign In pressed); once Sign In has been clicked, the app
+goes to a page that was captured earlier - ``src/1.html`` - as a document of
+its own, not inside a frame.
 
 The mirrored capture pipeline is gone. There is no agent in the real browser,
 no document stream, no resource proxy and no engine rebuilding a page from a
@@ -13,9 +14,9 @@ is keep every viewer of it in step, because a static file cannot:
 * it holds the shared state - which page everyone is on, and every form value
   that has been typed - and relays changes over ``/ws``.
 
-So anything done in the iframe is reflected server-side: it is stored by the
-hub and handed to the next viewer (and to the next reload) instead of living
-only in one browser tab.
+So anything done in the captured page is reflected server-side: it is stored
+by the hub and handed to the next viewer (and to the next reload) instead of
+living only in one browser tab.
 
     python server.py
 """
@@ -32,7 +33,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 HERE = Path(__file__).parent
 
@@ -40,8 +41,8 @@ HERE = Path(__file__).parent
 # can point at a scratch folder; in normal use it is just ``./src``.
 SRC = Path(os.environ.get("ICLOUD_SRC") or (HERE / "src")).resolve()
 
-# The page the client loads once the app is up. Everything in src/ is served,
-# but this is the one the iframe asks for first.
+# The page the app goes to once the browser is up. Everything in src/ is
+# served, but this is the one it opens first.
 START_PAGE = "/src/1.html"
 
 # The Sign In button on the icloud.com landing page. The browser still opens
@@ -194,6 +195,15 @@ def bring_new_tab_to_front(new_page):
 
 @app.get("/")
 async def index():
+    """The launcher, until the browser is open and Sign In has been clicked.
+
+    After that the captured page *is* the app, so this redirects to it. A
+    reload must not pretend the browser has to be opened again - and a top
+    level document means the capture is laid out as a page of its own,
+    instead of being squeezed into a frame inside another document.
+    """
+    if state["status"] == "done":
+        return RedirectResponse(hub.page, status_code=307)
     # no-store, so an edit to client.html shows up on refresh instead of
     # serving the browser's cached copy.
     return FileResponse(HERE / "client.html", headers=NO_STORE)
@@ -252,14 +262,14 @@ async def start():
 
 @app.get("/status")
 async def status():
-    return state
+    return {**state, "page": hub.page}
 
 
 # --------------------------------------------------------------------------
 # The captured pages
 #
 # src/ is served as it is, with one addition: every HTML page gets /sync.js in
-# its head. That script is how what the user does in the iframe reaches the
+# its head. That script is how what the user does in the page reaches the
 # server. Without it the page is just a file and nothing leaves the tab.
 # --------------------------------------------------------------------------
 
@@ -342,9 +352,9 @@ def page_document(title: str, body: str) -> str:
 def listing_page(folder: Path) -> str:
     body = (
         "<h1>Captured pages</h1>"
-        "<p>The client loads <code>1.html</code> in an iframe. Every page here "
-        "runs <code>/sync.js</code>, so what you type and click is reflected "
-        "server-side and follows you between viewers.</p>"
+        "<p>The app opens <code>1.html</code> once the browser is up. Every "
+        "page here runs <code>/sync.js</code>, so what you type and click is "
+        "reflected server-side and follows you between viewers.</p>"
         + page_links(folder)
     )
     return page_document("Captured pages", body)
