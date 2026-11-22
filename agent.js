@@ -48,6 +48,21 @@
   const FRAME_SELECTOR = 'iframe, frame, object[type="text/html"][data]';
   const WIN_ID = "data-rb-frame";
   const NID = "data-rb-nid";
+  /* The computed-style snapshot is delivered as a stylesheet of zero
+   * specificity rules rather than as inline style attributes. Inline styles
+   * beat every stylesheet rule, so pinning them froze the mirror: the live
+   * page would toggle a class, the mirror would take the attribute op, and
+   * the snapshot's colour and size would still win - the page would look
+   * frozen. A :where() rule has specificity zero, so the page's own CSS
+   * decides and the snapshot only fills in what the mirror could not load. */
+  const FALLBACK_ATTR = "data-rb-fallback";
+  /* A shadow root is not an element, so it cannot carry an id of its own -
+   * but a mutation inside one still has to be delivered, and it has to be
+   * delivered to the right place. The root's address is derived from the
+   * host's, so both sides can work it out from the ids already in the
+   * document without a side channel. */
+  const SHADOW_SUFFIX = "/shadow";
+  let nextOwnId = 1;
   const RB = "__rb_ft_";
   const INIT_REQUEST = RB + "initRequest";
   const INIT_RESPONSE = RB + "initResponse";
@@ -72,6 +87,29 @@
       elementToId.set(node, id);
     }
     return id;
+  }
+
+  /* Our own inserted elements - the snapshot stylesheet - get ids from a
+   * separate series so they can never collide with the page's, and so the
+   * mirror can still address every element in its document. */
+  function ownId() {
+    return "rbf" + nextOwnId++;
+  }
+
+  // The address of the shadow root attached to a host element.
+  function shadowIdOf(host) {
+    if (!host) return null;
+    const nid = elementToId.get(host);
+    return nid ? nid + SHADOW_SUFFIX : null;
+  }
+
+  // The address of anything a mutation can be reported against.
+  function addressOf(node) {
+    if (!node) return null;
+    if (node.nodeType === 1) return ensureId(node);
+    // A shadow root. Its host is an element and has an id of its own.
+    if (node.nodeType === 11 && node.host) return shadowIdOf(node.host);
+    return null;
   }
 
   function emit(message) {
@@ -221,15 +259,79 @@
     }
   }
 
+  // Properties whose initial value depends on the element or its box, so a
+  // single probe element would give a misleading answer for them. Everything
+  // else in CURATED_PROPS has one element-independent initial value, which is
+  // what makes reading the defaults off a probe safe.
+  const PROBE_UNSAFE = new Set(["display", "width", "height"]);
+
+  // Colours that default to currentColor, so their resolved value simply
+  // repeats the element's own colour.
+  const COLOR_CURRENT_PROPS = new Set([
+    "outline-color", "border-top-color", "border-right-color",
+    "border-bottom-color", "border-left-color",
+  ]);
+
+  // The browser knows its own defaults; a hand-written list does not, and
+  // getting one wrong is invisible - the element simply carries a declaration
+  // that says nothing. flex-grow:0, flex-shrink:1, order:0, outline-width:3px
+  // and border-*-color were all leaking onto every element on the page because
+  // none of them appear in a list written against jsdom, whose
+  // getComputedStyle does not report them at all.
+  let defaultStyle = null;
+
+  function styleDefaults(doc) {
+    if (defaultStyle) return defaultStyle;
+    defaultStyle = {};
+    const probe = doc.createElement("div");
+    // Hidden so it cannot perturb the layout of the page being captured.
+    probe.setAttribute("style", "display:none !important");
+    (doc.body || doc.documentElement).appendChild(probe);
+    const computed = computedOf(probe);
+    if (computed) {
+      for (const prop of CURATED_PROPS) {
+        if (!PROBE_UNSAFE.has(prop)) defaultStyle[prop] = propValue(computed, prop);
+      }
+    }
+    probe.remove();
+    return defaultStyle;
+  }
+
   function computedStyleText(el) {
     const computed = computedOf(el);
     if (!computed) return "";
     const inheritedFrom = computedOf(el.parentElement);
+    const defaults = styleDefaults(el.ownerDocument || document);
+    /* A flex or grid item's width and height are worked out by the layout,
+     * not by the element. Pinning the number the layout produced turns it
+     * into the item's base size, and the mirror then lays the row out
+     * differently from the page - one item narrower, everything after it
+     * shifted. The layout is left to do the same job again. */
+    const parentDisplay = propValue(inheritedFrom, "display");
+    const isFlexItem = parentDisplay === "flex" || parentDisplay === "inline-flex" ||
+      parentDisplay === "grid" || parentDisplay === "inline-grid";
+    // A border or outline colour left at currentColor resolves to the
+    // element's own colour, which the mirror would reproduce anyway.
+    const ownColor = propValue(computed, "color");
+    const outlineStyle = propValue(computed, "outline-style");
+    const hasTransform = !NO_OPS.has(propValue(computed, "transform"));
     const out = [];
     for (const prop of CURATED_PROPS) {
       const value = propValue(computed, prop);
       if (!value) continue;
       if (STYLE_DEFAULTS[prop] === value) continue;
+      // Equal to what the browser would have produced with nothing set.
+      if (defaults[prop] === value) continue;
+      // A resolved transform-origin is an absolute offset derived from the
+      // element's box. Carrying it freezes the mirror to the original layout
+      // and breaks the transform outright if the box differs by a pixel, so it
+      // only travels with a transform that actually uses it.
+      if (prop === "transform-origin" && !hasTransform) continue;
+      if (isFlexItem && (prop === "width" || prop === "height")) continue;
+      // outline-style:none is the initial value; the longhands that go with it
+      // (outline-width:3px, outline-color) only add bytes.
+      if (outlineStyle === "none" && prop.indexOf("outline") === 0) continue;
+      if (COLOR_CURRENT_PROPS.has(prop) && value === ownColor) continue;
       // Skip the values that mean "nothing was set" - auto, none, normal, 0px.
       // Without this an element carries ~1.3KB of initial values that say
       // nothing, which is the whole payload. A property whose real default IS
@@ -273,6 +375,110 @@
    * which is the order the serialiser emits elements and the order the mirror's
    * querySelectorAll returns them - that agreement is what makes the sidecar
    * work without touching the live DOM. */
+  // Cap on the size of a canvas snapshot. A big canvas would otherwise
+  // dominate the whole capture as base64.
+  const CANVAS_MAX_BYTES = 262144;
+  const CANVAS_ATTR = "data-rb-canvas";
+
+  function canvasPixels(el) {
+    try {
+      if (!el || typeof el.toDataURL !== "function") return null;
+      const url = el.toDataURL();
+      if (!url || url === "data:,") return null; // nothing was drawn
+      if (url.length > CANVAS_MAX_BYTES) return null;
+      return url;
+    } catch (e) {
+      // SecurityError on a tainted canvas. Nothing to carry.
+      return null;
+    }
+  }
+
+  // Copy the live form state onto the clone so a fresh parse of the captured
+  // markup starts out showing what the real page shows.
+  function carryLiveState(orig, clone) {
+    const tag = orig.tagName;
+    if (tag === "INPUT") {
+      const type = (orig.getAttribute("type") || "text").toLowerCase();
+      if (type === "checkbox" || type === "radio") {
+        if (orig.checked !== orig.hasAttribute("checked")) {
+          if (orig.checked) clone.setAttribute("checked", "");
+          else clone.removeAttribute("checked");
+        }
+        return;
+      }
+      if (type === "file" || type === "submit" || type === "button") return;
+      const value = orig.value;
+      if (typeof value === "string" && value !== orig.getAttribute("value")) {
+        clone.setAttribute("value", value);
+      }
+      return;
+    }
+    if (tag === "TEXTAREA") {
+      const value = orig.value;
+      if (typeof value === "string" && value !== orig.textContent) {
+        clone.textContent = value;
+      }
+      return;
+    }
+    if (tag === "OPTION") {
+      if (orig.selected && !orig.hasAttribute("selected")) {
+        clone.setAttribute("selected", "");
+      } else if (!orig.selected && orig.hasAttribute("selected")) {
+        clone.removeAttribute("selected");
+      }
+      return;
+    }
+    if (tag === "SELECT") {
+      // Mark the option that is really selected, which is not always the one
+      // the markup names - a script may have changed it. The clone's options
+      // are different objects from the original's, so they are matched by
+      // position, never by identity.
+      const index = orig.selectedIndex;
+      if (!orig.options || index < 0 || index >= orig.options.length) return;
+      const kids = clone.options ? Array.from(clone.options) : [];
+      if (index >= kids.length) return;
+      for (let i = 0; i < kids.length; i++) {
+        if (i === index) kids[i].setAttribute("selected", "");
+        else if (kids[i].hasAttribute("selected")) kids[i].removeAttribute("selected");
+      }
+    }
+  }
+
+  // The snapshot stylesheet: one zero-specificity rule per element.
+  function fallbackCss(styles) {
+    if (!styles || styles.size === 0) return "";
+    const out = [];
+    for (const [nid, css] of styles) {
+      if (!css) continue;
+      out.push(':where([' + NID + '="' + nid + '"]){' + css + '}');
+    }
+    return out.join("\n");
+  }
+
+  function makeFallbackSheet(doc, styles) {
+    const css = fallbackCss(styles);
+    if (!css) return null;
+    const style = doc.createElement("style");
+    style.setAttribute(FALLBACK_ATTR, "");
+    style.setAttribute(NID, ownId());
+    style.textContent = css;
+    return style;
+  }
+
+  // Put the snapshot stylesheet at the top of the document, so the page's own
+  // rules - which are never zero-specificity - are what the browser reads
+  // first and the snapshot only fills the gaps.
+  function injectFallback(root, styles) {
+    const sheet = makeFallbackSheet(root.ownerDocument, styles);
+    if (!sheet) return;
+    /* Last, not first: the page's own rules are never zero-specificity, so
+     * they win wherever the sheet sits, and leaving the page's first element
+     * alone keeps the mirror's document in the same order as the page's. */
+    const head = root.querySelector ? root.querySelector("head") : null;
+    if (head) head.appendChild(sheet);
+    else root.appendChild(sheet);
+  }
+
   function cleanClone(clone) {
     const tag = clone.tagName;
     if (tag === "SCRIPT") return false; // nothing runs in the mirror
@@ -313,16 +519,34 @@
    * element silently shifts every later id. Attributes have no ordering to get
    * wrong, and the clone is thrown away, so the live page is still untouched. */
   function walk(orig, clone, ctx) {
-    clone.setAttribute(NID, ensureId(orig));
+    const nid = ensureId(orig);
+    clone.setAttribute(NID, nid);
 
-    // Resolved styles, with any url() inside them routed through the proxy the
-    // same way a stylesheet's would be.
+    /* The resolved styles, with any url() inside them routed through the
+     * proxy the same way a stylesheet's would be. They are recorded rather
+     * than written onto the element: the element keeps the author's own
+     * inline style, and the snapshot becomes a fallback rule. */
     const computed = computedStyleText(orig);
-    if (computed) clone.setAttribute("style", proxyCss(computed));
+    if (computed && ctx.styles) ctx.styles.set(nid, proxyCss(computed));
 
     if (clone.tagName === "STYLE") {
       clone.textContent = proxyCss(orig.textContent);
     }
+
+    // A canvas carries its picture in pixels, not in markup, so cloning the
+    // element copies an empty box. toDataURL is the only way to carry it, and
+    // it throws if the canvas was tainted by a cross-origin image - in which
+    // case there is nothing to carry and the box simply stays blank.
+    if (clone.tagName === "CANVAS") {
+      const pixels = canvasPixels(orig);
+      if (pixels) clone.setAttribute(CANVAS_ATTR, pixels);
+    }
+
+    // The value of a form control lives in a property, not in the attribute.
+    // A script that does input.value = "x" leaves the attribute saying
+    // something else, and the mirror would then show the attribute - which is
+    // the text the page was served with, not what the user actually sees.
+    carryLiveState(orig, clone);
 
     const root = orig.shadowRoot;
     if (root) {
@@ -333,6 +557,9 @@
       const origShadowKids = Array.from(root.childNodes);
       for (const kid of origShadowKids) template.content.appendChild(kid.cloneNode(true));
       const cloneShadowKids = Array.from(template.content.childNodes);
+      // A document stylesheet does not reach into a shadow tree, so the
+      // snapshot for shadow content has to live inside the shadow root.
+      const shadowCtx = { frameIds: ctx.frameIds, styles: new Map() };
       for (let i = 0; i < cloneShadowKids.length; i++) {
         const orig2 = origShadowKids[i];
         const clone2 = cloneShadowKids[i];
@@ -340,10 +567,40 @@
         if (orig2.nodeType === 3) continue;
         if (orig2.nodeType !== 1) { clone2.remove(); continue; }
         if (!cleanClone(clone2)) { clone2.remove(); continue; }
-        walk(orig2, clone2, ctx);
+        walk(orig2, clone2, shadowCtx);
       }
-      // Light DOM is not rendered once a shadow root exists.
-      while (clone.firstChild) clone.firstChild.remove();
+      /* A shadow root's own <style> elements travel with the capture, so the
+       * only styles it cannot bring are the ones in adoptedStyleSheets - a
+       * constructable stylesheet, which is not markup and does not serialise.
+       * Only then is a snapshot worth adding.
+       *
+       * It goes into the shadow's own last <style> element if it has one.
+       * Adding an element to a shadow tree is not invisible: :first-child and
+       * :last-child stop matching what they matched. Appending the rules to a
+       * stylesheet that is already there adds no element at all, and because
+       * the rules have zero specificity the shadow's own rules still win. */
+      const adopted = root.adoptedStyleSheets;
+      if (adopted && adopted.length) {
+        const css = fallbackCss(shadowCtx.styles);
+        if (css) {
+          const own = template.content.querySelectorAll("style");
+          if (own.length) {
+            const last = own[own.length - 1];
+            last.appendChild(clone.ownerDocument.createTextNode("\n" + css));
+          } else {
+            const shadowStyle = makeFallbackSheet(clone.ownerDocument, shadowCtx.styles);
+            if (shadowStyle) template.content.appendChild(shadowStyle);
+          }
+        }
+      }
+      /* Light DOM is not rendered once a shadow root exists - unless the
+       * shadow root has a slot, in which case the light DOM is what the slot
+       * shows. Dropping it then blanks content the real page displays. The
+       * light children are kept alongside the template, and the browser does
+       * the slot assignment itself when it parses the declarative shadow
+       * root. */
+      const hasSlot = !!root.querySelector && !!root.querySelector("slot");
+      if (!hasSlot) while (clone.firstChild) clone.firstChild.remove();
       clone.appendChild(template);
       return;
     }
@@ -363,10 +620,14 @@
     walkChildren(orig, clone, ctx);
   }
 
-  function serialiseDocumentOf(doc, frameIds) {
+  // frameIds defaults because walk() reads it unconditionally, and this is
+  // exported on __rbInternals where a caller may not have one.
+  function serialiseDocumentOf(doc, frameIds = new Map()) {
     const clone = doc.documentElement.cloneNode(true);
     cleanClone(clone);
-    walk(doc.documentElement, clone, { frameIds });
+    const ctx = { frameIds, styles: new Map() };
+    walk(doc.documentElement, clone, ctx);
+    injectFallback(clone, ctx.styles);
     return { html: "<!DOCTYPE html>" + clone.outerHTML };
   }
 
@@ -375,11 +636,22 @@
     const template = document.createElement("template");
     template.content.appendChild(node.cloneNode(true));
     const clone = template.content.firstChild;
+    const ctx = { frameIds: new Map(), styles: new Map() };
     if (node.nodeType === 1) {
       if (!cleanClone(clone)) return null;
-      walk(node, clone, { frameIds: new Map() });
+      walk(node, clone, ctx);
     }
-    return { html: template.innerHTML };
+    return { html: template.innerHTML, styles: styleMap(ctx.styles) };
+  }
+
+  // The snapshot for added nodes travels with the op, so the mirror can add
+  // the matching fallback rules to the sheet for whichever root the node
+  // lands in.
+  function styleMap(styles) {
+    const out = {};
+    if (!styles) return out;
+    for (const [nid, css] of styles) if (css) out[nid] = css;
+    return out;
   }
 
   /* All of a node's children, with their sidecar. Used when a childList change
@@ -391,7 +663,7 @@
     const originals = Array.from(node.childNodes);
     for (const kid of originals) template.content.appendChild(kid.cloneNode(true));
     const clones = Array.from(template.content.childNodes);
-    const ctx = { frameIds: new Map() };
+    const ctx = { frameIds: new Map(), styles: new Map() };
     for (let i = 0; i < clones.length; i++) {
       const orig = originals[i];
       const cl = clones[i];
@@ -401,7 +673,7 @@
       if (!cleanClone(cl)) { cl.remove(); continue; }
       walk(orig, cl, ctx);
     }
-    return { html: template.innerHTML };
+    return { html: template.innerHTML, styles: styleMap(ctx.styles) };
   }
 
   // Frame elements found by the last collectFrames(), with their windowIds.
@@ -556,7 +828,7 @@
 
     for (const record of records) {
       if (record.type === "childList") {
-        const parentId = ensureId(record.target);
+        const parentId = addressOf(record.target);
         if (!parentId) continue;
         if (textParents.has(record.target)) continue;
         for (const removed of record.removedNodes) {
@@ -571,12 +843,14 @@
           // siblings cannot be addressed by id, so this can be off by a text
           // node - a resync clears that.
           const next = added.nodeType === 1 ? added.nextElementSibling : null;
-          ops.push({
+          const op = {
             op: "add",
             parent: parentId,
             html: made.html,
             before: next ? ensureId(next) : null,
-          });
+          };
+          if (made.styles && Object.keys(made.styles).length) op.styles = made.styles;
+          ops.push(op);
         }
       } else if (record.type === "attributes") {
         const id = ensureId(record.target);
@@ -607,10 +881,12 @@
     // Parents whose children include unaddressable text nodes are rewritten as
     // a unit, read from the live DOM at flush time so a burst costs one copy.
     for (const parent of textParents) {
-      const id = ensureId(parent);
+      const id = addressOf(parent);
       if (!id) continue;
       const made = serialiseChildren(parent);
-      ops.push({ op: "children", parent: id, html: made.html });
+      const cop = { op: "children", parent: id, html: made.html };
+      if (made.styles && Object.keys(made.styles).length) cop.styles = made.styles;
+      ops.push(cop);
     }
 
     scanShadowRoots(addedElements);

@@ -17,6 +17,9 @@
   const mirror = document.getElementById("mirror");
   const WIN_ID = "data-rb-frame";
   const NID = "data-rb-nid";
+  const CANVAS_ATTR = "data-rb-canvas";
+  const FALLBACK_ATTR = "data-rb-fallback";
+  const SHADOW_SUFFIX = "/shadow";
 
   // windowId -> { doc, ids: Map<nodeId, Node> }
   const frames = new Map();
@@ -30,10 +33,102 @@
    * into explicitly. */
   function adopt(root, map) {
     if (!root) return;
-    for (const el of root.querySelectorAll("[" + NID + "]")) map.set(el.getAttribute(NID), el);
     for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot) adopt(el.shadowRoot, map);
+      const nid = el.getAttribute(NID);
+      if (nid) map.set(nid, el);
+      if (el.shadowRoot) {
+        // A shadow root is addressed by the host's id, so both sides work
+        // out the same address without a side channel.
+        if (nid) map.set(nid + SHADOW_SUFFIX, el.shadowRoot);
+        adopt(el.shadowRoot, map);
+      }
     }
+  }
+
+  /* A canvas keeps its picture in pixels, so a cloned <canvas> is an empty
+   * box. The capture ships the picture as a data URL and the mirror puts the
+   * pixels back. The attribute is taken off once it has been used, so a later
+   * scan only finds canvases that have not been painted yet.
+   *
+   * The mirror runs in a sandbox without allow-scripts, so the captured
+   * page's scripts never run. Chromium also hides a canvas's intrinsic size
+   * there, which leaves an inline canvas with no box at all - the specified
+   * width is ignored, because without an intrinsic size it is not a replaced
+   * element any more. Making it an inline-block gives it a box, and the
+   * snapshot's width and height then apply. */
+  function prepareCanvases(root) {
+    if (!root || !root.querySelectorAll) return;
+    for (const canvas of root.querySelectorAll("canvas")) {
+      const url = canvas.getAttribute(CANVAS_ATTR);
+      if (url) {
+        canvas.removeAttribute(CANVAS_ATTR);
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const ctx = canvas.getContext("2d");
+            if (!ctx) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+          } catch (e) {}
+        };
+        img.onerror = () => {};
+        img.src = url;
+      }
+      const view = canvas.ownerDocument && canvas.ownerDocument.defaultView;
+      if (!view) continue;
+      let display = "";
+      try { display = view.getComputedStyle(canvas).display; } catch (e) { continue; }
+      if (display === "inline") canvas.style.display = "inline-block";
+    }
+  }
+
+  /* The captured stylesheet carries the page's own CSS. Alongside it the
+   * agent ships a snapshot of every element's resolved styles as rules of
+   * zero specificity, so the page's CSS decides and the snapshot only fills
+   * in what could not be loaded. When new nodes arrive later their snapshot
+   * rules have to be added to the sheet for the root they land in - a
+   * document sheet does not reach into a shadow tree, so the sheet is chosen
+   * by the parent's own root. */
+  function fallbackSheetFor(node) {
+    const root = node && node.getRootNode ? node.getRootNode() : null;
+    const scope = root && root.querySelectorAll ? root : (node ? node.ownerDocument : null);
+    if (!scope) return null;
+    if (scope !== scope.ownerDocument) {
+      // A shadow root's own stylesheet, if it has one. Adding an element to a
+      // shadow tree is not invisible - :first-child and :last-child stop
+      // matching what they matched - so the rules go into a stylesheet that
+      // is already there.
+      const own = scope.querySelectorAll("style");
+      if (own.length) return own[own.length - 1];
+      const style = scope.createElement("style");
+      style.setAttribute(FALLBACK_ATTR, "");
+      scope.appendChild(style);
+      return style;
+    }
+    const existing = scope.querySelector("style[" + FALLBACK_ATTR + "]");
+    if (existing) return existing;
+    const style = scope.createElement("style");
+    style.setAttribute(FALLBACK_ATTR, "");
+    const head = scope.head || scope.documentElement;
+    if (!head) return null;
+    head.appendChild(style);
+    return style;
+  }
+
+  function applyStyles(node, styles) {
+    if (!styles) return;
+    const ids = Object.keys(styles);
+    if (!ids.length) return;
+    let css = "";
+    for (const id of ids) {
+      const text = styles[id];
+      if (!text) continue;
+      css += ':where([' + NID + '="' + id + '"]){' + text + "}\n";
+    }
+    if (!css) return;
+    const sheet = fallbackSheetFor(node);
+    if (!sheet) return;
+    sheet.appendChild(sheet.ownerDocument.createTextNode(css));
   }
 
   // --------------------------------------------------------------- ops
@@ -46,9 +141,11 @@
         const template = doc.createElement("template");
         template.innerHTML = op.html;
         adopt(template.content, ids);
+        prepareCanvases(template.content);
         const before = op.before ? ids.get(op.before) : null;
         if (before && before.parentNode === parent) parent.insertBefore(template.content, before);
         else parent.appendChild(template.content);
+        applyStyles(parent, op.styles);
 
       } else if (op.op === "rm") {
         const node = ids.get(op.id);
@@ -69,8 +166,10 @@
         const template = doc.createElement("template");
         template.innerHTML = op.html;
         adopt(template.content, ids);
+        prepareCanvases(template.content);
         while (parent.firstChild) parent.removeChild(parent.firstChild);
         parent.appendChild(template.content);
+        applyStyles(parent, op.styles);
 
       } else if (op.op === "text") {
         const parent = ids.get(op.parent);
@@ -121,6 +220,7 @@
       if (!el.contentDocument) return;
       const fmap = new Map();
       adopt(el.contentDocument, fmap);
+      prepareCanvases(el.contentDocument);
       frames.set(frame.windowId, { doc: el.contentDocument, ids: fmap });
       wireInput(el.contentDocument);
     };
@@ -146,6 +246,7 @@
       if (!doc) return;
       const rootMap = new Map();
       adopt(doc, rootMap);
+      prepareCanvases(doc);
       frames.set("0", { doc, ids: rootMap });
       wireInput(doc);
       // Tell the outer page it can drop its loading state now.

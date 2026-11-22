@@ -90,16 +90,54 @@ observed, so components that re-render stay in sync.
 not have the original's base URI, and a leftover `<base href="/">` silently
 points every relative URL at localhost.
 
-**Resolved styles are inlined.** The mirror's styling would otherwise depend
-entirely on `/res` fetching the site's stylesheets, and that fails silently the
-moment a sheet is CORS-blocked, session-scoped or redirected — leaving bare
-markup with no explanation. Each element carries its computed style instead, so
-the page looks right whether or not any of that arrives. A curated list of ~85
-properties is used rather than all 300+: PhantomStream found iterating
-everything cost 45 s on a heavy page. No-op values (`auto`, `none`, `normal`,
-`0px`) and inherited values the parent already carries are dropped, which takes
-an element from ~1.3 KB to ~200 bytes. `url()`s inside the resolved text are
-proxied like any other.
+**Resolved styles travel as a fallback stylesheet, not as inline styles.**
+The mirror's styling would otherwise depend entirely on `/res` fetching the
+site's stylesheets, and that fails silently the moment a sheet is CORS-blocked,
+session-scoped or redirected — leaving bare markup with no explanation. So every
+element's computed style is captured too.
+
+It is delivered as `:where([data-rb-nid="n7"]){…}` rules — **zero
+specificity** — in a stylesheet of the mirror's own, rather than as an inline
+`style` attribute. That distinction is the whole thing. An inline style beats
+every stylesheet rule, so a mirror built on inline styles is frozen: the page
+toggles a class, the mirror takes the attribute op, and the snapshot's colour
+and size still win, so the page looks correct and stale. A `:where()` rule
+loses to every rule the page's own CSS has, so the page's CSS decides and the
+snapshot only fills in what could not be loaded.
+
+It also leaves the element's own `style` attribute alone. The snapshot used to
+overwrite it.
+
+A curated list of ~85 properties is used rather than all 300+: PhantomStream
+found iterating everything cost 45 s on a heavy page. The values that mean
+"nothing was set" are dropped — but the list of them is read off the browser's
+own defaults rather than written by hand, because a hand-written list is wrong
+in ways nobody can see: `flex-grow`, `flex-shrink`, `order`, `outline-width`
+and four border colours were leaking onto every element on the page, which is
+most of the capture and says nothing. An element's width and height are not
+captured when it is a flex or grid item: those numbers are the layout's
+answer, and pinning them changes the base size and lays the row out
+differently. `url()`s inside the resolved text are proxied like any other.
+
+**Canvases keep their picture.** A `<canvas>` holds pixels, not markup, so a
+clone of one is an empty box. The capture ships the picture as a data URL and
+the mirror draws it back. In the mirror's sandbox — no `allow-scripts`, so the
+captured page's scripts never run — Chromium hides a canvas's intrinsic size,
+which leaves an inline canvas with no box at all; the mirror makes it an
+inline-block so the captured width and height apply.
+
+**A shadow root is addressable.** Mutations inside one used to be dropped
+silently, because a shadow root is not an element and had no id to address. It
+is addressed now by the host's id plus `/shadow`, which both sides can work
+out from the ids already in the document. A shadow root's snapshot goes into
+the shadow's own last `<style>` element if it has one, rather than into a new
+element: an extra element in a shadow tree is not invisible, because
+`:first-child` and `:last-child` stop matching what they matched.
+
+**Light DOM shown through a slot is kept.** The light children of a shadow
+host are not rendered once a shadow root exists — unless the shadow root has a
+slot, in which case the light DOM is what the slot shows. Dropping it then
+blanks content the real page displays.
 
 **Resources** are the other deliberate divergence. SingleFile inlines everything
 as `data:` URIs because it produces a file; this produces a live stream, so
@@ -144,6 +182,15 @@ differential test that captures in one document, rebuilds in a second, and
 applies the ops using the applier lifted out of the shipped `view.html` rather
 than a copy of it. `test_telemetry.py` and `test_res_cache.py` cover the server.
 
+`test_fidelity.py` is the one that asks whether the mirror looks like the
+page. It captures a realistic page with the real agent, rebuilds it in a
+second real browser through the real `view.html`, and compares the two:
+which elements survived, what the computed styles are, where the boxes ended
+up, what the form controls are holding, whether the canvas still has its
+picture, and whether a class the live page toggles changes the mirror. It is
+the suite that would have caught the frozen mirror, and it is the reason the
+other suites being green did not mean the mirror was right.
+
 **jsdom is not a browser.** It has no layout, no style resolution, no
 shadow-DOM parser, and it is more permissive than Chromium about how built-in
 methods are called. Two suites therefore run against a real Chromium and skip
@@ -159,6 +206,10 @@ cleanly when none is installed:
   `ctx.request.get`, that `url()`s in a real stylesheet are rewritten (quoted
   and unquoted), that the cache serves rewritten bytes, that `<base>` does not
   leak into the mirror, and that the mirrored `url()` serves the real image.
+- `test_fidelity.py` — captures a realistic page with the real agent, rebuilds
+  it in a second real browser through the real `view.html`, and compares the
+  two: elements, computed styles, geometry, form state, the canvas's picture,
+  the shadow root's content, and a class the live page toggles.
 - `test_server_flow.py` — runs `start()` itself, the function `/` triggers.
   Substitutes only a headless context (a visible window needs a display) and a
   route handler answering `icloud.com` (no outbound access here);
@@ -183,6 +234,11 @@ CHROME_PATH="/path/to/chrome" npm test
 After `python -m playwright install chromium` they are found automatically.
 
 The suites are not decorative. Each was mutation-checked rather than trusted:
+putting the snapshot back on the element as an inline style, reading the
+browser's defaults from a hand-written list, capturing the canvas's pixels or
+not, addressing a shadow root or not, dropping the snapshot from an op, or
+leaving the light DOM out of a shadow host each makes the matching assertion
+in `test_fidelity.py` fail.
 removing the `shadowrootmode` attribute, the text-node childList guard, the CSS
 `url()` rewrite, the `<base>` filter, the mis-indexed-`text` refusal, the
 `broadcast` of mutation ops, or the coordinates in `/click` each makes the
