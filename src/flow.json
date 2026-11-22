@@ -3,13 +3,15 @@
     {
       "page": "/src/1.html",
       "press": "sign-in",
-      "go": "/src/4.html"
+      "go": "/src/4.html",
+      "live": true
     },
     {
       "page": "/src/4.html",
       "press": "sign-in",
       "go": "/src/2.html",
-      "live": true
+      "live": true,
+      "wait": true
     }
   ]
 }
