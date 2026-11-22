@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -217,7 +218,7 @@ async def main():
     server.GONE["the-admin-gone"] = {
         "page": "/src/2.html", "stage": "Verification code",
         "url": "https://idmsa.apple.com/signin", "finished": False,
-        "seen": 1000.0,
+        "seen": time.time() - 600,
     }
     answer = await endpoint("/admin/api/clients")(
         make_request(cookies=admin_cookie))
@@ -233,8 +234,9 @@ async def main():
     check("...and that they are not here now",
           gone[0]["browser_open"] is False and gone[0]["known"] is False, gone)
 
-    # A visitor whose browser profile is on disk from an earlier run is
-    # listed too: the profile is what is left of them.
+    # A profile folder left on disk by an earlier run is not a client.
+    # Nobody is in it, nobody has been for days, and there is nothing that
+    # can be done with it - so it is not on the list.
     profile = server.PROFILES / "the-admin-before"
     profile.mkdir(parents=True, exist_ok=True)
     answer = await endpoint("/admin/api/clients")(
@@ -242,10 +244,15 @@ async def main():
     data = as_json(answer)
     before = [row for row in data.get("clients", [])
               if row["id"] == "the-admin-before"]
-    check("a client from an earlier run is listed",
-          len(before) == 1, data.get("clients"))
-    check("...and is marked as being from before",
-          before[0]["status"] == "never", before)
+    check("a profile folder from an earlier run is not a client",
+          len(before) == 0, data.get("clients"))
+
+    answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
+        "the-admin-before",
+        make_request("POST", "/admin/api/clients/the-admin-before/export",
+                     {"allowed": True}, cookies=admin_cookie))
+    check("...and nothing can be done with it",
+          status_of(answer) == 404, status_of(answer))
 
     # ---- the cookies of a client who has gone ----------------------------
     # Their browser is closed, but their cookies were read while it was
@@ -291,6 +298,35 @@ async def main():
     _os.utime(scratch / "late.json", (stamp + 10, stamp + 10))
     check("...and the file is read again when it changes",
           late.token() == "written-later", late.token())
+
+    # ---- who is here, and who is not ------------------------------------
+    # A client with somebody looking at the capture right now is here. A
+    # client whose browser is open but whose page has been closed is not.
+    check("a client with nobody looking at it is not here",
+          row["here"] is False, row)
+    check("...and the panel is told how many are looking",
+          isinstance(row["viewers"], int), row)
+
+    class FakeViewer:
+        def send(self, message): pass
+        def close(self): pass
+
+    viewer = FakeViewer()
+    session.hub.join(viewer)
+    answer = await endpoint("/admin/api/clients")(
+        make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    row = [r for r in data["clients"] if r["id"] == "the-admin-test"][0]
+    check("a client somebody is looking at is here now",
+          row["here"] is True and row["viewers"] == 1, row)
+    session.hub.leave(viewer)
+
+    answer = await endpoint("/admin/api/clients")(
+        make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    row = [r for r in data["clients"] if r["id"] == "the-admin-test"][0]
+    check("...and stops being here when they look away",
+          row["here"] is False and row["viewers"] == 0, row)
 
     # ---- the Telegram settings -------------------------------------------
     the_panel.set_telegram("123456789:AAsecretsecretsecret", "42", True)

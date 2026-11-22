@@ -927,6 +927,9 @@ class Hub:
         self.browser: dict = {"url": "", "title": "", "fields": {}}
         # Has this visitor finished? Then the captures are closed to them.
         self.finished = False
+        # The session this hub belongs to. It is what the hub tells when
+        # the person is here.
+        self.session = None
 
     def snapshot(self) -> dict:
         # A copy: the message sits in a queue, and a navigation in the meantime
@@ -939,6 +942,8 @@ class Hub:
 
     def join(self, viewer: Viewer) -> None:
         self.viewers.add(viewer)
+        if self.session is not None:
+            self.session.touch()
         viewer.send(self.snapshot())
         # Where the browser is, so a viewer that joins late is looking at the
         # same session the others are.
@@ -1000,6 +1005,13 @@ class Hub:
             return
 
         kind = message.get("t")
+
+        # Anything the page says is the person doing something. This is
+        # what keeps a session alive while somebody is working in it, and
+        # it is the opposite of the server's own polling, which is not the
+        # person being here at all.
+        if session is not None:
+            session.touch()
 
         if kind == "hello":
             # A viewer that has just loaded asks what it should be showing.
@@ -1258,6 +1270,7 @@ class Session:
         self.id = sid
         self.bridge = live.Bridge()
         self.hub = Hub()
+        self.hub.session = self
         self.pw = None
         self.ctx = None
         self.page = None
@@ -1381,14 +1394,26 @@ def session_for(sid: str | None) -> Session:
     if session is None:
         session = Session(sid)
         SESSIONS[sid] = session
-        log(f"new session {sid}")
-        admin.note("connected", session=sid)
+        # A client who comes back is here, not gone: the record of their
+        # last visit is dropped, so the panel does not say they have left
+        # while they are sitting right there.
+        back = GONE.pop(sid, None) is not None
+        if back:
+            log(f"session {sid} is back")
+            admin.note("back", session=sid)
+        else:
+            log(f"new session {sid}")
+            admin.note("connected", session=sid)
         # A note to Telegram, in the background: the person connecting must
         # not wait for Telegram, and Telegram being down must not break the
         # app. Nothing is sent - and nothing is started - when there is
         # nowhere to send it.
+        #
+        # A client who is coming back is not a new client, and the operator
+        # has already been told about them.
         settings = admin.STORE.telegram()
-        if settings["enabled"] and settings["token"] and settings["chat_id"]:
+        if (not back and settings["enabled"]
+                and settings["token"] and settings["chat_id"]):
             spawn(notify_new_client(sid))
 
     session.touch()
@@ -1396,8 +1421,18 @@ def session_for(sid: str | None) -> Session:
 
 
 async def close_idle_sessions() -> None:
-    """Shut the browsers of the visitors who have gone away."""
+    """Shut the browsers of the visitors who have gone away.
+
+    Somebody is here while their capture is open - while the page is
+    talking to the server. A browser with nobody watching it is left
+    running for a while, and then closed, and the client is remembered as
+    one who has gone rather than one who is still working.
+    """
     for sid, session in list(SESSIONS.items()):
+        if session.hub.viewers:
+            # Somebody is looking at the capture right now.
+            session.touch()
+            continue
         if time.monotonic() - session.seen < SESSION_IDLE_SECONDS:
             continue
         log(f"session {sid} has gone away - closing its browser")
@@ -1407,6 +1442,7 @@ async def close_idle_sessions() -> None:
             "page": session.hub.page,
             "stage": admin.stage_of(session),
             "url": (session.hub.browser or {}).get("url", ""),
+            "title": (session.hub.browser or {}).get("title", ""),
             "finished": bool(session.hub.finished),
             "seen": time.time(),
         }
@@ -1560,8 +1596,12 @@ async def poll_browser(session: "Session") -> None:
     The capture is a copy of a moment; the browser is the session. This is
     what puts the session back into the copy: where the browser is, what it
     is called, and what its fields hold.
+
+    This does not count as the visitor being here. The server asking the
+    browser a question is not the person doing something, and a session
+    that counts the server's own questions as the visitor's presence is a
+    session that is never idle, and a browser that is never closed.
     """
-    session.touch()
 
     # The values and presses that had nowhere to go yet are tried again
     # first: the sign-in widget is a frame Apple loads a second or two

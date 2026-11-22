@@ -63,11 +63,25 @@ what each one's browser is doing, the step it is on, and how long ago it was
 seen — and it refreshes every two seconds. Nothing in it is made up: it is
 the same `SESSIONS` the app itself works with.
 
-**The clients who have gone** are on the list too. A visitor whose browser
-has been shut down is still a visitor: the panel says they have gone, where
-they got to, and when they were last here. So are the visitors whose
-browser profile is on disk from an earlier run — they are marked *before*.
-The list says how many are here now and how many were before.
+**Who is here, and who has gone.** A client whose capture page is open right
+now is **here now** — the row says so, says how many people are looking at
+it, and is marked. A client whose browser is open but whose page has been
+closed is **open**. A client whose browser has been shut down is **gone**:
+the panel still says where they got to, and when they were last here.
+
+A client is somebody who connected. A profile folder left on disk by an
+earlier run of the server is *not* a client — nobody is in it, nobody has
+been for days, and there is nothing that can be done with it — so it is not
+on the list, and nothing can be asked of it.
+
+**Presence is the person's, not the server's.** The server asks the browser
+a question every half second, and that does not count as the visitor being
+here: a session that counts the server's own polling as the visitor's
+presence is a session that is never idle, and a browser that is never
+closed. What counts is the page talking to the server — a person typing, a
+person clicking, a page open — and a client with nobody watching is closed
+after the idle time and remembered as one who has gone. A client who comes
+back is here again, not gone.
 
 **The panel says why it is empty.** A refused answer used to look exactly
 like a room with nobody in it: the counters stayed at zero and the table
