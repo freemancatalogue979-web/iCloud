@@ -19,3 +19,6 @@ storage_state.json
 
 # Local config / secrets — the app must never be given Apple ID credentials
 .env
+
+# Node (tests only)
+node_modules/

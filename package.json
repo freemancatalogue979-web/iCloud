@@ -1,0 +1,11 @@
+{
+  "name": "icloud-mirror-tests",
+  "private": true,
+  "description": "jsdom harness for agent.js and view.html. Not needed to run the app.",
+  "scripts": {
+    "test": "node tests/run.js"
+  },
+  "devDependencies": {
+    "jsdom": "^31.0.1"
+  }
+}

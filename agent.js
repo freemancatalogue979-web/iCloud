@@ -172,7 +172,11 @@
     "border-left-width", "border-top-style", "border-right-style",
     "border-bottom-style", "border-left-style", "border-top-color",
     "border-right-color", "border-bottom-color", "border-left-color",
-    "border-radius", "box-shadow", "outline",
+    "border-radius", "box-shadow",
+    // outline needs its longhands too: the shorthand alone can serialise with
+    // a visible width and colour while outline-style:none is what suppresses
+    // it, which would box every element on the page.
+    "outline", "outline-style", "outline-width", "outline-color",
     "font-family", "font-size", "font-weight", "font-style", "line-height",
     "letter-spacing", "word-spacing", "text-align", "text-decoration",
     "text-transform", "text-indent", "text-overflow", "white-space",

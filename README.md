@@ -115,6 +115,25 @@ which reaches the same conclusions from the same problem — including its
 documented bug where gating the childList branch on element nodes silently
 drops `textContent =` edits, reproduced and fixed here as the `children` op.
 
+## Tests
+
+```bash
+npm install   # once, pulls jsdom
+npm test
+```
+
+Four suites run `agent.js` and `view.html` inside a real DOM: serialisation,
+the frame-tree handshake over postMessage, inline SVG and web components, and a
+differential test that captures in one document, rebuilds in a second, and
+applies the ops using the applier lifted out of the shipped `view.html` rather
+than a copy of it.
+
+They exist because no browser can be installed in the development sandbox. Every
+serious bug here was found by jsdom, not by reasoning: text nodes being deleted
+from patches, `ShadowRoot.cloneNode()` throwing by spec, a lockstep walk
+iterating live `childNodes`, `event.source` being null, and the
+declarative-shadow-DOM template shifting an ordered id sidecar.
+
 ## Files
 
 - `server.py` — FastAPI: `/` `/start` `/status` `/view` `/res` `/ws` `/click` `/keys` `/key` `/shot.png`
