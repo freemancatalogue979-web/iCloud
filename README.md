@@ -587,7 +587,7 @@ document in `<iframe srcdoc="…">`, and that one is left untouched.
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
 
-## A light page, on a phone, in monospace
+## A light page, on a phone, in Montserrat
 
 Three things about a capture are not true of every screen it is shown on, and
 all of them are fixed by the engine at run time — never in the file:
@@ -619,23 +619,38 @@ again when the frame loads, when the page is resized, after a press, and after
 a message arrives under a field, because all of those change how tall the form
 is.
 
-**It is read in a monospace font.** One font for the whole page, the frames
+**It is read in Montserrat.** One font for the whole page, the frames
 included, and said with `!important` on every element rather than left to
 inherit: Apple's stylesheet names a font on almost every element, and a font
-named on the element itself is not inherited over. The stack is the machine's
-own — `ui-monospace`, SF Mono, Menlo, Consolas, Liberation Mono, DejaVu Sans
-Mono — and not a file to download, because a font that does not arrive is a
-page that falls back to something nobody chose. Nothing here is a glyph that
-stops being a glyph: the capture has no icon font of its own, its symbols are
-SVG and images.
+named on the element itself is not inherited over.
+
+The font is served by this app from `/fonts/`, declared by the engine right
+next to the rule that uses it, and **not** fetched from a font house: a page
+that asks somebody else for its font is a page that looks broken wherever that
+somebody cannot be reached, and this app is meant to run on a machine that may
+have no network at all. It is one variable file
+(`fonts/montserrat-latin.woff2`, weights 100–900), so one request covers the
+headings, the body, the buttons and the six code boxes alike. The licence sits
+beside it: SIL Open Font License 1.1, `fonts/OFL-Montserrat.txt`.
+
+The stack behind it is `"Helvetica Neue", Helvetica, Arial, sans-serif` — what
+is used while the font is still arriving, or on a machine that will not take
+it. Nothing here is a glyph that stops being a glyph: the capture has no icon
+font of its own, its symbols are SVG and images.
 
 All of it, in one place — the stylesheet the engine adds to every document it
 can reach, and nothing else:
 
 ```css
+@font-face {
+  font-family: "Montserrat";
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/montserrat-latin.woff2") format("woff2");
+}
 html, body, body * {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono",
-               "DejaVu Sans Mono", monospace !important;
+  font-family: "Montserrat", "Helvetica Neue", Helvetica, Arial, sans-serif
+               !important;
 }
 body { overflow-x: hidden !important; }
 iframe, frame { display: block !important; width: 100% !important; }
@@ -1142,7 +1157,8 @@ the project virtualenv by itself.
   the settings it keeps (`admin.json`, a secret file, in `.gitignore`), and
   the cookies of the clients who signed in (`cookies/`, also ignored)
 - `telegram.py` — the Telegram notifier
-- `fonts/` — Space Grotesk, served by the app (SIL Open Font License 1.1)
+- `fonts/` — Space Grotesk for the panel and Montserrat for the captures,
+  both served by the app (SIL Open Font License 1.1)
 - `run.bat` — Windows launcher
 - `run.sh` — Linux (and macOS) launcher: sets up `.venv`, installs the
   requirements and Chromium, sets `ICLOUD_ADMIN_TOKEN`, says what the machine

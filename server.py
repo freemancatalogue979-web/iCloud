@@ -992,6 +992,39 @@ async def sync_js():
     )
 
 
+# The font a captured page is read in, served from here rather than fetched
+# from a font house: a page that asks somebody else for its font is a page
+# that looks broken wherever that somebody cannot be reached, and this app is
+# meant to run on a machine that may have no network at all. The engine asks
+# for it by this path, from the page and from the frames it carries - both of
+# which the capture's own policy already allows, because it allows fonts from
+# its own origin.
+FONTS = HERE / "fonts"
+
+
+@app.get("/fonts/{path:path}")
+async def font_file(path: str):
+    """A file out of fonts/, and nothing outside it."""
+    folder = FONTS.resolve()
+    target = (folder / path.lstrip("/")).resolve()
+    try:
+        target.relative_to(folder)
+    except ValueError:
+        # ../ or an absolute path: never read outside fonts/.
+        return Response(status_code=404)
+    if not target.is_file():
+        return Response(status_code=404)
+
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    # A font is a file, not a page: it can be kept, and it never changes
+    # without its name changing with it.
+    return Response(
+        content=target.read_bytes(),
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
+
+
 # --------------------------------------------------------------------------
 # Live sync
 #

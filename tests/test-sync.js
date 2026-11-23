@@ -592,18 +592,29 @@ class FakeSocket {
     themedDoc.querySelector('style[data-icloud="fits"]') &&
       themedDoc.querySelector('style[data-icloud="fits"]').textContent);
 
-  // The page is read in a monospace font - one the machine has, not one to
-  // download - and a font named on the element itself is not inherited over,
-  // so it is said with !important for every element in every document.
+  // The page is read in Montserrat, served by this app, and a font named on
+  // the element itself is not inherited over - so it is said with !important
+  // for every element in every document.
   const saidFont = themedWin.getComputedStyle(themedDoc.getElementById("said"))
     .fontFamily || "";
   const codeFont = themedWin.getComputedStyle(themedDoc.getElementById("code"))
     .fontFamily || "";
-  check("the page is read in a monospace font",
-    /monospace/i.test(saidFont) && saidFont === codeFont,
+  check("the page is read in Montserrat",
+    /^"?Montserrat"?/.test(saidFont) && saidFont === codeFont,
     [saidFont, codeFont]);
   check("...and it beats the font the capture names on the element",
     saidFont.indexOf("SF Pro Display") < 0, saidFont);
+
+  // The font is declared from here and served from here: a page that asks a
+  // font house for its font looks broken wherever that house cannot be
+  // reached.
+  const fitsText = themedDoc.querySelector('style[data-icloud="fits"]')
+    .textContent;
+  check("...from the app's own copy of the font",
+    fitsText.indexOf("/fonts/montserrat-latin.woff2") >= 0 &&
+    fitsText.indexOf("@font-face") >= 0, fitsText.split("\n").slice(0, 8).join(" | "));
+  check("...at every weight the capture asks for",
+    fitsText.indexOf("font-weight: 100 900") >= 0, fitsText);
 
   // A stylesheet from somewhere else cannot be read, let alone rewritten:
   // the engine leaves it alone and carries on.

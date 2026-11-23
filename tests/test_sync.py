@@ -377,6 +377,28 @@ async def main():
     engine = await server.sync_js()
     check("/sync.js serves the engine", str(engine.path).endswith("sync.js"), engine.path)
 
+    # ---- the font the captures are read in -------------------------------
+    # It is served from here and not fetched from a font house, so a machine
+    # with no network still shows the page in the font it was meant to be
+    # read in.
+    font = await server.font_file("montserrat-latin.woff2")
+    check("/fonts/ serves the font", font.status_code == 200, font.status_code)
+    check("...as a font, and not as a page",
+          font.media_type == "font/woff2", font.media_type)
+    check("...with the bytes of a woff2 in it",
+          font.body[:4] == b"wOF2" and len(font.body) > 10000, len(font.body))
+    check("...and it can be kept",
+          "max-age" in font.headers.get("cache-control", ""),
+          font.headers.get("cache-control"))
+
+    nowhere = await server.font_file("no-such-font.woff2")
+    check("a font that is not there is not a file to read",
+          nowhere.status_code == 404, nowhere.status_code)
+
+    outside = await server.font_file("../server.py")
+    check("...and fonts/ is not a way into the rest of the app",
+          outside.status_code == 404, outside.status_code)
+
     # ---- the hub is the shared state -------------------------------------
     session = server.session_for('the-tests')
     session.hub = server.Hub()

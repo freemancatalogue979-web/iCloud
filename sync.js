@@ -1034,28 +1034,42 @@
     return removed;
   }
 
-  // The font the page is read in. A monospace stack from the machine it is
-  // shown on, rather than a file to download: the app is served from a server
-  // that may have no network, and a web font that does not arrive is a page
-  // that falls back to something nobody chose. Every one of these is present
-  // on macOS, on Windows and on Linux, in that order of preference.
-  var MONO = [
-    "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
-    "Liberation Mono", "DejaVu Sans Mono", "Courier New", "monospace"
-  ].map(function (name) {
-    return name.indexOf(" ") >= 0 ? '"' + name + '"' : name;
-  }).join(", ");
+  // The font the page is read in: Montserrat, served by this app from
+  // /fonts/ and declared right here. Served, not fetched from a font house -
+  // a page that asks a font house for its font is a page that looks broken
+  // wherever that font house cannot be reached, and this app is meant to run
+  // on a machine that may have no network at all. The licence sits next to
+  // the font (SIL Open Font License 1.1, fonts/OFL-Montserrat.txt).
+  //
+  // The face is one variable file, so one file covers every weight the
+  // capture asks for - the headings, the body, the buttons.
+  var FACE = [
+    "@font-face {",
+    '  font-family: "Montserrat";',
+    "  font-style: normal;",
+    "  font-weight: 100 900;",
+    "  font-display: swap;",
+    '  src: url("/fonts/montserrat-latin.woff2") format("woff2");',
+    "}"
+  ].join("\n");
+
+  // What is used when the font has not arrived - the first time a page is
+  // drawn, or a machine that will not take it. The page is readable in any of
+  // them; Montserrat is the one it is meant to be read in.
+  var FONT = ['"Montserrat"', '"Helvetica Neue"', "Helvetica", "Arial",
+              "sans-serif"].join(", ");
 
   // What the capture cannot know about the screen it is shown on. It is
   // deliberately short: the page is the page, and this is only what has to
   // be said for a phone - and the font it is read in.
   var FITS = [
+    FACE,
     // One font for the whole page, the frames included, and by !important
     // rather than by inheritance: Apple's stylesheet names a font on almost
     // every element, and a font named on the element itself is not inherited
     // over. The capture has no icon font of its own - its symbols are SVG and
     // images - so nothing here is a glyph that stops being a glyph.
-    "html, body, body * { font-family: " + MONO + " !important; }",
+    "html, body, body * { font-family: " + FONT + " !important; }",
     "body { overflow-x: hidden !important; }",
     "iframe, frame { display: block !important; width: 100% !important;",
     "  max-width: 100% !important; }",

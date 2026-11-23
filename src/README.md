@@ -37,7 +37,8 @@ The engine also puts three things right at run time, all of them for the screen
 the page is shown on rather than for the file: it takes the
 `@media (prefers-color-scheme: dark)` rules out of the page's stylesheet (a
 capture is a light page, and a phone is usually in dark mode), it reads the
-page in a monospace font (one the machine has, not one to download), and it
+page in Montserrat (served by the app itself, at `/fonts/`, so no font house has
+to be reachable), and it
 sizes the frame the sign-in form sits in to the form inside it — that frame was
 captured at a fixed 209px and told not to scroll, which is what cuts off
 *Resend code to iPhone* on a narrow screen. None of them touches these files.
