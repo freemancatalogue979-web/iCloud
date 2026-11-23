@@ -71,6 +71,30 @@ server already knows. If the secret is changed while a panel is open, that
 panel's line is closed and it says so, and it keeps trying: a secret that is
 put back does not need the panel reloaded.
 
+**The session manager.** `sessions.py` is the one place that knows which
+clients there are. Every client passes through it on the way in
+(`SessionManager.enter`) and on the way out (`SessionManager.retire`), and
+the panel subscribes to it (`SessionManager.subscribe`). So there is one
+answer to "who is here?" — the manager's own registry, which the app and
+the panel both read — and one place that says so.
+
+The manager publishes what happened, with the time it happened:
+
+* `connected` — a client arrived, and *when* they arrived;
+* `left` — a client has gone, and when;
+* `changed` — something about a client changed: the page they are on, the
+  browser they are driving, a page opened or closed.
+
+The panel is told by the manager, so it can say **when** a client connected
+rather than only that one is connected — the Connected column gives the clock
+time and how long ago that was. A client who has gone keeps the time they
+arrived, so the panel can still say when they were here.
+
+Because the manager is where a client arrives, the panel is told about a
+connection at once, and for the same reason a client retired by the idle
+sweep is now told about too — that was a hole: the panel kept showing a
+client who had already gone until something else happened.
+
 **Online and offline.** A client is a visitor, and a visitor's folder in
 `visitors/` is their browser's profile — it is there whether they are here
 or not.
@@ -745,6 +769,8 @@ the project virtualenv by itself.
 
 - `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
   and `/admin` (the control room, from `admin.py`)
+- `sessions.py` — the session manager: the clients the server has, when each
+  of them arrived, and the news the panel subscribes to
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
   and navigation, and talks to the browser through the server
 - `live.py` — the bridge to the browser the server opened: finds a control by

@@ -390,7 +390,7 @@
           <thead>
             <tr>
               <th>Client</th><th>Status</th><th>Stage</th><th>Progress</th>
-              <th>Browser</th><th>Last activity</th><th>Cookies</th>
+              <th>Browser</th><th>Connected</th><th>Last activity</th><th>Cookies</th>
             </tr>
           </thead>
           <tbody id="clients-body"></tbody>
@@ -624,10 +624,28 @@
     return '<div class="bar"><i style="width:' + width + '%"></i></div>';
   }
 
+  /* When this client connected, and how long ago that was.
+
+   * The panel is told when a client arrives, so it can say the time and
+   * not merely that somebody is here. A client whose browser is shut down
+   * still remembers when they were last here.
+   */
+  function connectedCell(row) {
+    if (!row.connected_at) {
+      if (row.status === "offline") {
+        return '<span class="mono">—</span>' +
+          '<div class="sub">not here yet</div>';
+      }
+      return '<span class="mono">—</span>';
+    }
+    return '<span class="mono">' + escape(when(row.connected_at)) + "</span>" +
+      '<div class="sub">' + escape(ago(row.connected_seconds || 0)) + "</div>";
+  }
+
   function drawClients() {
     var body = $("clients-body");
     if (!state.clients.length) {
-      body.innerHTML = '<tr><td colspan="7"><div class="empty">' +
+      body.innerHTML = '<tr><td colspan="8"><div class="empty">' +
         "Nobody has come here since the server started. The clients show up " +
         "as soon as the first person opens the app.</div></td></tr>";
     } else {
@@ -638,13 +656,14 @@
           '<td><span class="id">' + escape(row.id) + "</span></td>" +
           "<td>" + statusPill(row) +
           (row.viewers ? '<div class="sub">' + row.viewers +
-            (row.viewers === 1 ? " person" : " people") + " here</div>" : "") +
+            (row.viewers === 1 ? " tab open" : " tabs open") + "</div>" : "") +
           "</td>" +
           "<td>" + escape(row.stage) +
           (row.error ? '<div class="err-line">' + escape(row.error) + "</div>" : "") +
           "</td>" +
           "<td>" + progress(row) + "</td>" +
           "<td>" + browserCell(row) + "</td>" +
+          "<td>" + connectedCell(row) + "</td>" +
           "<td>" + escape(ago(row.idle_seconds)) + "</td>" +
           "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
                                         : '<span class="pill">Closed</span>') + "</td>" +
@@ -765,6 +784,8 @@
       var data;
       try { data = JSON.parse(event.data); } catch (err) { return; }
       if (data.t === "state") showState(data);
+      else if (data.t === "client") showClient(data);
+      else if (data.t === "note") showNote(data);
     };
     socket.onclose = function (event) {
       // The line was refused (1008) or the server is not there. Either
@@ -821,6 +842,46 @@
     if (state.tab === "cookies") drawExports();
     $("last-seen").textContent = "live · " +
       new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  /* One client changed. The panel is told which one, and the row that goes
+   * with it, so it puts that row in its own list instead of asking the
+   * server for the whole list again.
+   */
+  function showClient(data) {
+    var row = data.client;
+    if (!row) return;
+    var found = null;
+    for (var i = 0; i < state.clients.length; i++) {
+      if (state.clients[i].id === row.id) { found = state.clients[i]; break; }
+    }
+    if (found) {
+      // Keep what the panel already knows about this client - when it
+      // arrived, for one - and take the rest from the server.
+      if (row.connected_at === undefined || row.connected_at === 0) {
+        row.connected_at = found.connected_at;
+        row.connected_seconds = found.connected_seconds;
+      }
+      state.clients[i] = row;
+    } else {
+      state.clients.push(row);
+    }
+    state.counts = countsOf(state.clients);
+    $("s-here").textContent = state.counts.here || 0;
+    $("s-total").textContent = state.counts.total || 0;
+    $("s-viewers").textContent = state.counts.viewers || 0;
+    $("s-finished").textContent = state.counts.finished || 0;
+    $("s-gone").textContent = state.counts.gone || 0;
+    drawClients();
+    if (state.tab === "cookies") drawExports();
+  }
+
+  /* Something happened, and it is worth saying. */
+  function showNote(data) {
+    if (!data.event) return;
+    state.events.unshift(data.event);
+    if (state.events.length > 40) state.events.length = 40;
+    drawEvents();
   }
 
   /* The counts are worked out here as well as on the server, so that the

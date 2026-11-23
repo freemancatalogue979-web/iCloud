@@ -15,7 +15,7 @@ what each one is doing, and where its browser is. It does not make anything
 up, and a session that has gone is still listed, so that the panel says what
 happened rather than what is happening.
 
-The panel listens. It opens one line to the server and the server pushes to
+The panel listens. It subscribes to the session manager and the manager tells
 it whenever something changes - a client connects, a client goes, a client
 moves to the next step, a browser shows something new. The panel does not
 ask the server the same question every two seconds to find out what it
@@ -32,7 +32,23 @@ from pathlib import Path
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
+import sessions
+from sessions import MANAGER, SESSION_ID, visitor_of
+
 HERE = Path(__file__).parent
+
+
+def __getattr__(name):
+    """Where each visitor's browser keeps its profile.
+
+    It lives in the session manager, so the server and the panel cannot
+    disagree about it. It is read through this, rather than copied, so both
+    always have the same folder in front of them.
+    """
+    if name == "PROFILES":
+        return sessions.PROFILES
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 # Where the settings live. The environment variable is for the secret only:
 # a secret in a file on disk is a secret in a repository.
@@ -191,9 +207,12 @@ STORE = Store()
 
 def note(event: str, **fields) -> None:
     """Something worth seeing in the panel."""
-    EVENTS.append({"at": time.time(), "event": event, **fields})
+    entry = {"at": time.time(), "event": event, **fields}
+    EVENTS.append(entry)
     del EVENTS[:-EVENT_LIMIT]
-    push()
+    # The panel is told that this happened, and nothing else: it already
+    # knows what the clients are, and it keeps its own copy up to date.
+    _tell({"t": "note", "event": entry})
 
 
 def push() -> None:
@@ -215,6 +234,22 @@ def push() -> None:
             LISTENERS.discard(listener)
             # 1008 is "this line is not allowed". The panel knows what to
             # say when it sees it.
+            listener.close(1008)
+            continue
+        try:
+            listener.put_nowait(message)
+        except Exception:
+            LISTENERS.discard(listener)
+
+
+def _tell(message: dict) -> None:
+    """Give one message to every panel that is listening."""
+    drop_stale_listeners()
+    expected = STORE.token()
+    for listener in list(LISTENERS):
+        if expected and listener.secret and \
+                not secrets.compare_digest(str(listener.secret), expected):
+            LISTENERS.discard(listener)
             listener.close(1008)
             continue
         try:
@@ -326,20 +361,74 @@ class PanelListener:
         """Close the line, and say why when it was not allowed."""
         self.task.cancel()
         try:
-            asyncio.ensure_future(self.websocket.close(code=code))
+            asyncio.ensure_future(self._close(code))
+        except Exception:
+            pass
+
+    async def _close(self, code: int) -> None:
+        """Close the line, quietly.
+
+        A line that is already closed says so when it is closed again, and
+        that "so" is an exception in a task nobody is waiting for. It is
+        not worth a page of traceback in the server's log: the panel has
+        gone, and that is all that happened.
+        """
+        try:
+            await self.websocket.close(code=code)
         except Exception:
             pass
 
 
-def _server():
-    """The server this panel watches.
+# --------------------------------------------------------------------------
+# The panel listens to the session manager
+# --------------------------------------------------------------------------
 
-    It is imported here and not at the top: the server is what mounts the
-    panel, so importing it while it is still being loaded would be asking
-    for a module that is not there yet.
+def _on_client_event(event: dict) -> None:
+    """The session manager said something about a client.
+
+    This is how the panel hears about it. The manager knows when a client
+    connects, when one goes and when one changes - and the panel is told
+    that, and no more, so it can say *when* a client connected instead of
+    working it out for itself from a list of rows.
     """
-    import server
-    return server
+    sid = event.get("id", "")
+    what = event.get("event", "")
+    if what == "connected":
+        # A client who comes back is here, not gone.
+        note("back" if event.get("returning") else "connected", session=sid)
+    elif what == "left":
+        note("gone", session=sid)
+    row = _row_for(sid)
+    if row is None:
+        return
+    # The row is sent with the event, so the panel can put it in its own
+    # list without asking for anything.
+    message = {"t": "client", "event": what, "id": sid,
+               "at": event.get("at", 0.0), "client": row}
+    _tell(message)
+
+
+def _row_for(sid: str) -> dict | None:
+    """What the panel shows of one client, whoever they are.
+
+    A client who is here, a client who has gone, or a client whose
+    profile is on disk: all of them are somebody the panel knows.
+    """
+    if not sid:
+        return None
+    session = MANAGER.sessions.get(sid)
+    if session is not None:
+        return client_row(session, STORE)
+    record = MANAGER.gone.get(sid)
+    if record is not None:
+        return gone_row(sid, record, STORE)
+    if SESSION_ID.match(sid) and (sessions.PROFILES / sid).is_dir():
+        return offline_row(sid, STORE)
+    return None
+
+
+# The panel subscribes once, and the manager tells it from then on.
+MANAGER.subscribe(_on_client_event)
 
 
 def stage_of(session) -> str:
@@ -362,6 +451,9 @@ def client_row(session, store: Store) -> dict:
     browser = session.hub.browser or {}
     browser_open = bool(session.state.get("browser_open"))
     viewers = len(session.hub.viewers)
+    # When this client's current stay began - the manager knows, because
+    # every client passes through it on the way in.
+    connected_at = MANAGER.connected_at(session.id)
     return {
         "id": session.id,
         # Online means the server is driving this client's browser right
@@ -382,6 +474,13 @@ def client_row(session, store: Store) -> dict:
         # the panel that a person is here, as opposed to a session that is
         # only still remembered.
         "here": viewers > 0,
+        # When they arrived, and how long ago that was. The panel shows
+        # this, so it can say when a client connected rather than only
+        # that one is connected.
+        "connected": True,
+        "connected_at": connected_at,
+        "connected_seconds": (round(max(0.0, time.time() - connected_at), 1)
+                               if connected_at else 0.0),
         "waiting": bool(session.waiting),
         "finished": bool(session.hub.finished),
         "idle_seconds": round(idle, 1),
@@ -400,6 +499,7 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
     """
     seen = record.get("seen")
     idle = max(0.0, time.time() - seen) if isinstance(seen, (int, float)) else 0.0
+    connected_at = record.get("arrived", 0.0)
     return {
         "id": sid,
         "online": False,
@@ -414,6 +514,12 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
         "viewers": 0,
         "waiting": False,
         "here": False,
+        # They were here, and this is when they arrived. They are not here
+        # now - but the panel can still say when it was.
+        "connected": False,
+        "connected_at": connected_at,
+        "connected_seconds": (round(max(0.0, time.time() - connected_at), 1)
+                               if connected_at else 0.0),
         "finished": bool(record.get("finished")) if record else False,
         "idle_seconds": round(idle, 1),
         "export_allowed": store.export_allowed(sid),
@@ -435,11 +541,11 @@ def every_client(store: Store) -> list[dict]:
 
     So both are listed, and the panel says which is which.
     """
-    server = _server()
-    rows = [client_row(session, store) for session in server.SESSIONS.values()]
+    rows = [client_row(session, store)
+            for session in MANAGER.sessions.values()]
 
     seen = {row["id"] for row in rows}
-    for sid, record in getattr(server, "GONE", {}).items():
+    for sid, record in MANAGER.gone.items():
         if sid not in seen:
             rows.append(gone_row(sid, record, store))
             seen.add(sid)
@@ -449,10 +555,10 @@ def every_client(store: Store) -> list[dict]:
     # their cookies are in that folder - so they are on the list, and the
     # panel can open their profile and read them.
     try:
-        for folder in sorted(server.PROFILES.iterdir()):
+        for folder in sorted(sessions.PROFILES.iterdir()):
             if not folder.is_dir() or folder.name in seen:
                 continue
-            if not server.SESSION_ID.match(folder.name):
+            if not SESSION_ID.match(folder.name):
                 continue
             rows.append(offline_row(folder.name, store))
             seen.add(folder.name)
@@ -480,8 +586,7 @@ def offline_row(sid: str, store: Store) -> dict:
     can open it and read them, and it is not open now, so the panel cannot
     say where their browser is - only what they got to last time.
     """
-    server = _server()
-    profile = server.PROFILES / sid
+    profile = sessions.PROFILES / sid
     return {
         "id": sid,
         "status": "offline",
@@ -496,6 +601,11 @@ def offline_row(sid: str, store: Store) -> dict:
         "waiting": False,
         "here": False,
         "online": False,
+        # They are not here now. Their profile is on disk, but this server
+        # has not seen them arrive, so there is no time to say.
+        "connected": False,
+        "connected_at": 0.0,
+        "connected_seconds": 0.0,
         "finished": False,
         "idle_seconds": 0.0,
         "export_allowed": store.export_allowed(sid),
@@ -549,7 +659,6 @@ def build_router() -> APIRouter:
 
     @router.post("/api/login")
     async def login(request: Request):
-        server = _server()
         body = await _body(request)
         given = str(body.get("token") or "")
         expected = STORE.token()
@@ -627,7 +736,6 @@ def build_router() -> APIRouter:
         finally:
             LISTENERS.discard(listener)
             listener.close()
-
     @router.get("/api/clients")
     async def clients(request: Request):
         store = STORE
@@ -718,9 +826,8 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
-        sid = server.visitor_of(request)
-        session = server.session_lookup(sid)
+        sid = visitor_of(request)
+        session = MANAGER.lookup(sid)
         if session is None:
             return _denied("this browser has no session of its own yet",
                            status=404)
@@ -738,15 +845,15 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
         if not known_client(sid):
             return _denied("there is no such client", status=404)
-        if not store.export_allowed(sid) and server.visitor_of(request) != sid:
+        if not store.export_allowed(sid) and visitor_of(request) != sid:
             return _denied("this client has not been allowed to be exported")
         cookies = await cookies_of(sid)
+        session = MANAGER.sessions.get(sid)
         return {"session": sid, "cookies": cookie_editor(cookies),
-                "online": bool(server.SESSIONS.get(sid)
-                               and server.SESSIONS[sid].state.get("browser_open"))}
+                "online": bool(session
+                               and session.state.get("browser_open"))}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):
@@ -808,14 +915,13 @@ async def cookies_of(sid: str) -> list[dict]:
     the record of that client, and are used when the folder cannot be
     opened - which is the case when the browser is still holding it.
     """
-    server = _server()
-    session = server.SESSIONS.get(sid)
+    session = MANAGER.sessions.get(sid)
     if session is not None:
         cookies = await _cookies_of(session)
         if cookies:
             return cookies
 
-    record = getattr(server, "GONE", {}).get(sid) or {}
+    record = MANAGER.gone.get(sid) or {}
     kept = record.get("cookies")
     if isinstance(kept, list) and kept:
         return kept
@@ -831,10 +937,9 @@ async def read_profile_cookies(sid: str) -> list[dict]:
     visitor's own browser uses, so the cookies in it are the cookies that
     browser had.
     """
-    server = _server()
-    if not server.SESSION_ID.match(sid or ""):
+    if not SESSION_ID.match(sid or ""):
         return []
-    folder = server.PROFILES / sid
+    folder = sessions.PROFILES / sid
     if not folder.is_dir():
         return []
 
@@ -871,9 +976,8 @@ def known_client(sid: str) -> bool:
     is something real to be done with it - their cookies can be read out
     of it.
     """
-    server = _server()
-    if sid in server.SESSIONS or sid in getattr(server, "GONE", {}):
+    if sid in MANAGER.sessions or sid in MANAGER.gone:
         return True
-    if not server.SESSION_ID.match(sid or ""):
+    if not SESSION_ID.match(sid or ""):
         return False
-    return (server.PROFILES / sid).is_dir()
+    return (sessions.PROFILES / sid).is_dir()
