@@ -587,6 +587,51 @@ document in `<iframe srcdoc="…">`, and that one is left untouched.
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
 
+## A light page, on a phone
+
+Two things about a capture are not true of every screen it is shown on, and
+both are fixed by the engine at run time — never in the file:
+
+**It is a light page.** Apple's stylesheet turns the page dark when the machine
+showing it is in dark mode, which a phone usually is. Rather than overriding
+one colour at a time, `sync.js` takes the dark rules out of the stylesheet
+itself — every `@media (prefers-color-scheme: dark)` block, in the page and in
+the frames it carries — so what is left is the page that was captured, with
+its own light palette and nothing fighting it. The document is also told
+`color-scheme: light`, so text boxes, dropdowns and the scrollbar are painted
+light too, and not just the page around them.
+
+The rules are removed, not the file: `src/` is exactly what was captured, and
+a reload of the server puts it back the way it was.
+
+**It fits a phone.** The sign-in form lives in a frame of a fixed height — the
+height Apple's page had when it was captured, 209px — and that frame was told
+not to scroll (`scrolling="no"`). Apple's own script grew the frame to fit its
+form; a copy with no Apple script behind it does not, so on a phone, where the
+same form needs more than 209px, the bottom of it is cut off. That is where
+**Resend code to iPhone** went on the verification-code page: it is in the
+markup, under the six boxes, and there was no way to reach it.
+
+So every frame the page carries is measured and sized to what is in it — the
+scroll height, and where the lowest thing in it really ends, which is what
+catches a container that says "100% tall" and hides the rest. It is measured
+again when the frame loads, when the page is resized, after a press, and after
+a message arrives under a field, because all of those change how tall the form
+is.
+
+```css
+/* and this much, for a phone, and nothing else: */
+body { overflow-x: hidden !important; }
+iframe, frame { display: block !important; width: 100% !important; }
+@media (max-width: 759px) {
+  .home-login-component .parent-container { width: 100% !important; }
+  .root-viewport { min-height: 100% !important; }
+}
+```
+
+A frame from another origin is not this page's business: it cannot be read, so
+it is neither re-coloured nor re-sized, and the engine carries on.
+
 ## The socket
 
 One socket per viewer at `/ws`, plus `POST /nav` for the beacon.

@@ -33,6 +33,14 @@ engine in it:
 No meta is rewritten, no script is stripped, and the file on disk is never
 written to.
 
+The engine also puts two things right at run time, both of them for the screen
+the page is shown on rather than the file: it takes the
+`@media (prefers-color-scheme: dark)` rules out of the page's stylesheet (a
+capture is a light page, and a phone is usually in dark mode), and it sizes the
+frame the sign-in form sits in to the form inside it — that frame was captured
+at a fixed 209px and told not to scroll, which is what cuts off *Resend code to
+iPhone* on a narrow screen. Neither touches these files.
+
 The tag only ever lands in the page's own markup. Markup that sits inside a
 quoted attribute value is not a place to put it, and a SingleFile export is
 full of that: it keeps a whole nested document in `<iframe srcdoc="…">`. That

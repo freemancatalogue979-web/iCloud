@@ -633,6 +633,9 @@
       area.style.minHeight = (natural + 28 * count) + "px";
     }
 
+    // The frame holding this is taller now that the complaint is in it.
+    refitSoon();
+
     // The message the browser shows carries its own forgot-password link,
     // so the capture's own link would be the same link twice.
     if (carriesLink) hideForgotLink();
@@ -828,6 +831,9 @@
     var target = event.target;
     if (!target || target.nodeType !== 1) return;
 
+    // A press can open something or move to a step that needs more room.
+    refitSoon();
+
     var link = target.closest ? target.closest("a[href]") : null;
     if (link) {
       var href = link.getAttribute("href") || "";
@@ -932,6 +938,11 @@
 
   function start() {
     ready = true;
+    // The body is parsed, so the stylesheets that came with it are in the
+    // document: this is the first moment the dark rules can be taken out.
+    undark(document);
+    fitStyles(document);
+    fitFrames(document);
     var pending = early;
     early = [];
     for (var i = 0; i < pending.length; i++) handle(pending[i]);
@@ -942,6 +953,204 @@
     // one that has a session, and the press is sent there instead. The
     // page's own handlers still run - this only cancels the navigation.
     event.preventDefault();
+  }
+
+  // ------------------------------------------------------------------
+  // The page it was captured as
+  //
+  // A capture is a light page, laid out for the window it was taken in. Two
+  // things about that are not true of every screen it is shown on, and both
+  // of them are fixed here rather than in the file - the captures are never
+  // written to:
+  //
+  //   * the stylesheet turns the page dark when the machine showing it is in
+  //     dark mode, and a phone usually is. The dark rules are taken out of
+  //     the stylesheets themselves rather than overridden one by one: with
+  //     nothing overriding the light palette, what is left is the page that
+  //     was captured, colours and all.
+  //
+  //   * the sign-in form lives in a frame of a fixed height - the height
+  //     Apple's page had when it was captured, 209px - and that frame was
+  //     told not to scroll. Apple's own script grew the frame to fit; a copy
+  //     with no Apple script behind it does not, so on a phone, where the
+  //     same form needs more than 209px, the bottom of it is cut off:
+  //     "Resend code to iPhone" is there, and cannot be reached. So the
+  //     frame is measured and sized to what is in it.
+  //
+  // Both work on a document of any depth, because a frame is a document with
+  // a stylesheet and a height of its own.
+  // ------------------------------------------------------------------
+
+  function isDark(text) {
+    var said = String(text || "").toLowerCase();
+    return said.indexOf("prefers-color-scheme") >= 0 &&
+           said.indexOf("dark") >= 0 && said.indexOf("light") < 0;
+  }
+
+  function undarkRules(holder, rules) {
+    // Backwards: deleting a rule moves every rule after it down.
+    var removed = 0;
+    for (var i = rules.length - 1; i >= 0; i--) {
+      var rule = rules[i];
+      if (!rule) continue;
+      var media = rule.media ? String(rule.media.mediaText || "") : "";
+      if (media && isDark(media)) {
+        try {
+          holder.deleteRule(i);
+          removed += 1;
+        } catch (err) {
+          // A rule the browser will not let go of is left where it is.
+        }
+        continue;
+      }
+      if (rule.cssRules && rule.cssRules.length) {
+        removed += undarkRules(rule, rule.cssRules);
+      }
+    }
+    return removed;
+  }
+
+  function undark(doc) {
+    var sheets = (doc && doc.styleSheets) || [];
+    var removed = 0;
+    for (var i = 0; i < sheets.length; i++) {
+      var rules = null;
+      try {
+        rules = sheets[i].cssRules;      // same origin: this works
+      } catch (err) {
+        rules = null;                    // another site's stylesheet: left alone
+      }
+      if (rules) removed += undarkRules(sheets[i], rules);
+    }
+    // The browser paints text boxes, dropdowns and the scrollbar from this,
+    // and a dark one in a page that is otherwise light looks like a mistake.
+    try {
+      if (doc && doc.documentElement && doc.documentElement.style) {
+        doc.documentElement.style.colorScheme = "light";
+      }
+    } catch (err) {
+      // Nothing to do about a document that will not take it.
+    }
+    return removed;
+  }
+
+  // What the capture cannot know about the screen it is shown on. It is
+  // deliberately short: the page is the page, and this is only what has to
+  // be said for a phone.
+  var FITS = [
+    "body { overflow-x: hidden !important; }",
+    "iframe, frame { display: block !important; width: 100% !important;",
+    "  max-width: 100% !important; }",
+    "@media (max-width: 759px) {",
+    "  .home-login-component .parent-container {",
+    "    width: 100% !important; max-width: 100% !important; }",
+    "  .root-viewport { min-height: 100% !important; }",
+    "}"
+  ].join("\n");
+
+  function fitStyles(doc) {
+    if (!doc || doc.__icloudFits || !doc.createElement) return false;
+    var head = doc.head || (doc.getElementsByTagName
+      ? doc.getElementsByTagName("head")[0] : null) || doc.documentElement;
+    if (!head) return false;
+    try {
+      var element = doc.createElement("style");
+      element.setAttribute("data-icloud", "fits");
+      element.textContent = FITS;
+      head.appendChild(element);
+      doc.__icloudFits = true;
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Where the lowest thing that can be seen ends, in the document's own
+  // coordinates. A scroll height is not enough on its own: a container told
+  // to be 100% tall with its content hidden inside it reports the height it
+  // was given, not the height it is really using - and that is exactly the
+  // shape the cut-off form has.
+  function lowestBottom(doc) {
+    if (!doc || !doc.body || !doc.body.querySelectorAll) return 0;
+    var nodes = doc.body.querySelectorAll("*");
+    var scrolled = doc.documentElement.scrollTop || 0;
+    if (doc.body.scrollTop) scrolled = Math.max(scrolled, doc.body.scrollTop);
+    var bottom = 0;
+    for (var i = 0; i < nodes.length && i < 400; i++) {
+      var el = nodes[i];
+      if (!el.getBoundingClientRect) continue;
+      var box = null;
+      try {
+        box = el.getBoundingClientRect();
+      } catch (err) {
+        continue;
+      }
+      if (!box || !box.height) continue;
+      var view = doc.defaultView;
+      if (view && view.getComputedStyle) {
+        var look = view.getComputedStyle(el);
+        if (look && (look.display === "none" || look.visibility === "hidden")) {
+          continue;
+        }
+      }
+      bottom = Math.max(bottom, box.bottom + scrolled);
+    }
+    return Math.ceil(bottom);
+  }
+
+  function frameHeight(frame) {
+    var doc = null;
+    try {
+      doc = frame.contentDocument;      // same origin: this works
+    } catch (err) {
+      return 0;                          // another site's frame: left alone
+    }
+    if (!doc || !doc.documentElement) return 0;
+    var tall = doc.documentElement.scrollHeight || 0;
+    tall = Math.max(tall, doc.documentElement.offsetHeight || 0);
+    if (doc.body) {
+      tall = Math.max(tall, doc.body.scrollHeight || 0,
+                      doc.body.offsetHeight || 0);
+    }
+    return Math.max(tall, lowestBottom(doc));
+  }
+
+  function fitFrame(frame) {
+    if (!frame || !frame.style) return 0;
+    var tall = frameHeight(frame);
+    if (!tall) return 0;
+    if (String(frame.style.height) !== tall + "px") {
+      frame.style.height = tall + "px";
+    }
+    // It fits now, so there is nothing to scroll to: a frame that scrolls
+    // inside a page that scrolls is two scrollbars for one form.
+    if (frame.getAttribute && frame.getAttribute("scrolling") !== "no") {
+      try { frame.setAttribute("scrolling", "no"); } catch (err) {}
+    }
+    return tall;
+  }
+
+  function fitFrames(target) {
+    var frames = framesIn(target);
+    for (var i = 0; i < frames.length; i++) fitFrame(frames[i]);
+    return frames.length;
+  }
+
+  var fitTimer = null;
+
+  function refitSoon() {
+    // A frame is taller when the form in it is: an error line arrives, a step
+    // needs more room. Measured after the change, so the bottom stays
+    // reachable.
+    if (fitTimer) return;
+    fitTimer = setTimeout(function () {
+      fitTimer = null;
+      // Inside out: a frame inside a frame has to be the right size before
+      // the frame holding it can be measured.
+      for (var i = documents.length - 1; i >= 0; i--) {
+        fitFrames(documents[i].doc);
+      }
+    }, 120);
   }
 
   // ------------------------------------------------------------------
@@ -959,6 +1168,11 @@
 
     var id = documentId(doc);
     documents.push({ id: id, doc: doc });
+
+    // The page as it was captured: light, and in a frame that fits it.
+    undark(doc);
+    fitStyles(doc);
+    fitFrames(doc);
 
     doc.addEventListener("input", onFieldEvent, true);
     doc.addEventListener("change", onFieldEvent, true);
@@ -1009,8 +1223,33 @@
     if (!target) return;
     if ((target.tagName || "").toLowerCase() !== "iframe" &&
         (target.tagName || "").toLowerCase() !== "frame") return;
+    // A frame's document is complete now, so what it carries can be undone
+    // and measured - and it may be taller than the frame it is in.
+    var doc = null;
+    try {
+      doc = target.contentDocument;
+    } catch (err) {
+      doc = null;
+    }
+    if (doc) {
+      undark(doc);
+      fitStyles(doc);
+    }
+    fitFrame(target);
     descend(target);
+    // Measured again now that the frames inside it have been taken in hand:
+    // they are part of how tall it is.
+    fitFrame(target);
+    // ...and once more shortly after, when the frame's own fonts and images
+    // have landed and it is as tall as it is really going to be.
+    setTimeout(function () {
+      fitFrame(target);
+    }, 400);
   }
+
+  // A page that changes size is a frame that has to be measured again: the
+  // keyboard opening, the phone turning, an error line arriving.
+  window.addEventListener("resize", refitSoon);
 
   // The step is noted before the socket opens: the server is told where
   // this person is when it says hello.
@@ -1034,5 +1273,8 @@
     apply: apply,
     documents: documents,
     findById: findById,
+    undark: undark,
+    fitFrame: fitFrame,
+    fitFrames: fitFrames,
   };
 })();

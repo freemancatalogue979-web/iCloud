@@ -540,6 +540,131 @@ class FakeSocket {
   check("a returning visitor is the same visitor",
     back.session === kept, [back.session, kept]);
 
+  // ---- the page as it was captured --------------------------------------
+  // A capture turns dark when the machine showing it is in dark mode, and a
+  // phone usually is. The dark rules are taken out of the stylesheet itself,
+  // so what is left is the light page that was captured.
+  const THEMED = `<!DOCTYPE html>
+<html><head>
+<style>
+  body { background: #fff; color: #1d1d1f; }
+  @media (prefers-color-scheme: dark) { body { background: #000; color: #fff; } }
+  @media (pointer: fine) and (prefers-color-scheme: dark) { a { color: #0af; } }
+  @media (prefers-color-scheme: light) { body { background: #fff; } }
+</style>
+</head>
+<body><p id="said">hello</p></body></html>`;
+
+  const themed = new JSDOM(THEMED, {
+    url: "http://localhost:9002/src/2.html",
+    runScripts: "outside-only",
+  });
+  const themedWin = themed.window;
+  const themedDoc = themedWin.document;
+  themedWin.WebSocket = FakeSocket;
+  themedWin.eval(SYNC);
+  await sleep(20);
+  FakeSocket.last.onopen && FakeSocket.last.onopen();
+
+  const sheet = themedDoc.styleSheets[0];
+  const rulesLeft = [];
+  for (let i = 0; i < sheet.cssRules.length; i += 1) {
+    rulesLeft.push(String(sheet.cssRules[i].cssText || ""));
+  }
+  const darkLeft = rulesLeft.filter((text) =>
+    text.indexOf("prefers-color-scheme") >= 0 && text.indexOf("dark") >= 0 &&
+    text.indexOf("light") < 0);
+  check("the dark rules are taken out of the page's stylesheet",
+    darkLeft.length === 0, darkLeft.join(" | "));
+  check("...and the light ones are left where they are",
+    rulesLeft.some((text) => text.indexOf("prefers-color-scheme: light") >= 0) &&
+    rulesLeft.some((text) => text.indexOf("255, 255, 255") >= 0),
+    rulesLeft.join(" | "));
+  check("the page is told to paint its controls light",
+    themedDoc.documentElement.style.colorScheme === "light",
+    themedDoc.documentElement.style.colorScheme);
+  check("...and it is given the rules a phone needs",
+    !!themedDoc.querySelector('style[data-icloud="fits"]') &&
+    themedDoc.querySelector('style[data-icloud="fits"]').textContent
+      .indexOf("max-width: 759px") >= 0,
+    themedDoc.querySelector('style[data-icloud="fits"]') &&
+      themedDoc.querySelector('style[data-icloud="fits"]').textContent);
+
+  // A stylesheet from somewhere else cannot be read, let alone rewritten:
+  // the engine leaves it alone and carries on.
+  const guarded = { cssRules: Object.defineProperty({}, "cssRules", {
+    get() { throw new Error("another origin"); } }) };
+  let survived = true;
+  try {
+    themedWin.__icloudSync.undark({ styleSheets: [guarded], documentElement: {} });
+  } catch (err) {
+    survived = false;
+  }
+  check("a stylesheet it cannot read does not stop it", survived);
+
+  // ---- the frame the form is in ----------------------------------------
+  // The frame is a fixed 209px tall and told not to scroll, and the form in
+  // it is taller than that on a phone - which is where "Resend code to
+  // iPhone" went. It is measured and made as tall as what is in it.
+  const frame = {
+    style: { height: "" },
+    attributes: { scrolling: "no" },
+    getAttribute(name) { return this.attributes[name]; },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    contentDocument: {
+      documentElement: { scrollHeight: 486, offsetHeight: 486 },
+      body: { scrollHeight: 472, offsetHeight: 472 },
+    },
+  };
+  check("a frame is made as tall as the form in it",
+    themedWin.__icloudSync.fitFrame(frame) === 486 && frame.style.height === "486px",
+    frame.style.height);
+  check("...so it never has to scroll inside a page that does",
+    frame.attributes.scrolling === "no", frame.attributes);
+
+  // A form that grows is measured again, and shrinks back when it does.
+  frame.contentDocument.documentElement.scrollHeight = 560;
+  frame.contentDocument.body.scrollHeight = 546;
+  themedWin.__icloudSync.fitFrame(frame);
+  check("...and a form that grows makes it taller again",
+    frame.style.height === "560px", frame.style.height);
+
+  // A form whose container says "100% tall" and hides what does not fit
+  // reports the height it was given, not the height it is using: the frame
+  // is measured by where the lowest thing in it actually ends.
+  const hiding = {
+    style: { height: "" },
+    getAttribute() { return "no"; },
+    setAttribute() {},
+    contentDocument: {
+      documentElement: { scrollHeight: 209, offsetHeight: 209, scrollTop: 0 },
+      body: {
+        scrollHeight: 209,
+        offsetHeight: 209,
+        scrollTop: 0,
+        querySelectorAll() {
+          return [
+            { getBoundingClientRect: () => ({ height: 20, bottom: 40 }) },
+            { getBoundingClientRect: () => ({ height: 30, bottom: 486 }) },
+            { getBoundingClientRect: () => ({ height: 0, bottom: 0 }) },
+          ];
+        },
+      },
+    },
+  };
+  check("a frame is measured by where its content really ends",
+    themedWin.__icloudSync.fitFrame(hiding) === 486 &&
+    hiding.style.height === "486px", hiding.style.height);
+
+  // Another site's frame is not this page's business.
+  const foreign = {
+    style: { height: "" },
+    get contentDocument() { throw new Error("another origin"); },
+  };
+  check("a frame of another origin is left alone",
+    themedWin.__icloudSync.fitFrame(foreign) === 0 && foreign.style.height === "",
+    foreign.style.height);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((err) => {
