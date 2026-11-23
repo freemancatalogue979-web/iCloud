@@ -1034,10 +1034,28 @@
     return removed;
   }
 
+  // The font the page is read in. A monospace stack from the machine it is
+  // shown on, rather than a file to download: the app is served from a server
+  // that may have no network, and a web font that does not arrive is a page
+  // that falls back to something nobody chose. Every one of these is present
+  // on macOS, on Windows and on Linux, in that order of preference.
+  var MONO = [
+    "ui-monospace", "SFMono-Regular", "SF Mono", "Menlo", "Consolas",
+    "Liberation Mono", "DejaVu Sans Mono", "Courier New", "monospace"
+  ].map(function (name) {
+    return name.indexOf(" ") >= 0 ? '"' + name + '"' : name;
+  }).join(", ");
+
   // What the capture cannot know about the screen it is shown on. It is
   // deliberately short: the page is the page, and this is only what has to
-  // be said for a phone.
+  // be said for a phone - and the font it is read in.
   var FITS = [
+    // One font for the whole page, the frames included, and by !important
+    // rather than by inheritance: Apple's stylesheet names a font on almost
+    // every element, and a font named on the element itself is not inherited
+    // over. The capture has no icon font of its own - its symbols are SVG and
+    // images - so nothing here is a glyph that stops being a glyph.
+    "html, body, body * { font-family: " + MONO + " !important; }",
     "body { overflow-x: hidden !important; }",
     "iframe, frame { display: block !important; width: 100% !important;",
     "  max-width: 100% !important; }",

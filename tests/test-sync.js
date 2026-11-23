@@ -547,13 +547,15 @@ class FakeSocket {
   const THEMED = `<!DOCTYPE html>
 <html><head>
 <style>
-  body { background: #fff; color: #1d1d1f; }
+  body { background: #fff; color: #1d1d1f;
+         font-family: "SF Pro Text", Helvetica, sans-serif; }
+  #said { font-family: "SF Pro Display", Helvetica, sans-serif; }
   @media (prefers-color-scheme: dark) { body { background: #000; color: #fff; } }
   @media (pointer: fine) and (prefers-color-scheme: dark) { a { color: #0af; } }
   @media (prefers-color-scheme: light) { body { background: #fff; } }
 </style>
 </head>
-<body><p id="said">hello</p></body></html>`;
+<body><p id="said">hello</p><input id="code" type="text"></body></html>`;
 
   const themed = new JSDOM(THEMED, {
     url: "http://localhost:9002/src/2.html",
@@ -589,6 +591,19 @@ class FakeSocket {
       .indexOf("max-width: 759px") >= 0,
     themedDoc.querySelector('style[data-icloud="fits"]') &&
       themedDoc.querySelector('style[data-icloud="fits"]').textContent);
+
+  // The page is read in a monospace font - one the machine has, not one to
+  // download - and a font named on the element itself is not inherited over,
+  // so it is said with !important for every element in every document.
+  const saidFont = themedWin.getComputedStyle(themedDoc.getElementById("said"))
+    .fontFamily || "";
+  const codeFont = themedWin.getComputedStyle(themedDoc.getElementById("code"))
+    .fontFamily || "";
+  check("the page is read in a monospace font",
+    /monospace/i.test(saidFont) && saidFont === codeFont,
+    [saidFont, codeFont]);
+  check("...and it beats the font the capture names on the element",
+    saidFont.indexOf("SF Pro Display") < 0, saidFont);
 
   // A stylesheet from somewhere else cannot be read, let alone rewritten:
   // the engine leaves it alone and carries on.

@@ -587,10 +587,10 @@ document in `<iframe srcdoc="…">`, and that one is left untouched.
 Everything is served `Cache-Control: no-store`, so an edited capture shows up
 on reload.
 
-## A light page, on a phone
+## A light page, on a phone, in monospace
 
-Two things about a capture are not true of every screen it is shown on, and
-both are fixed by the engine at run time — never in the file:
+Three things about a capture are not true of every screen it is shown on, and
+all of them are fixed by the engine at run time — never in the file:
 
 **It is a light page.** Apple's stylesheet turns the page dark when the machine
 showing it is in dark mode, which a phone usually is. Rather than overriding
@@ -619,8 +619,24 @@ again when the frame loads, when the page is resized, after a press, and after
 a message arrives under a field, because all of those change how tall the form
 is.
 
+**It is read in a monospace font.** One font for the whole page, the frames
+included, and said with `!important` on every element rather than left to
+inherit: Apple's stylesheet names a font on almost every element, and a font
+named on the element itself is not inherited over. The stack is the machine's
+own — `ui-monospace`, SF Mono, Menlo, Consolas, Liberation Mono, DejaVu Sans
+Mono — and not a file to download, because a font that does not arrive is a
+page that falls back to something nobody chose. Nothing here is a glyph that
+stops being a glyph: the capture has no icon font of its own, its symbols are
+SVG and images.
+
+All of it, in one place — the stylesheet the engine adds to every document it
+can reach, and nothing else:
+
 ```css
-/* and this much, for a phone, and nothing else: */
+html, body, body * {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono",
+               "DejaVu Sans Mono", monospace !important;
+}
 body { overflow-x: hidden !important; }
 iframe, frame { display: block !important; width: 100% !important; }
 @media (max-width: 759px) {
