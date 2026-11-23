@@ -126,6 +126,36 @@ person clicking, a page open — and a client with nobody watching is closed
 after the idle time and remembered as one who has gone. A client who comes
 back is here again, not gone.
 
+**Closing a browser, by hand.** The idle time closes browsers nobody has been
+at, on its own clock — but an operator should not have to wait for a clock, so
+the panel closes them too:
+
+* **Close**, on any client the server is holding: that client's browser is shut
+  down, the screen it was on is put away with it, and the client moves to
+  *Gone*. It is the same close the idle time does — one function, `close_client`
+  in `admin.py`, used by both — so what is written down is the same either way.
+* **Close idle browsers**, at the top of the list: every browser nobody has
+  been at for five minutes, in one go. The panel asks the server who that is
+  rather than deciding for itself, because the server is what knows who is
+  looking and when each client was last seen. A client with a page open is
+  never idle, however long they have sat on one screen.
+
+Closing is not forgetting. The client stays on the list with where they got
+to, the cookies that were read while the browser was still open are kept (in
+the record and in `cookies/`), and the profile stays in `visitors/`. What goes
+is the browser and its screen — which is what piles up.
+
+```bash
+curl -X POST localhost:9002/admin/api/clients/aprobevisitor42/close \
+     -H "Cookie: icloud_admin=your-secret"          # one client
+curl -X POST localhost:9002/admin/api/clients/close \
+     -H "Cookie: icloud_admin=your-secret" \
+     -d '{"idle_seconds": 300}'                      # the idle ones
+```
+
+A client who has already gone has no browser to close, and the panel says so
+(`409`) rather than pretending something happened.
+
 **The panel says why it is empty.** A refused answer used to look exactly
 like a room with nobody in it: the counters stayed at zero and the table
 said "no clients yet". Now a refusal is said out loud — the secret is

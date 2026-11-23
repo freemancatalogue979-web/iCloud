@@ -48,6 +48,10 @@ function answer(body, status) {
 function open({ signedIn = true, missingSecret = false } = {}) {
   const sockets = [];
   const errors = [];
+  // Every request the panel made, so that what a button does can be read
+  // off the wire rather than off the markup.
+  const calls = [];
+  let agree = true;
   // The secret can be taken away while the panel is open: the line was let
   // in, and the answer to the API is refused. That is what a panel whose
   // secret has been changed sees.
@@ -61,8 +65,12 @@ function open({ signedIn = true, missingSecret = false } = {}) {
     runScripts: "dangerously",
     virtualConsole,
     beforeParse(window) {
-      window.fetch = (url) => {
+      window.confirm = () => agree;
+      window.fetch = (url, options) => {
         const where = String(url);
+        const asked = options || {};
+        calls.push({ url: where, method: asked.method || "GET",
+                     body: asked.body });
         if (where === "/admin/api/session") {
           if (missingSecret) {
             return answer({ error: "no admin secret has been set." }, 503);
@@ -86,7 +94,9 @@ function open({ signedIn = true, missingSecret = false } = {}) {
     },
   });
 
-  return { dom, sockets, errors, refuse: () => { lineRefused = true; } };
+  return { dom, sockets, errors, calls,
+           refuse: () => { lineRefused = true; },
+           disagree: () => { agree = false; } };
 }
 
 function row(fields) {
@@ -182,6 +192,77 @@ const text = (dom, id) => dom.window.document.getElementById(id).textContent;
     text(panel.dom, "s-online"));
   check("...and counted as here", text(panel.dom, "s-here") === "1",
     text(panel.dom, "s-here"));
+
+  // ---- closing a browser -----------------------------------------------
+  // The operator's own answer to browsers piling up. Closing is not
+  // forgetting: the client stays on the list, and their cookies stay theirs.
+  const closing = open({ signedIn: true });
+  await sleep(120);
+  push(closing.sockets[0], 1, [
+    row({ id: "aclient", online: true, browser_open: true, idle_seconds: 900 }),
+  ]);
+  await sleep(20);
+
+  const closeButton = closing.dom.window.document.querySelector("button[data-close]");
+  check("a client the manager holds can be closed from the panel",
+    !!closeButton, text(closing.dom, "clients-body"));
+
+  // Saying no to the question asks the server for nothing.
+  closing.disagree();
+  closeButton.click();
+  await sleep(40);
+  check("...but not if the operator changes their mind",
+    !closing.calls.some((call) => call.url.includes("/close")),
+    JSON.stringify(closing.calls));
+
+  const again = open({ signedIn: true });
+  await sleep(120);
+  push(again.sockets[0], 1, [
+    row({ id: "aclient", online: true, browser_open: true, idle_seconds: 900 }),
+  ]);
+  await sleep(20);
+  again.dom.window.document.querySelector("button[data-close]").click();
+  await sleep(60);
+  const did = again.calls.find((call) => call.url.includes("/close"));
+  check("closing a client asks the server to close that client",
+    !!did && did.method === "POST" &&
+      did.url === "/admin/api/clients/aclient/close", JSON.stringify(again.calls));
+
+  // ---- closing the ones nobody is at -----------------------------------
+  // The button closes every browser nobody has been at for five minutes.
+  // Who is idle is the server's answer, so the panel asks once and says
+  // what came back.
+  again.calls.length = 0;
+  push(again.sockets[0], 2, [
+    row({ id: "aidle", online: true, browser_open: true, idle_seconds: 900 }),
+    row({ id: "awatched", online: true, browser_open: true, here: true,
+          viewers: 1, idle_seconds: 900 }),
+  ]);
+  await sleep(20);
+  again.dom.window.document.getElementById("close-idle").click();
+  await sleep(60);
+  const bulk = again.calls.find((call) => call.url === "/admin/api/clients/close");
+  check("the idle browsers are closed in one ask",
+    !!bulk && bulk.method === "POST" &&
+      JSON.parse(bulk.body || "{}").idle_seconds === 300,
+    JSON.stringify(again.calls));
+
+  // A panel with nothing idle says so instead of asking.
+  again.calls.length = 0;
+  push(again.sockets[0], 3, [
+    row({ id: "awatched", online: true, browser_open: true, here: true,
+          viewers: 1, idle_seconds: 900 }),
+    row({ id: "afresh", online: true, browser_open: true, idle_seconds: 5 }),
+  ]);
+  await sleep(20);
+  again.dom.window.document.getElementById("close-idle").click();
+  await sleep(40);
+  check("nothing idle means nothing is asked",
+    !again.calls.some((call) => call.url === "/admin/api/clients/close"),
+    JSON.stringify(again.calls));
+  check("...and the panel says why",
+    text(again.dom, "clients-sub").includes("idle for 5 minutes"),
+    text(again.dom, "clients-sub"));
 
   // ---- a picture from before is not drawn over a newer one -------------
   push(socket, 4, [row({ id: "an-older-client" }), row({ id: "and-another" })]);

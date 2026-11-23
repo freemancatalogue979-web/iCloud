@@ -494,6 +494,70 @@ def stage_of(session) -> str:
     return STAGES.get(page, "Starting")
 
 
+async def record_of(session) -> dict:
+    """What a client got to, for the panel to remember once they are gone.
+
+    The cookies are read *now*, while the browser is still open: once it is
+    shut, they are on disk in a way that cannot be read without a browser.
+    Nothing secret is written into the record - it is the cookies themselves,
+    which are the client's own, in the shape they were read.
+    """
+    record = {
+        "page": getattr(session.hub, "page", None),
+        "stage": stage_of(session),
+        "url": (session.hub.browser or {}).get("url", ""),
+        "title": (session.hub.browser or {}).get("title", ""),
+        "finished": bool(session.hub.finished),
+        "seen": time.time(),
+    }
+    try:
+        if session.ctx is not None:
+            record["cookies"] = await session.ctx.cookies()
+    except Exception:
+        pass
+    if not record.get("cookies") and getattr(session, "cookies", None):
+        # The browser would not answer, but its cookies were read while it
+        # could - when its visitor signed in.
+        record["cookies"] = list(session.cookies)
+    return record
+
+
+async def close_client(sid: str) -> bool:
+    """Shut a client's browser and put the client away as one who has gone.
+
+    The one way a browser is taken away from a client. The idle sweep in
+    ``server.py`` does this when nobody has been at the app for a while, and
+    the panel does it when the operator says so - the same code, so a browser
+    closed by hand is remembered exactly as one closed by the clock: where
+    they got to, when, and the cookies that were read while it was open.
+
+    A client is not forgotten here. Their record stays on the panel and their
+    cookies stay theirs to be exported; what goes is the browser, and the
+    screen it was on.
+    """
+    session = MANAGER.get(sid)
+    if session is None:
+        return False
+
+    record = await record_of(session)
+    if record.get("cookies"):
+        # Kept on disk as well: the panel can still read them after a
+        # restart, when the record in this process is gone.
+        try:
+            keep_cookies(sid, record["cookies"])
+        except Exception:
+            pass
+
+    try:
+        await session.close()
+    except Exception:
+        # A browser that will not close is still a session to put away: the
+        # manager must not be left holding one that nobody can reach.
+        pass
+    MANAGER.retire(sid, record)
+    return True
+
+
 def client_row(session, store: Store) -> dict:
     """What the panel shows of one session.
 
@@ -897,6 +961,59 @@ def build_router() -> APIRouter:
         here = MANAGER.get(sid)
         return {"session": sid, "cookies": cookie_editor(cookies),
                 "online": bool(here and here.state.get("browser_open"))}
+
+    @router.post("/api/clients/close")
+    async def close_inactive(request: Request):
+        """Close the browsers nobody is at, so they do not pile up.
+
+        The panel asks for this when the operator says so, and the idle
+        sweep in server.py asks on its own clock; this is the same close,
+        so what is written down about each client is the same either way.
+
+        A client with somebody looking at the app is not inactive however
+        long they have been sitting on one page - the page is talking to the
+        server, the person is there. Everybody else who has not been seen
+        for the number of seconds asked for is closed, browser or no
+        browser: a session whose browser never opened is a session that
+        should not be left lying about either.
+        """
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        try:
+            idle = float(body.get("idle_seconds", 300))
+        except (TypeError, ValueError):
+            idle = 300.0
+        idle = max(0.0, idle)
+
+        closed = []
+        for sid, session in list(MANAGER.items()):
+            if session.hub.viewers:
+                continue
+            if time.monotonic() - session.seen < idle:
+                continue
+            if await close_client(sid):
+                closed.append(sid)
+        return {"ok": True, "closed": closed, "idle_seconds": idle}
+
+    @router.post("/api/clients/{sid}/close")
+    async def close_one(sid: str, request: Request):
+        """Close one client's browser, now. The client is kept, not forgotten."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        if not known_client(sid):
+            return _denied("there is no such client", status=404)
+        session = MANAGER.get(sid)
+        if session is None:
+            return _denied(
+                "this client has gone - there is no browser of theirs to "
+                "close", status=409)
+        was_open = bool(session.state.get("browser_open")
+                        or getattr(session, "ctx", None) is not None)
+        await close_client(sid)
+        return {"ok": True, "closed": True, "session": sid, "browser": was_open}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):

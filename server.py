@@ -1616,40 +1616,11 @@ async def close_idle_sessions() -> None:
         if time.monotonic() - session.seen < SESSION_IDLE_SECONDS:
             continue
         log(f"session {sid} has gone away - closing its browser")
-        # What they got to is remembered, so that the panel can say it:
-        # a visitor who has gone is still a visitor.
-        record = {
-            "page": session.hub.page,
-            "stage": admin.stage_of(session),
-            "url": (session.hub.browser or {}).get("url", ""),
-            "title": (session.hub.browser or {}).get("title", ""),
-            "finished": bool(session.hub.finished),
-            "seen": time.time(),
-        }
-        # The cookies are read while the browser is still open: once it is
-        # shut, they are on disk in a way that cannot be read without the
-        # browser. A client who has gone still has cookies, and the panel
-        # can still show them.
-        try:
-            if session.ctx is not None:
-                record["cookies"] = await session.ctx.cookies()
-        except Exception:
-            pass
-        if not record.get("cookies") and session.cookies:
-            # The browser would not answer, but its cookies were read while
-            # it would - when its visitor signed in.
-            record["cookies"] = list(session.cookies)
-        if record.get("cookies"):
-            # Kept on disk as well: the panel can still read them after a
-            # restart, when the record in this process is gone.
-            try:
-                admin.keep_cookies(sid, record["cookies"])
-            except Exception:
-                pass
-        await session.close()
-        # The manager puts the session away and says so: the panel is told
-        # that this client has gone, and it remembers what they got to.
-        SESSIONS.retire(sid, record)
+        # The same close the panel's own "close" button does: the cookies are
+        # read while the browser is still open, the client is remembered as
+        # one who has gone, and the manager says so - so the panel is told,
+        # rather than left to find out.
+        await admin.close_client(sid)
 
 
 # --------------------------------------------------------------------------

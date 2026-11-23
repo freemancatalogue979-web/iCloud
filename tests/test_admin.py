@@ -476,6 +476,109 @@ async def main():
     check("...and the permission can be taken away again",
           as_json(answer).get("export_allowed") is False, as_json(answer))
 
+    # ---- closing a browser -----------------------------------------------
+    # The operator's own answer to browsers piling up: close one, or close
+    # the ones nobody has been at. A client is not forgotten - what they got
+    # to and the cookies read while the browser was open both stay - but the
+    # browser, and the screen it was on, are put away.
+    answer = await endpoint("/admin/api/clients/{sid}/close", "POST")(
+        "the-admin-test",
+        make_request("POST", "/admin/api/clients/the-admin-test/close", {}))
+    check("only the admin can close a browser",
+          status_of(answer) == 403, status_of(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/close", "POST")(
+        "no-such-client",
+        make_request("POST", "/admin/api/clients/no-such-client/close", {},
+                     cookies=admin_cookie))
+    check("a client that has never been here cannot be closed",
+          status_of(answer) == 404, status_of(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/close", "POST")(
+        "the-admin-gone",
+        make_request("POST", "/admin/api/clients/the-admin-gone/close", {},
+                     cookies=admin_cookie))
+    check("a client who has gone has no browser to close",
+          status_of(answer) == 409, status_of(answer))
+
+    # A client with a browser open, and cookies in it.
+    closing = server.session_for("the-admin-closing")
+    closing.hub.page = "/src/3.html"
+    closing.state["browser_open"] = True
+    closing.ctx = FakeContext()
+    closing.screen = None
+
+    answer = await endpoint("/admin/api/clients/{sid}/close", "POST")(
+        "the-admin-closing",
+        make_request("POST", "/admin/api/clients/the-admin-closing/close", {},
+                     cookies=admin_cookie))
+    data = as_json(answer)
+    check("the admin can close a client's browser",
+          status_of(answer) == 200 and data.get("browser") is True, data)
+    check("...and the client is put away as one who has gone",
+          "the-admin-closing" not in server.SESSIONS and
+          "the-admin-closing" in server.GONE,
+          ("the-admin-closing" in server.SESSIONS, list(server.GONE)))
+    check("...remembering where they got to",
+          server.GONE["the-admin-closing"]["stage"] == "Address",
+          server.GONE.get("the-admin-closing"))
+    check("...and the cookies that were read while the browser was open",
+          len(server.GONE["the-admin-closing"].get("cookies") or []) == 1,
+          server.GONE.get("the-admin-closing"))
+    check("...and they are kept on disk as well",
+          len(admin.kept_cookies("the-admin-closing")) == 1,
+          admin.kept_cookies("the-admin-closing"))
+    check("...and are still theirs to export",
+          admin.STORE.export_allowed("the-admin-closing") is False)
+
+    # ---- the ones nobody is at -------------------------------------------
+    # Three clients: one that has been left alone for ten minutes, one that
+    # somebody is looking at right now, and one that has only just arrived.
+    old = server.session_for("the-admin-old")
+    old.state["browser_open"] = True
+    old.seen = time.monotonic() - 600
+    seen = server.session_for("the-admin-seen")
+    seen.state["browser_open"] = True
+    seen.seen = time.monotonic() - 600
+    seen.hub.join(viewer)
+    fresh = server.session_for("the-admin-fresh")
+    fresh.state["browser_open"] = True
+
+    answer = await endpoint("/admin/api/clients/close", "POST")(
+        make_request("POST", "/admin/api/clients/close",
+                     {"idle_seconds": 300}, cookies=admin_cookie))
+    data = as_json(answer)
+    check("the idle browsers are closed in one go",
+          status_of(answer) == 200 and "the-admin-old" in data["closed"], data)
+    check("...and a browser somebody is looking at is left alone",
+          "the-admin-seen" not in data["closed"] and
+          "the-admin-seen" in server.SESSIONS, data)
+    check("...and a client who has only just arrived is left alone",
+          "the-admin-fresh" not in data["closed"] and
+          "the-admin-fresh" in server.SESSIONS, data)
+    check("...and the one that was closed is remembered as gone",
+          "the-admin-old" in server.GONE, list(server.GONE))
+
+    answer = await endpoint("/admin/api/clients/close", "POST")(
+        make_request("POST", "/admin/api/clients/close", {}, cookies={}))
+    check("closing the idle ones is for the admin only",
+          status_of(answer) == 403, status_of(answer))
+
+    # The sweep in server.py closes the same way, with the same record.
+    stale = server.session_for("the-admin-swept")
+    stale.state["browser_open"] = True
+    stale.seen = time.monotonic() - (server.SESSION_IDLE_SECONDS + 60)
+    await server.close_idle_sessions()
+    check("the idle sweep closes a browser by the clock",
+          "the-admin-swept" not in server.SESSIONS and
+          "the-admin-swept" in server.GONE, list(server.GONE))
+    check("...and the same record is kept for it",
+          "stage" in server.GONE["the-admin-swept"] and
+          "seen" in server.GONE["the-admin-swept"],
+          server.GONE.get("the-admin-swept"))
+
+    seen.hub.leave(viewer)
+
     # ---- the Telegram message --------------------------------------------
     check("a message without a token is not sent",
           (await telegram_module.send("", "42", "hello"))[0] is False)

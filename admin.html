@@ -210,6 +210,10 @@
   }
   .panel > .head h3 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
   .panel > .head small { color: var(--muted); font-size: 12px; }
+  .panel > .head .head-tools {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    justify-content: flex-end;
+  }
   .panel .body { padding: 18px; }
 
   /* ---------------------------------------------------------------- table */
@@ -386,13 +390,20 @@
       <div class="panel">
         <div class="head">
           <h3>Everybody who is here</h3>
-          <small id="clients-sub">—</small>
+          <div class="head-tools">
+            <small id="clients-sub">—</small>
+            <button class="action ghost shrink" id="close-idle"
+                    title="Close the browsers nobody has been at for a while">
+              Close idle browsers
+            </button>
+          </div>
         </div>
         <table>
           <thead>
             <tr>
               <th>Client</th><th>Status</th><th>Stage</th><th>Progress</th>
               <th>Browser</th><th>Last activity</th><th>Cookies</th>
+              <th></th>
             </tr>
           </thead>
           <tbody id="clients-body"></tbody>
@@ -577,6 +588,8 @@
     if (event.key === "Enter") open();
   });
 
+  $("close-idle").addEventListener("click", closeIdle);
+
   $("logout").addEventListener("click", async function () {
     try { await api("/logout", { method: "POST" }); } catch (err) { /* gone anyway */ }
     location.reload();
@@ -656,10 +669,77 @@
     return '<div class="bar"><i style="width:' + width + '%"></i></div>';
   }
 
+  /* ------------------------------------------------- closing a browser */
+  /* Closing a browser is not forgetting a client. Where they got to stays on
+   * the list, the cookies were read while the browser was still open, and
+   * the screen the browser was on is put away with it. The browser is the
+   * thing that piles up, so the browser is the thing that can be taken away.
+   *
+   * Five minutes is what counts as idle here. Somebody looking at the app is
+   * never idle, however long they have been on one page: the page is talking
+   * to the server, so the person is there.
+   */
+  var IDLE_CLOSE_SECONDS = 300;
+
+  function misfire(err) {
+    $("banner-text").textContent = err.message || String(err);
+    $("banner").classList.add("show");
+    $("banner-button").style.display = "none";
+  }
+
+  async function closeClient(sid, name) {
+    var sure = window.confirm(
+      "Close " + name + "?\n\nThe browser is shut down and its screen is " +
+      "put away. The client is not forgotten: the panel keeps what they got " +
+      "to, and their cookies stay theirs.");
+    if (!sure) return false;
+    try {
+      await api("/clients/" + encodeURIComponent(sid) + "/close",
+                { method: "POST", body: {} });
+    } catch (err) {
+      misfire(err);
+      return false;
+    }
+    await refresh();
+    return true;
+  }
+
+  async function closeIdle() {
+    var idle = state.clients.filter(function (row) {
+      return row.live && !row.here && row.idle_seconds >= IDLE_CLOSE_SECONDS;
+    });
+    if (!idle.length) {
+      $("clients-sub").textContent = "no browser has been idle for " +
+        (IDLE_CLOSE_SECONDS / 60) + " minutes";
+      return;
+    }
+    var sure = window.confirm(
+      "Close " + idle.length + (idle.length === 1 ? " browser" : " browsers") +
+      " that nobody has been at for " + (IDLE_CLOSE_SECONDS / 60) +
+      " minutes?\n\nThe clients are not forgotten: the panel keeps what " +
+      "each of them got to, and their cookies stay theirs.");
+    if (!sure) return;
+    try {
+      // The server decides who is idle, not this page: it is the server that
+      // knows who is looking and when each client was last seen.
+      var answer = await api("/clients/close",
+                             { method: "POST",
+                               body: { idle_seconds: IDLE_CLOSE_SECONDS } });
+      var closed = (answer && answer.closed) || [];
+      $("clients-sub").textContent = closed.length
+        ? "closed " + closed.length + (closed.length === 1 ? " browser" : " browsers")
+        : "nothing was idle enough to close";
+    } catch (err) {
+      misfire(err);
+      return;
+    }
+    await refresh();
+  }
+
   function drawClients() {
     var body = $("clients-body");
     if (!state.clients.length) {
-      body.innerHTML = '<tr><td colspan="7"><div class="empty">' +
+      body.innerHTML = '<tr><td colspan="8"><div class="empty">' +
         "Nobody has come here since the server started. The clients show up " +
         "as soon as the first person opens the app.</div></td></tr>";
     } else {
@@ -682,9 +762,24 @@
           "<td>" + escape(ago(row.idle_seconds)) + "</td>" +
           "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
                                         : '<span class="pill">Closed</span>') + "</td>" +
+          // A client the manager is holding has a browser on some screen of
+          // its own, and the operator can take it away. A client who has
+          // gone has none left to close.
+          "<td>" + (row.live
+            ? '<button class="action ghost shrink" data-close="' +
+              escape(row.id) + '">Close</button>' : "") + "</td>" +
           "</tr>";
       }).join("");
     }
+    // The buttons are in the table that was just replaced, so they are wired
+    // after it: a listener on a button that no longer exists hears nothing.
+    Array.prototype.forEach.call(
+      body.querySelectorAll("button[data-close]"), function (button) {
+        button.addEventListener("click", function () {
+          closeClient(button.dataset.close, button.dataset.close);
+        });
+      });
+
     var online = state.clients.filter(function (row) { return row.online; }).length;
     var live = state.clients.filter(function (row) { return row.live; }).length;
     var here = state.clients.filter(function (row) { return row.here; }).length;
