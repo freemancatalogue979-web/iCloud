@@ -818,6 +818,68 @@ The `page:` line is the hub following a viewer to another captured page. If a
 captured page stops responding to typing, the question is whether `/sync.js`
 was served with it — open the page's source and look for the script tag.
 
+## A screen for every session
+
+The browser the app signs in with is a real browser, and a real browser opens
+a window, and a window needs an X server. A server has none. So on a machine
+with no `DISPLAY` the app starts **one Xvfb per session** — an X server that
+draws on nothing — and starts that session's browser on it:
+
+```
+[icloud] no screen on this machine - every session gets one of its own from Xvfb
+[icloud] each browser opens on a display from 99 upwards, and the display number is in its session
+[icloud] giving someonevisitor1 a screen of its own
+[icloud] ...it is :99, and no other session is on it
+[icloud] launching system chrome
+[icloud] browser open (system chrome)
+```
+
+**One each, never one for the app.** A screen is shared the way a desktop is
+shared: two Chromes on one display are two windows on one desktop, and then
+the second one can decide the first is already running and hand its URL over
+and exit, a dialog appears in front of the wrong person's browser, "bring this
+tab to the front" is whatever the window manager decides, and one crash takes
+everybody's screen with it. A browser alone on its own display behaves the way
+a browser on its own machine behaves, which is what the rest of the app
+assumes. The display number is per session, and the panel says which:
+
+```
+Online    iCloud                     its own screen :102
+```
+
+**It goes when the browser goes.** `Session.close()` — the one place a browser
+is shut down, whether the visitor finished, failed, or went away — stops the
+Xvfb that browser was on and frees the number for the next person. Stopping
+the server shuts down every session, so Ctrl-C is not a machine slowly filling
+up with orphaned X servers.
+
+**What is where.**
+
+| Setting | What it does |
+| --- | --- |
+| `DISPLAY` / `WAYLAND_DISPLAY` | used as it is; nothing is started |
+| `ICLOUD_XVFB=1` | a screen of its own even when there is a display |
+| `ICLOUD_XVFB=0` | never start Xvfb |
+| `ICLOUD_SCREEN` | what Xvfb draws, default `1360x1024x24` |
+| `ICLOUD_XVFB_FIRST` | the first display number tried, default `99` |
+
+**Nobody has to look at it.** The person signs in through the capture, and
+what they type there is written into the browser by the bridge — the window is
+where the browser renders, not where the person is. So a virtual screen is not
+a lesser screen here: it is the same browser on the same page. Watching one
+anyway is one command, if you ever want to see what a session's browser is
+actually showing:
+
+```bash
+sudo apt install x11vnc
+x11vnc -display :102 -localhost -nopw     # then ssh -L 5900:localhost:5900
+```
+
+**And if there is no Xvfb either**, the browser is started without a window
+(`headless=True`) rather than the app refusing to run: the capture is still
+what gets typed into, so everything but the window still works. The console
+says so, and says `sudo apt install xvfb`.
+
 ## When no browser will open on Linux
 
 ```
@@ -836,22 +898,24 @@ installed, started, and died before it drew anything. Which is one of three
 things, and Playwright gives the same sentence for all of them.
 
 **1. There is no screen.** A server, a container, a cloud runner, a bare
-Debian box and `ssh` without `-X` all have no `$DISPLAY`. The window is not
-decoration here — it is where the person signs in — so the app cannot run
-without one. Check:
+Debian box and `ssh` without `-X` all have no `$DISPLAY` — and a browser
+cannot open a window on nothing. This is the one you almost certainly have.
+Check:
 
 ```bash
 echo "DISPLAY=[$DISPLAY] WAYLAND_DISPLAY=[$WAYLAND_DISPLAY]"
 ```
 
-Three ways to give it a screen, best first:
+The answer is not to move the app to a desktop. Install Xvfb and the app gives
+**every session a screen of its own** (see [A screen for every
+session](#a-screen-for-every-session)):
 
-* run the app on the machine you are sitting at — that is what it is for;
-* `ssh -X you@server` and run `./run.sh` there, so the window opens on your
-  own desktop;
-* a virtual screen: `sudo apt install xvfb x11vnc`, then `xvfb-run ./run.sh`,
-  and `x11vnc -localhost -nopw` to look at that screen — headless *and*
-  visible, which is what a VPS needs.
+```bash
+sudo apt install xvfb
+./run.sh
+```
+
+A real display is used as it is, so a desktop needs none of this.
 
 **2. It is a root shell.** Chromium refuses to run as root — it exits
 immediately, which is the same "has been closed". The app now adds
@@ -990,14 +1054,17 @@ the project virtualenv by itself.
 - `fonts/` — Space Grotesk, served by the app (SIL Open Font License 1.1)
 - `run.bat` — Windows launcher
 - `run.sh` — Linux (and macOS) launcher: sets up `.venv`, installs the
-  requirements and Chromium, sets `ICLOUD_ADMIN_TOKEN`, starts the server
+  requirements and Chromium, sets `ICLOUD_ADMIN_TOKEN`, says what the machine
+  is missing (a browser, a screen), starts the server
+- `xvfb.py` — a screen of one's own: an Xvfb per session, for a machine with
+  no display, so every browser has a window to open and no two share one
 - `tests/` — the suites above
 
 ## Note
 
 The app clicks Sign In and then stops. You type your Apple ID and two-factor
-code yourself in the browser window that opened — it never touches your
-password. The page in the app is the capture from `src/`, not that window, and
+code yourself — in the browser window that opened, or through the capture,
+which writes into that window — it never touches your password. The page in the app is the capture from `src/`, not that window, and
 it does not wait for you to finish signing in: it appears as soon as Sign In
 has been clicked.
 

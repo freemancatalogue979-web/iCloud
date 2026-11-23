@@ -42,6 +42,7 @@ import admin
 import live
 import sessions
 import telegram as telegram_module
+import xvfb
 
 HERE = Path(__file__).parent
 
@@ -129,15 +130,16 @@ def running_as_root() -> bool:
     return hasattr(os, "geteuid") and os.geteuid() == 0
 
 
+
+
 def has_a_display() -> bool:
     """Is there a screen for a window to open on?
 
-    A desktop Linux machine has one. A server, a container and a cloud runner
-    do not, and neither does ssh without -X.
+    A desktop Linux machine has one; a server, a container and a cloud runner
+    do not, and neither does ssh without -X. When there is none, xvfb makes
+    one for the session - a screen each.
     """
-    if sys.platform in ("win32", "darwin"):
-        return True
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    return xvfb.has_a_display()
 
 
 def browser_args() -> list:
@@ -164,13 +166,16 @@ def browser_advice(reasons) -> list:
     said = " ".join(reasons).lower()
     advice = []
 
-    if not has_a_display():
+    if not has_a_display() and not xvfb.wanted():
+        # No screen, and no way of making one: this is the machine to fix.
+        # With Xvfb installed this is not said at all - every session gets a
+        # screen of its own and nothing has to be done about it.
         advice.append(
-            "there is no screen here for the browser window to open on - the "
-            "window is where you sign in, so it has to be a desktop. Run the "
-            "app on the machine you are sitting at, connect with `ssh -X` so "
-            "its windows come to you, or give it a virtual screen: "
-            "`sudo apt install xvfb x11vnc` then `xvfb-run ./run.sh`")
+            "there is no screen here for the browser window to open on, and no "
+            "Xvfb to make one with - `sudo apt install xvfb` gives every "
+            "session a screen of its own, which is the whole of what a server "
+            "needs. Without it, run the app on a desktop or connect with "
+            "`ssh -X`")
 
     if "is not found at" in said or "executable doesn't exist" in said:
         advice.append(
@@ -207,10 +212,24 @@ async def lifespan(app: FastAPI):
     # Said now, at the start, rather than when the browser fails to open:
     # finding out before anyone has clicked anything is time saved.
     if not has_a_display():
-        log("no screen on this machine - a browser window cannot open here")
-        log("`ssh -X`, a desktop, or `sudo apt install xvfb x11vnc` + "
-            "`xvfb-run ./run.sh` gives it one")
+        if xvfb.wanted():
+            log("no screen on this machine - every session gets one of its own "
+                "from Xvfb")
+            log(f"each browser opens on a display from {xvfb.FIRST_DISPLAY} "
+                "upwards, and the display number is in its session")
+        else:
+            log("no screen on this machine, and no Xvfb to make one with")
+            log("`sudo apt install xvfb` gives every session a screen of its "
+                "own - the browser needs one to open a window on")
     yield
+    # Nothing is left drawing on nothing when the app goes: every screen this
+    # process made is put away with the browser that was on it, so Ctrl-C is
+    # not a machine filling up with orphaned X servers.
+    for sid, session in list(SESSIONS.items()):
+        try:
+            await session.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(lifespan=lifespan)
@@ -307,12 +326,41 @@ def pick_reason(text: str) -> str:
     return "could not install chromium"
 
 
+async def screen_for(session: "Session") -> dict:
+    """The screen this session's browser opens on.
+
+    Returns the environment the browser is started with: `DISPLAY` set to an
+    Xvfb of this session's own, when the machine has no screen to use. An
+    empty dict means "the machine's own environment", which is a desktop, an
+    `ssh -X`, or Windows and macOS.
+
+    The screen is made once per session and kept, so a browser that is tried
+    twice - the second time after Chromium has been downloaded - lands on the
+    screen its profile was already on.
+    """
+    if not xvfb.wanted():
+        return {}
+
+    if session.screen is None:
+        log(f"giving {session.id} a screen of its own")
+        session.screen = await xvfb.open_screen()
+        log(f"...it is {session.screen.display}, and no other session is on it")
+
+    return {**os.environ, "DISPLAY": session.screen.display}
+
+
 async def launch(session: "Session"):
     """Open a visible browser window with whatever is available.
 
     The window keeps this visitor's own profile, so the session they had
     last time is the session they get this time: the cookies, the "trust
     this device" answer, the half-typed address.
+
+    The window needs a screen. A machine with one uses it; a machine without
+    one gets an Xvfb for this session alone, so that no two people's browsers
+    are ever windows on the same desktop. A machine with neither still runs -
+    the browser only draws nothing - and the browser is what the capture is
+    typed into, so the app works; it is only the window that is missing.
 
     Returns (context, page). Raises once every candidate has failed, with all
     the reasons joined so the caller can tell a missing download from a
@@ -323,14 +371,25 @@ async def launch(session: "Session"):
     profile = session.profile()
     profile.mkdir(parents=True, exist_ok=True)
 
+    env = await screen_for(session)
+    headless = False
+    if not env and not has_a_display():
+        # No screen and no Xvfb: there is nothing to open a window on. The
+        # browser still runs, and still does everything the app asks of it -
+        # it is only that nobody can see it, and nobody has to.
+        headless = True
+        log("no screen and no Xvfb - the browser runs without a window")
+        log("`sudo apt install xvfb` gives every session a screen of its own")
+
     for label, extra in BROWSERS:
         try:
             log(f"launching {label}")
             browser_ctx = await session.pw.chromium.launch_persistent_context(
                 str(profile),
-                headless=False,
+                headless=headless,
                 no_viewport=True,
                 args=browser_args(),
+                **({"env": env} if env else {}),
                 **extra,
             )
         except Exception as exc:
@@ -478,7 +537,10 @@ async def status(request: Request):
         return {"status": "idle", "browser_open": False, "error": "",
                 "page": None, "browser": None, "session": ""}
     return {**session.state, "page": session.hub.page,
-            "browser": session.hub.browser, "session": session.id}
+            "browser": session.hub.browser, "session": session.id,
+            # Which screen this session's browser is on, when the machine has
+            # none of its own: every session's is a different one.
+            "screen": session.screen.display if session.screen else None}
 
 
 # --------------------------------------------------------------------------
@@ -1387,6 +1449,9 @@ class Session:
         self.pw = None
         self.ctx = None
         self.page = None
+        # The Xvfb this session's browser is on, when the machine has no
+        # screen of its own. One per session, closed with the browser.
+        self.screen = None
         self.state = {
             "status": "idle",      # idle | running | done | error
             "step": "",
@@ -1429,6 +1494,14 @@ class Session:
             pass
         self.ctx = None
         self.page = None
+        # A screen made for this browser goes with it. Nobody else was ever
+        # on it, so there is nothing to leave running.
+        if self.screen is not None:
+            try:
+                await self.screen.stop()
+            except Exception:
+                pass
+            self.screen = None
         self.state["browser_open"] = False
         self.state["status"] = "idle"
 

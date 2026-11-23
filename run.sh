@@ -92,6 +92,21 @@ fi
 # itself as it starts, in the same words, and saying it twice in one launch
 # is noise.
 
+# ---- a screen for the browser -------------------------------------------
+# A server has no screen, and the browser the app signs in with needs one to
+# open a window on - even when the person signs in through the capture rather
+# than by looking at it. Xvfb is that screen: one for every session, so that
+# no two people's browsers are ever windows on one desktop.
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] &&
+   [ "$(uname -s)" = "Linux" ]; then
+    if command -v Xvfb >/dev/null 2>&1; then
+        say "no screen here - every session gets one of its own from Xvfb"
+    else
+        warn "no screen here, and no Xvfb - the browser would have no window to open"
+        warn "install it and every session gets a screen of its own:  sudo apt install xvfb"
+    fi
+fi
+
 # ---- the control room's secret ------------------------------------------
 # The environment has it first: a secret in a file on disk is a secret that
 # can be committed by accident.

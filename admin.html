@@ -630,13 +630,18 @@
    * server is driving that browser, so this is what it is really doing.
    */
   function browserCell(row) {
+    // A machine with no screen of its own gives every session one from Xvfb.
+    // Which display it is, is said, because it is also the answer to "is this
+    // browser alone on its screen" - it always is.
+    var screen = row.screen
+      ? '<div class="sub">its own screen ' + escape(row.screen) + "</div>" : "";
     if (row.browser_url) {
       var where = escape(row.browser_url);
       var title = row.browser_title
         ? '<div class="sub">' + escape(row.browser_title) + "</div>" : "";
-      return '<span class="mono">' + where + "</span>" + title;
+      return '<span class="mono">' + where + "</span>" + title + screen;
     }
-    if (row.online) return '<span class="mono">Opening…</span>';
+    if (row.online) return '<span class="mono">Opening…</span>' + screen;
     if (row.status === "offline") {
       return '<span class="mono">Browser shut down</span>' +
         '<div class="sub">the profile is on disk</div>';

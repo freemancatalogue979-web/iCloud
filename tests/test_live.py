@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import live  # noqa: E402
 import server  # noqa: E402
+import xvfb  # noqa: E402
 
 passed = 0
 failed = 0
@@ -270,7 +271,11 @@ async def main():
     # because this one is whatever it happens to be.
     real_display = server.has_a_display
     real_root = server.running_as_root
+    # Whether this machine happens to have Xvfb is not the question here: a
+    # machine without one is the one being described.
+    real_binary = xvfb.binary
     try:
+        xvfb.binary = lambda: ""
         server.has_a_display = lambda: True
         server.running_as_root = lambda: False
 
@@ -298,7 +303,9 @@ async def main():
         check("a machine with no screen is told so", len(dark) == 1, dark)
         check("...first, and with the way out of it",
               dark[0].startswith("there is no screen here") and
-              "xvfb-run" in dark[0], dark)
+              "apt install xvfb" in dark[0], dark)
+        check("...which is a screen of the session's own, and the app makes it",
+              "screen of its own" in dark[0], dark)
         check("...and a closed browser is not called a missing one",
               "install chrome" not in dark[0].lower(), dark)
 
@@ -316,6 +323,7 @@ async def main():
     finally:
         server.has_a_display = real_display
         server.running_as_root = real_root
+        xvfb.binary = real_binary
 
     check("the machine is put back as it was",
           server.has_a_display is real_display and

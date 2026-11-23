@@ -536,6 +536,10 @@ def client_row(session, store: Store) -> dict:
         "idle_seconds": round(idle, 1),
         "export_allowed": store.export_allowed(session.id),
         "profile": session.profile().name,
+        # Which screen this session's browser is on, when the machine has no
+        # screen of its own: every session's is a different one, which is
+        # what "alone on its screen" looks like from here.
+        "screen": session.screen.display if getattr(session, "screen", None) else "",
         "known": True,
     }
 
@@ -568,6 +572,7 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
         "idle_seconds": round(idle, 1),
         "export_allowed": store.export_allowed(sid),
         "profile": sid,
+        "screen": "",
         "known": False,
     }
 
@@ -657,6 +662,7 @@ def offline_row(sid: str, store: Store) -> dict:
         "idle_seconds": 0.0,
         "export_allowed": store.export_allowed(sid),
         "profile": sid,
+        "screen": "",
         "known": True,
         "profile_path": str(profile),
     }
