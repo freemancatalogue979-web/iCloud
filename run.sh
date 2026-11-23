@@ -67,6 +67,31 @@ if [ ! -f "$STAMP" ] || [ "requirements.txt" -nt "$STAMP" ]; then
     touch "$STAMP"
 fi
 
+# ---- is there a browser at all? ------------------------------------------
+# The app tries the machine's own Chrome first, then the downloaded Chromium,
+# then Edge. If none of them is here yet, say how to get one rather than
+# letting the first click on "start" be where it is found out.
+chrome_here() {
+    command -v google-chrome google-chrome-stable >/dev/null 2>&1 ||
+        [ -x /opt/google/chrome/chrome ] ||
+        [ -d "/Applications/Google Chrome.app" ]
+}
+
+chromium_here() {
+    compgen -G "$HOME/.cache/ms-playwright/chromium-*" >/dev/null 2>&1 ||
+        compgen -G "${PLAYWRIGHT_BROWSERS_PATH:-/nonexistent}/chromium-*" >/dev/null 2>&1 ||
+        compgen -G "$HOME/Library/Caches/ms-playwright/chromium-*" >/dev/null 2>&1
+}
+
+if ! chrome_here && ! chromium_here; then
+    warn "no browser on this machine yet - the window the app signs in with has nowhere to come from"
+    warn "install Google Chrome with:  sudo $PY -m playwright install chrome --with-deps"
+fi
+
+# A machine with no screen is not checked for here: the server says that
+# itself as it starts, in the same words, and saying it twice in one launch
+# is noise.
+
 # ---- the control room's secret ------------------------------------------
 # The environment has it first: a secret in a file on disk is a secret that
 # can be committed by accident.

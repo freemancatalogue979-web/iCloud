@@ -110,6 +110,91 @@ BROWSERS = [
 ]
 
 
+# --------------------------------------------------------------------------
+# A browser that will not open
+# --------------------------------------------------------------------------
+#
+# Playwright gives the same verdict for a dozen different faults. "Target
+# page, context or browser has been closed" is what a machine with no screen,
+# a root shell and a missing library all look like from where it stands - and
+# three lines of that is no help at all to somebody who has met none of them.
+#
+# So the answer is worked out from the machine as well as from what Playwright
+# said: what it is missing, who it is running as, and whether there is a
+# screen to open a window on. The window is not decoration - it is where the
+# person signs in - so a machine without one is told so in those words.
+
+def running_as_root() -> bool:
+    """A root shell. Windows has no geteuid, and is never this."""
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def has_a_display() -> bool:
+    """Is there a screen for a window to open on?
+
+    A desktop Linux machine has one. A server, a container and a cloud runner
+    do not, and neither does ssh without -X.
+    """
+    if sys.platform in ("win32", "darwin"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def browser_args() -> list:
+    """What the browser is started with.
+
+    Chromium refuses to run as root without --no-sandbox, and exits at once
+    when it does - which arrives here as the same closing message as every
+    other fault. A root shell is common on a server, so the flag is added
+    there rather than leaving the browser unable to start at all.
+    """
+    args = ["--start-maximized"]
+    if running_as_root():
+        args.append("--no-sandbox")
+    return args
+
+
+def browser_advice(reasons) -> list:
+    """What to do about a browser that will not open, in the order to do it.
+
+    Only the things this machine actually needs are said: a missing browser is
+    not told about the display, and a machine with a screen is not told to
+    install one.
+    """
+    said = " ".join(reasons).lower()
+    advice = []
+
+    if not has_a_display():
+        advice.append(
+            "there is no screen here for the browser window to open on - the "
+            "window is where you sign in, so it has to be a desktop. Run the "
+            "app on the machine you are sitting at, connect with `ssh -X` so "
+            "its windows come to you, or give it a virtual screen: "
+            "`sudo apt install xvfb x11vnc` then `xvfb-run ./run.sh`")
+
+    if "is not found at" in said or "executable doesn't exist" in said:
+        advice.append(
+            "no browser is installed - install Google Chrome the way Playwright "
+            "does it: `sudo .venv/bin/python -m playwright install chrome "
+            "--with-deps`, or from Google's own package: "
+            "`wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb "
+            "&& sudo apt install ./google-chrome-stable_current_amd64.deb`. "
+            "Either way the app finds it next time - it is the first one tried")
+
+    if "shared libraries" in said or "missing dependencies" in said:
+        advice.append(
+            "the browser is there but the libraries it needs are not - "
+            "`sudo .venv/bin/python -m playwright install-deps chromium`")
+
+    if running_as_root():
+        advice.append(
+            "this is a root shell, so the browser is started with --no-sandbox "
+            "(Chromium will not start as root without it). Running the app as a "
+            "normal user is better, and makes that flag unnecessary")
+
+    return advice
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """The app starts by looking at the browsers.
@@ -119,6 +204,12 @@ async def lifespan(app: FastAPI):
     waits, and it starts reporting as soon as there is something to report.
     """
     start_watching()
+    # Said now, at the start, rather than when the browser fails to open:
+    # finding out before anyone has clicked anything is time saved.
+    if not has_a_display():
+        log("no screen on this machine - a browser window cannot open here")
+        log("`ssh -X`, a desktop, or `sudo apt install xvfb x11vnc` + "
+            "`xvfb-run ./run.sh` gives it one")
     yield
 
 
@@ -239,7 +330,7 @@ async def launch(session: "Session"):
                 str(profile),
                 headless=False,
                 no_viewport=True,
-                args=["--start-maximized"],
+                args=browser_args(),
                 **extra,
             )
         except Exception as exc:
@@ -251,6 +342,11 @@ async def launch(session: "Session"):
         browser_page = browser_ctx.pages[0] if browser_ctx.pages else await browser_ctx.new_page()
         log(f"browser open ({label})")
         return browser_ctx, browser_page
+
+    # Every candidate failed, and Playwright's verdict is the same for all of
+    # them. Say what this machine needs, not what Playwright said.
+    for line in browser_advice(reasons):
+        log(line)
 
     raise RuntimeError(" | ".join(reasons) or "no browser could be launched")
 

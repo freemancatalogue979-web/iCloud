@@ -818,6 +818,78 @@ The `page:` line is the hub following a viewer to another captured page. If a
 captured page stops responding to typing, the question is whether `/sync.js`
 was served with it — open the page's source and look for the script tag.
 
+## When no browser will open on Linux
+
+```
+[icloud] launching system chrome
+[icloud] system chrome unavailable: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+[icloud] launching bundled chromium
+[icloud] bundled chromium unavailable: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+[icloud] launching system edge
+[icloud] system edge unavailable: Chromium distribution 'msedge' is not found at /opt/microsoft/msedge/msedge
+```
+
+Read the first two lines carefully: they are **not** the same failure. A
+browser that is not installed says so, in as many words — that is what the
+Edge line is — so "unavailable: ... has been closed" means Chrome *is*
+installed, started, and died before it drew anything. Which is one of three
+things, and Playwright gives the same sentence for all of them.
+
+**1. There is no screen.** A server, a container, a cloud runner, a bare
+Debian box and `ssh` without `-X` all have no `$DISPLAY`. The window is not
+decoration here — it is where the person signs in — so the app cannot run
+without one. Check:
+
+```bash
+echo "DISPLAY=[$DISPLAY] WAYLAND_DISPLAY=[$WAYLAND_DISPLAY]"
+```
+
+Three ways to give it a screen, best first:
+
+* run the app on the machine you are sitting at — that is what it is for;
+* `ssh -X you@server` and run `./run.sh` there, so the window opens on your
+  own desktop;
+* a virtual screen: `sudo apt install xvfb x11vnc`, then `xvfb-run ./run.sh`,
+  and `x11vnc -localhost -nopw` to look at that screen — headless *and*
+  visible, which is what a VPS needs.
+
+**2. It is a root shell.** Chromium refuses to run as root — it exits
+immediately, which is the same "has been closed". The app now adds
+`--no-sandbox` when it finds it is root, so Chrome starts; the better answer
+is a normal user.
+
+**3. The libraries are missing.** The browser is there, but `libnss3`,
+`libgbm1`, `libasound2` and the rest of the X libraries are not:
+
+```bash
+sudo .venv/bin/python -m playwright install-deps chromium
+```
+
+**Getting Chrome.** Chrome is tried first because it is the browser the
+machine already has and the one Apple's sign-in expects company from. To
+install it, Playwright will do it — download, `apt`, dependencies and all:
+
+```bash
+sudo .venv/bin/python -m playwright install chrome --with-deps
+```
+
+or from Google's own package:
+
+```bash
+wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt install ./google-chrome-stable_current_amd64.deb
+```
+
+Either way the app finds it on the next run: `channel="chrome"` is the first
+candidate in `BROWSERS`, and the bundled Chromium stays as the fallback for a
+machine with no Chrome. `./run.sh` says which of the two it can see before the
+server starts.
+
+**The app says all this itself now.** When every candidate fails it logs what
+*this* machine needs — the missing browser, the missing libraries, the root
+shell, the absent screen — instead of three copies of the same verdict, and a
+machine with no `DISPLAY` is told at startup rather than at the first click.
+
 ## Tests
 
 ```bash

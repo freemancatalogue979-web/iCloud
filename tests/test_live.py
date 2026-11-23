@@ -18,6 +18,7 @@ ones; only the browser that answers them is not real.
 """
 
 import asyncio
+import os
 import tempfile
 import sys
 from pathlib import Path
@@ -262,6 +263,68 @@ class FakeContext:
 
 
 async def main():
+    # ---- a browser that will not open ------------------------------------
+    # Playwright says "Target page, context or browser has been closed" for a
+    # missing browser, a missing library and a machine with no screen alike,
+    # so the advice is worked out from the machine. The machine is faked here,
+    # because this one is whatever it happens to be.
+    real_display = server.has_a_display
+    real_root = server.running_as_root
+    try:
+        server.has_a_display = lambda: True
+        server.running_as_root = lambda: False
+
+        check("a machine with a screen and a browser that dies gets no lecture",
+              server.browser_advice(
+                  ["Target page, context or browser has been closed"]) == [])
+
+        missing = server.browser_advice(
+            ["Chromium distribution 'chrome' is not found at /opt/google/chrome/chrome"])
+        check("a browser that is not installed is told how to install one",
+              any("playwright install chrome" in line for line in missing),
+              missing)
+        check("...and is not told about a screen it has",
+              not any("no screen" in line for line in missing), missing)
+
+        libs = server.browser_advice(
+            ["error while loading shared libraries: libnss3.so: cannot open "
+             "shared object file"])
+        check("missing libraries are pointed at install-deps",
+              any("install-deps" in line for line in libs), libs)
+
+        server.has_a_display = lambda: False
+        dark = server.browser_advice(
+            ["Target page, context or browser has been closed"])
+        check("a machine with no screen is told so", len(dark) == 1, dark)
+        check("...first, and with the way out of it",
+              dark[0].startswith("there is no screen here") and
+              "xvfb-run" in dark[0], dark)
+        check("...and a closed browser is not called a missing one",
+              "install chrome" not in dark[0].lower(), dark)
+
+        check("a browser started as a normal user gets no --no-sandbox",
+              server.browser_args() == ["--start-maximized"],
+              server.browser_args())
+
+        server.running_as_root = lambda: True
+        check("a root shell gets --no-sandbox, which Chromium needs to start",
+              "--no-sandbox" in server.browser_args(), server.browser_args())
+        check("...and is told why, and what is better",
+              any("--no-sandbox" in line and "normal user" in line
+                  for line in server.browser_advice(["has been closed"])),
+              server.browser_advice(["has been closed"]))
+    finally:
+        server.has_a_display = real_display
+        server.running_as_root = real_root
+
+    check("the machine is put back as it was",
+          server.has_a_display is real_display and
+          server.running_as_root is real_root)
+    check("a real screen is read from the environment, not assumed",
+          server.has_a_display() == bool(
+              os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY") or
+              sys.platform in ("win32", "darwin")))
+
     # ---- the element a capture's control maps to -------------------------
     check("an id we are willing to act on is accepted",
           live.element_id("account_name_text_field") == "account_name_text_field")
