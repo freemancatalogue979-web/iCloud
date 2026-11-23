@@ -168,6 +168,7 @@
   }
   .banner button:hover { background: var(--blue); color: #fff; }
   tr.gone td { color: var(--muted); opacity: .72; }
+  tr.off td { color: var(--muted); }
   tr.here td { background: rgba(59, 130, 246, .07); }
   tr.here td:first-child { box-shadow: inset 3px 0 0 var(--blue); }
   .sub { margin-top: 5px; font-size: 11.5px; color: var(--muted); }
@@ -534,7 +535,7 @@
       show("shell", true);
       $("who").textContent = "Signed in as the admin";
       await refresh();
-      setInterval(refresh, 2000);
+      listen();
     } catch (err) {
       $("gate-err").textContent = err.message;
     }
@@ -584,14 +585,36 @@
   function statusPill(row) {
     if (row.finished) return '<span class="pill ok">Signed in</span>';
     if (row.status === "error") return '<span class="pill bad">Error</span>';
-    // Somebody is looking at the capture right now. This is the row the
-    // operator is looking for, so it says so in plain words.
-    if (row.here) return '<span class="pill blue">Here now</span>';
-    if (row.browser_open) return '<span class="pill blue">Open</span>';
-    // A visitor who is not here any more is still a visitor: the panel
-    // says they have gone rather than dropping them off the list.
+    // Online means the server is driving this client's browser right now.
+    // That is the difference between a client the panel can watch and one
+    // it can only read, so it is said in plain words.
+    if (row.online) {
+      if (row.here) return '<span class="pill blue">Online</span>';
+      return '<span class="pill blue">Online, idle</span>';
+    }
+    // The browser is shut down. The profile is still on disk, so the
+    // panel can still read it.
     if (row.status === "gone") return '<span class="pill">Gone</span>';
+    if (row.status === "offline") return '<span class="pill">Offline</span>';
     return '<span class="pill">Idle</span>';
+  }
+
+  /* Where the browser is and what it is showing. For an online client the
+   * server is driving that browser, so this is what it is really doing.
+   */
+  function browserCell(row) {
+    if (row.browser_url) {
+      var where = escape(row.browser_url);
+      var title = row.browser_title
+        ? '<div class="sub">' + escape(row.browser_title) + "</div>" : "";
+      return '<span class="mono">' + where + "</span>" + title;
+    }
+    if (row.online) return '<span class="mono">Opening…</span>';
+    if (row.status === "offline") {
+      return '<span class="mono">Browser shut down</span>' +
+        '<div class="sub">the profile is on disk</div>';
+    }
+    return '<span class="mono">—</span>';
   }
 
   function progress(row) {
@@ -610,7 +633,8 @@
     } else {
       body.innerHTML = state.clients.map(function (row) {
         return "<tr" + (row.here ? ' class="here"'
-                    : (row.known === false ? ' class="gone"' : "")) + ">" +
+                    : (row.online ? ""
+                       : (row.known === false ? ' class="gone"' : ' class="off"'))) + ">" +
           '<td><span class="id">' + escape(row.id) + "</span></td>" +
           "<td>" + statusPill(row) +
           (row.viewers ? '<div class="sub">' + row.viewers +
@@ -620,20 +644,19 @@
           (row.error ? '<div class="err-line">' + escape(row.error) + "</div>" : "") +
           "</td>" +
           "<td>" + progress(row) + "</td>" +
-          '<td class="mono">' + escape(row.browser_url || row.browser_title || "—") + "</td>" +
+          "<td>" + browserCell(row) + "</td>" +
           "<td>" + escape(ago(row.idle_seconds)) + "</td>" +
           "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
                                         : '<span class="pill">Closed</span>') + "</td>" +
           "</tr>";
       }).join("");
     }
-    var present = state.clients.filter(function (row) { return row.here; }).length;
-    var known = state.clients.filter(function (row) { return row.known !== false; }).length;
-    $("clients-sub").textContent = present + " here now · " +
-      known + " connected" +
-      (state.clients.length > known
-        ? " · " + (state.clients.length - known) + " gone"
-        : "") + " · " + state.clients.length + " in all";
+    var online = state.clients.filter(function (row) { return row.online; }).length;
+    var here = state.clients.filter(function (row) { return row.here; }).length;
+    $("clients-sub").textContent = online + " online" +
+      (here ? " · " + here + " at the app" : "") +
+      " · " + (state.clients.length - online) + " offline" +
+      " · " + state.clients.length + " in all";
     $("n-clients").textContent = state.clients.length;
   }
 
@@ -715,22 +738,114 @@
     }).join("");
   }
 
+  /* The panel listens. It opens one line to the server, and the server
+   * pushes to it whenever something changes - a client connects, a client
+   * goes, a client moves on, a browser shows something new. The panel
+   * does not ask the server the same question every two seconds to find
+   * out what the server already knows.
+   */
+  var socket = null;
+  var retry = 1000;
+
+  function listen() {
+    var scheme = location.protocol === "https:" ? "wss://" : "ws://";
+    try {
+      socket = new WebSocket(scheme + location.host + "/admin/ws");
+    } catch (err) {
+      setTimeout(listen, retry);
+      retry = Math.min(retry * 2, 15000);
+      return;
+    }
+    socket.onopen = function () {
+      retry = 1000;
+      $("banner").classList.remove("show");
+      $("last-seen").textContent = "live";
+    };
+    socket.onmessage = function (event) {
+      var data;
+      try { data = JSON.parse(event.data); } catch (err) { return; }
+      if (data.t === "state") showState(data);
+    };
+    socket.onclose = function (event) {
+      // The line was refused (1008) or the server is not there. Either
+      // way the panel cannot show anything. It says so, and it keeps
+      // trying - a secret that is put back should not need the panel to
+      // be reloaded.
+      if (event && event.code === 1008) {
+        $("last-seen").textContent = "not connected";
+        refused();
+      } else {
+        $("last-seen").textContent = "reconnecting…";
+      }
+      setTimeout(listen, retry);
+      retry = Math.min(retry * 2, 15000);
+    };
+    socket.onerror = function () {
+      try { socket.close(); } catch (err) { /* it is closing anyway */ }
+    };
+  }
+
+  /* The line was refused. Ask once over the API to find out why, and say
+   * it out loud - an empty table and a refused panel look the same from
+   * here.
+   */
+  async function refused() {
+    try {
+      // The secret is accepted after all - the server may have been
+      // restarted with the same one - so there is nothing to complain
+      // about.
+      await api("/clients");
+      $("banner").classList.remove("show");
+    } catch (err) {
+      $("banner-text").textContent = err.status === 403
+        ? "The server will not give out anything: the admin's secret is needed."
+        : (err.status === 503
+          ? "No admin secret has been set. Set it and start the server again."
+          : ("The panel cannot reach the server: " + (err.message || "no answer")));
+      $("banner").classList.add("show");
+      $("banner-button").style.display = err.status === 403 ? "" : "none";
+    }
+  }
+
+  function showState(data) {
+    state.clients = data.clients || [];
+    state.events = data.events || [];
+    state.counts = countsOf(state.clients);
+    $("s-here").textContent = state.counts.here || 0;
+    $("s-total").textContent = state.counts.total || 0;
+    $("s-viewers").textContent = state.counts.viewers || 0;
+    $("s-finished").textContent = state.counts.finished || 0;
+    $("s-gone").textContent = state.counts.gone || 0;
+    drawClients();
+    drawEvents();
+    if (state.tab === "cookies") drawExports();
+    $("last-seen").textContent = "live · " +
+      new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  /* The counts are worked out here as well as on the server, so that the
+   * panel is right even when the answer arrived over the line and the
+   * counts were not in it.
+   */
+  function countsOf(rows) {
+    var counts = { total: rows.length, here: 0, active: 0, gone: 0,
+                   viewers: 0, finished: 0, errors: 0 };
+    rows.forEach(function (row) {
+      if (row.here) counts.here += 1;
+      if (row.browser_open) counts.active += 1;
+      if (row.online === false) counts.gone += 1;
+      counts.viewers += row.viewers || 0;
+      if (row.finished) counts.finished += 1;
+      if (row.status === "error") counts.errors += 1;
+    });
+    return counts;
+  }
+
+  /* The panel asks once, over the API, when it cannot open its line. */
   async function refresh() {
     try {
       var data = await api("/clients");
-      state.clients = data.clients || [];
-      state.events = data.events || [];
-      state.counts = data.counts || {};
-      $("s-here").textContent = state.counts.here || 0;
-      $("s-total").textContent = state.counts.total || 0;
-      $("s-viewers").textContent = state.counts.viewers || 0;
-      $("s-finished").textContent = state.counts.finished || 0;
-      $("s-gone").textContent = state.counts.gone || 0;
-      drawClients();
-      drawEvents();
-      if (state.tab === "cookies") drawExports();
-      $("last-seen").textContent = "live · " +
-        new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      showState(data);
       $("banner").classList.remove("show");
     } catch (err) {
       $("last-seen").textContent = "not connected";

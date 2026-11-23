@@ -60,19 +60,35 @@ there before the server starts, because that is what an environment is.
 
 **The dashboard** shows what the server actually knows — the sessions it has,
 what each one's browser is doing, the step it is on, and how long ago it was
-seen — and it refreshes every two seconds. Nothing in it is made up: it is
-the same `SESSIONS` the app itself works with.
+seen. Nothing in it is made up: it is the same `SESSIONS` the app itself
+works with.
 
-**Who is here, and who has gone.** A client whose capture page is open right
-now is **here now** — the row says so, says how many people are looking at
-it, and is marked. A client whose browser is open but whose page has been
-closed is **open**. A client whose browser has been shut down is **gone**:
-the panel still says where they got to, and when they were last here.
+**The panel listens.** It opens one WebSocket to the server and the server
+pushes to it whenever something changes — a client connects, a client goes, a
+client moves to the next step, a browser shows something new. The panel
+does not fetch the client list every two seconds to find out what the
+server already knows. If the secret is changed while a panel is open, that
+panel's line is closed and it says so, and it keeps trying: a secret that is
+put back does not need the panel reloaded.
 
-A client is somebody who connected. A profile folder left on disk by an
-earlier run of the server is *not* a client — nobody is in it, nobody has
-been for days, and there is nothing that can be done with it — so it is not
-on the list, and nothing can be asked of it.
+**Online and offline.** A client is a visitor, and a visitor's folder in
+`visitors/` is their browser's profile — it is there whether they are here
+or not.
+
+* **Online** means the server is driving that client's browser right now.
+  The panel shows where the browser is and what it is showing — the
+  address, the page title, the step the client is on. The browser's status
+  is the client's status.
+* **Offline** means the browser is shut down but the profile is on disk.
+  The panel says so, and the profile is still that browser's memory — so
+  the cookies are still in it, and the panel can open the folder quietly
+  (no window, closed again straight away) and read them out. The sign-in
+  they did last time is in that folder.
+
+So the cookies of an offline client are as readable as the cookies of an
+online one: they are read from the profile that made them. A client whose
+browser was shut down is *gone* — the panel still says where they got to
+and when they were last here — and a client coming back is *here* again.
 
 **Presence is the person's, not the server's.** The server asks the browser
 a question every half second, and that does not count as the visitor being

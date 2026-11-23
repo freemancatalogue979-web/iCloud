@@ -234,9 +234,9 @@ async def main():
     check("...and that they are not here now",
           gone[0]["browser_open"] is False and gone[0]["known"] is False, gone)
 
-    # A profile folder left on disk by an earlier run is not a client.
-    # Nobody is in it, nobody has been for days, and there is nothing that
-    # can be done with it - so it is not on the list.
+    # A profile folder on disk is a client whose browser is shut down.
+    # The folder is that visitor's browser memory - their cookies are in
+    # it - so they are on the list, and the panel says they are offline.
     profile = server.PROFILES / "the-admin-before"
     profile.mkdir(parents=True, exist_ok=True)
     answer = await endpoint("/admin/api/clients")(
@@ -244,14 +244,34 @@ async def main():
     data = as_json(answer)
     before = [row for row in data.get("clients", [])
               if row["id"] == "the-admin-before"]
-    check("a profile folder from an earlier run is not a client",
-          len(before) == 0, data.get("clients"))
+    check("a client whose profile is on disk is on the list",
+          len(before) == 1, data.get("clients"))
+    check("...and is said to be offline",
+          before[0]["online"] is False and
+          before[0]["status"] == "offline", before)
+    check("...and the panel knows where their profile is",
+          before[0]["profile_path"].endswith("the-admin-before"), before)
 
+    # And their cookies can be asked for - the folder holds them.
     answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
         "the-admin-before",
         make_request("POST", "/admin/api/clients/the-admin-before/export",
                      {"allowed": True}, cookies=admin_cookie))
-    check("...and nothing can be done with it",
+    check("...so they can be allowed to be exported",
+          status_of(answer) == 200, as_json(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/cookies")(
+        "the-admin-before", make_request(cookies=admin_cookie))
+    check("...and their cookies can be read",
+          status_of(answer) == 200, as_json(answer))
+
+    # A client the server has never heard of is not a client, whatever
+    # the operator calls it.
+    answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
+        "no-such-client",
+        make_request("POST", "/admin/api/clients/no-such-client/export",
+                     {"allowed": True}, cookies=admin_cookie))
+    check("a client that has never been here is not a client",
           status_of(answer) == 404, status_of(answer))
 
     # ---- the cookies of a client who has gone ----------------------------
@@ -285,6 +305,51 @@ async def main():
                                       "name", "path", "sameSite", "secure",
                                       "session", "storeId", "value"},
           sorted(data["cookies"][0]))
+
+    # ---- the panel listens, it does not ask -----------------------------
+    # The panel opens one line to the server and the server pushes to it.
+    # A panel that asked the server the same question every two seconds
+    # would be asking about something the server already knows.
+    check("nobody is listening yet", len(admin.LISTENERS) == 0,
+          admin.LISTENERS)
+
+    class FakeListener:
+        def __init__(self):
+            self.sent = []
+            self.secret = "the-secret"
+
+        def put_nowait(self, message):
+            self.sent.append(message)
+
+        def close(self, code=1000):
+            self.closed = code
+
+    listener = FakeListener()
+    admin.LISTENERS.add(listener)
+    admin.push()
+    check("the server pushes to the panel when something changes",
+          len(listener.sent) == 1, listener.sent)
+    check("...and what it pushes is the clients",
+          "clients" in listener.sent[0], listener.sent[0])
+    check("...and the events too",
+          "events" in listener.sent[0], listener.sent[0])
+
+    # A change is pushed without being asked for.
+    before = len(listener.sent)
+    admin.note("something-happened", session="the-admin-test")
+    check("an event is pushed as well",
+          len(listener.sent) > before, listener.sent)
+    admin.LISTENERS.discard(listener)
+
+    # A line whose secret is no longer the secret is closed.
+    old = FakeListener()
+    old.secret = "an-old-secret"
+    admin.LISTENERS.add(old)
+    admin.drop_stale_listeners()
+    check("a line with an old secret is closed",
+          len(admin.LISTENERS) == 0, admin.LISTENERS)
+    check("...and it is closed with the code that says so",
+          getattr(old, "closed", None) == 1008, getattr(old, "closed", None))
 
     # ---- the secret in the file is read again ----------------------------
     # The secret may be put in the file while the server is running.
