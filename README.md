@@ -23,8 +23,25 @@ Then open <http://localhost:9002>
 On Windows, `run.bat` does the whole thing: creates `.venv`, installs the
 requirements, installs Chromium, starts the server.
 
+On Linux — and on macOS, which has the same shell — `run.sh` is the same
+thing, and it sets the control room's secret on the way:
+
+```bash
+./run.sh                              # ICLOUD_ADMIN_TOKEN=MySecret123
+ICLOUD_ADMIN_TOKEN=my-own-secret ./run.sh    # or your own
+```
+
+The first run is the setting up — the virtualenv, the requirements, and
+Chromium — and every run after that goes straight to the server: all three
+are done only when they are missing or `requirements.txt` has changed. The
+secret is put in the environment and in no file, so nothing is left behind
+to be committed; the one it sets is for trying the app out, so give it your
+own anywhere else. It needs `python3`, and on Debian or Ubuntu the venv
+module is a package of its own: `sudo apt install python3 python3-venv`.
+
 Chromium is downloaded automatically on the first visit if it isn't already
-there. To do it up front instead:
+there, so a machine that could not download it while the script was setting
+up is not a machine that cannot run. To do it up front instead:
 
 ```bash
 python -m playwright install chromium
@@ -900,6 +917,8 @@ the project virtualenv by itself.
 - `telegram.py` — the Telegram notifier
 - `fonts/` — Space Grotesk, served by the app (SIL Open Font License 1.1)
 - `run.bat` — Windows launcher
+- `run.sh` — Linux (and macOS) launcher: sets up `.venv`, installs the
+  requirements and Chromium, sets `ICLOUD_ADMIN_TOKEN`, starts the server
 - `tests/` — the suites above
 
 ## Note
