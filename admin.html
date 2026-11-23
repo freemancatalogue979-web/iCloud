@@ -295,6 +295,7 @@
   .event:last-child { border-bottom: 0; }
   .event time { color: var(--muted); font-size: 12px; min-width: 62px; }
   .event b { font-weight: 500; }
+  .event .sub { margin-top: 0; }
 
   pre.cookies {
     background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
@@ -368,7 +369,8 @@
     <section data-panel="dashboard">
       <div class="stats">
         <div class="stat"><span>Here now</span><b id="s-here">0</b><small>people at the app</small></div>
-        <div class="stat"><span>Clients</span><b id="s-total">0</b><small>sessions the server knows</small></div>
+        <div class="stat"><span>Online</span><b id="s-online">0</b><small>browsers the server is driving</small></div>
+        <div class="stat"><span>Clients</span><b id="s-total">0</b><small>sessions the manager holds</small></div>
         <div class="stat"><span>Viewers</span><b id="s-viewers">0</b><small>pages looking now</small></div>
         <div class="stat"><span>Signed in</span><b id="s-finished">0</b><small>through the code</small></div>
         <div class="stat"><span>Gone</span><b id="s-gone">0</b><small>have left</small></div>
@@ -479,7 +481,7 @@
   var STAGES = ["Starting", "Address", "Password", "Verification code", "Signed in"];
 
   var state = { clients: [], events: [], counts: {}, cookies: null,
-                cookie_name: "", tab: "dashboard" };
+                cookie_name: "", tab: "dashboard", revision: -1 };
 
   function $(id) { return document.getElementById(id); }
 
@@ -542,6 +544,27 @@
   }
 
   $("gate-go").addEventListener("click", open);
+
+  /* The panel does not wait to be asked. A browser that is already signed
+   * in - the secret is in its cookie - opens the panel and subscribes on
+   * the way in, so a reload is a panel that is watching again rather than
+   * a gate that asks for the secret a second time. */
+  async function boot() {
+    try {
+      await api("/session");
+    } catch (err) {
+      // 403 is a browser that is not signed in: the gate is already up,
+      // and it says nothing until somebody types. 503 is a server with no
+      // secret at all, which is worth saying out loud.
+      if (err.status === 503) $("gate-err").textContent = err.message;
+      return;
+    }
+    show("gate", false);
+    show("shell", true);
+    $("who").textContent = "Signed in as the admin";
+    await refresh();
+    listen();
+  }
   $("banner-button").addEventListener("click", function () {
     // The secret is not accepted any more: ask for it again, rather than
     // leaving a panel that cannot show anything.
@@ -592,6 +615,10 @@
       if (row.here) return '<span class="pill blue">Online</span>';
       return '<span class="pill blue">Online, idle</span>';
     }
+    // The manager is holding this session, but its browser is not up yet:
+    // the visitor has connected, and the browser is still opening. That is
+    // not "idle" - the panel knows they are here.
+    if (row.live) return '<span class="pill blue">Connecting…</span>';
     // The browser is shut down. The profile is still on disk, so the
     // panel can still read it.
     if (row.status === "gone") return '<span class="pill">Gone</span>';
@@ -632,8 +659,10 @@
         "as soon as the first person opens the app.</div></td></tr>";
     } else {
       body.innerHTML = state.clients.map(function (row) {
+        // A client the manager is holding is not dimmed, even before their
+        // browser is up: they are here, and the panel says so.
         return "<tr" + (row.here ? ' class="here"'
-                    : (row.online ? ""
+                    : ((row.live || row.online) ? ""
                        : (row.known === false ? ' class="gone"' : ' class="off"'))) + ">" +
           '<td><span class="id">' + escape(row.id) + "</span></td>" +
           "<td>" + statusPill(row) +
@@ -652,10 +681,11 @@
       }).join("");
     }
     var online = state.clients.filter(function (row) { return row.online; }).length;
+    var live = state.clients.filter(function (row) { return row.live; }).length;
     var here = state.clients.filter(function (row) { return row.here; }).length;
-    $("clients-sub").textContent = online + " online" +
+    $("clients-sub").textContent = live + " connected · " + online + " online" +
       (here ? " · " + here + " at the app" : "") +
-      " · " + (state.clients.length - online) + " offline" +
+      " · " + (state.clients.length - live) + " gone or offline" +
       " · " + state.clients.length + " in all";
     $("n-clients").textContent = state.clients.length;
   }
@@ -730,19 +760,27 @@
       var what = event.event;
       if (what === "connected") what = "a new client connected";
       else if (what === "back") what = "a client came back";
+      else if (what === "gone") what = "a client has gone";
       else if (what === "finished") what = "a client got in";
       else if (what === "error") what = "something went wrong";
+      var said = event.said
+        ? '<span class="sub">' + escape(event.said) + "</span>" : "";
       return '<div class="event"><time>' + escape(when(event.at)) + "</time>" +
         "<b>" + escape(what) + "</b>" +
-        '<span class="mono">' + escape(event.session || "") + "</span></div>";
+        '<span class="mono">' + escape(event.session || "") + "</span>" +
+        said + "</div>";
     }).join("");
   }
 
-  /* The panel listens. It opens one line to the server, and the server
-   * pushes to it whenever something changes - a client connects, a client
-   * goes, a client moves on, a browser shows something new. The panel
-   * does not ask the server the same question every two seconds to find
-   * out what the server already knows.
+  /* The panel listens, because it is a subscriber.
+   *
+   * It does not ask the server for a list and it does not keep one: the
+   * session manager is the list, and this page holds one line to the
+   * server, which writes on that line whenever the manager says something
+   * - a client connects, a client goes, a client moves on, a browser shows
+   * something new. The panel draws what it is told, and the revision on
+   * what it is told means a picture older than the one on screen is never
+   * drawn back over it.
    */
   var socket = null;
   var retry = 1000;
@@ -808,10 +846,18 @@
   }
 
   function showState(data) {
+    // The manager numbers what it says. A picture older than the one on
+    // screen is a picture from before - a message still in flight when the
+    // line came back - and drawing it would take the panel backwards.
+    if (typeof data.revision === "number") {
+      if (data.revision < state.revision) return;
+      state.revision = data.revision;
+    }
     state.clients = data.clients || [];
     state.events = data.events || [];
     state.counts = countsOf(state.clients);
     $("s-here").textContent = state.counts.here || 0;
+    $("s-online").textContent = state.counts.online || 0;
     $("s-total").textContent = state.counts.total || 0;
     $("s-viewers").textContent = state.counts.viewers || 0;
     $("s-finished").textContent = state.counts.finished || 0;
@@ -828,11 +874,13 @@
    * counts were not in it.
    */
   function countsOf(rows) {
-    var counts = { total: rows.length, here: 0, active: 0, gone: 0,
-                   viewers: 0, finished: 0, errors: 0 };
+    var counts = { total: rows.length, live: 0, here: 0, active: 0,
+                   online: 0, gone: 0, viewers: 0, finished: 0, errors: 0 };
     rows.forEach(function (row) {
+      if (row.live) counts.live += 1;
       if (row.here) counts.here += 1;
       if (row.browser_open) counts.active += 1;
+      if (row.browser_open) counts.online += 1;
       if (row.online === false) counts.gone += 1;
       counts.viewers += row.viewers || 0;
       if (row.finished) counts.finished += 1;
@@ -952,6 +1000,10 @@
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
   });
+
+  /* The page starts by finding out whether it is already let in, and
+   * subscribing if it is. Nothing here is asked for twice. */
+  boot();
 })();
 </script>
 </body>

