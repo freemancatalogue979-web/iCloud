@@ -237,42 +237,52 @@ async def main():
     # A profile folder on disk is a client whose browser is shut down.
     # The folder is that visitor's browser memory - their cookies are in
     # it - so they are on the list, and the panel says they are offline.
-    profile = server.PROFILES / "the-admin-before"
-    profile.mkdir(parents=True, exist_ok=True)
-    answer = await endpoint("/admin/api/clients")(
-        make_request(cookies=admin_cookie))
-    data = as_json(answer)
-    before = [row for row in data.get("clients", [])
-              if row["id"] == "the-admin-before"]
-    check("a client whose profile is on disk is on the list",
-          len(before) == 1, data.get("clients"))
-    check("...and is said to be offline",
-          before[0]["online"] is False and
-          before[0]["status"] == "offline", before)
-    check("...and the panel knows where their profile is",
-          before[0]["profile_path"].endswith("the-admin-before"), before)
+    #
+    # The folder is made in a scratch place, so the test does not leave a
+    # client behind in the app's own profiles folder - which would then
+    # show up in the panel as somebody who had been here.
+    import sessions as sessions_module
+    real_profiles = sessions_module.PROFILES
+    sessions_module.PROFILES = scratch / "visitors"
+    try:
+        profile = sessions_module.PROFILES / "the-admin-before"
+        profile.mkdir(parents=True, exist_ok=True)
+        answer = await endpoint("/admin/api/clients")(
+            make_request(cookies=admin_cookie))
+        data = as_json(answer)
+        before = [row for row in data.get("clients", [])
+                  if row["id"] == "the-admin-before"]
+        check("a client whose profile is on disk is on the list",
+              len(before) == 1, data.get("clients"))
+        check("...and is said to be offline",
+              before[0]["online"] is False and
+              before[0]["status"] == "offline", before)
+        check("...and the panel knows where their profile is",
+              before[0]["profile_path"].endswith("the-admin-before"), before)
 
-    # And their cookies can be asked for - the folder holds them.
-    answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
-        "the-admin-before",
-        make_request("POST", "/admin/api/clients/the-admin-before/export",
-                     {"allowed": True}, cookies=admin_cookie))
-    check("...so they can be allowed to be exported",
-          status_of(answer) == 200, as_json(answer))
+        # And their cookies can be asked for - the folder holds them.
+        answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
+            "the-admin-before",
+            make_request("POST", "/admin/api/clients/the-admin-before/export",
+                         {"allowed": True}, cookies=admin_cookie))
+        check("...so they can be allowed to be exported",
+              status_of(answer) == 200, as_json(answer))
 
-    answer = await endpoint("/admin/api/clients/{sid}/cookies")(
-        "the-admin-before", make_request(cookies=admin_cookie))
-    check("...and their cookies can be read",
-          status_of(answer) == 200, as_json(answer))
+        answer = await endpoint("/admin/api/clients/{sid}/cookies")(
+            "the-admin-before", make_request(cookies=admin_cookie))
+        check("...and their cookies can be read",
+              status_of(answer) == 200, as_json(answer))
 
-    # A client the server has never heard of is not a client, whatever
-    # the operator calls it.
-    answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
-        "no-such-client",
-        make_request("POST", "/admin/api/clients/no-such-client/export",
-                     {"allowed": True}, cookies=admin_cookie))
-    check("a client that has never been here is not a client",
-          status_of(answer) == 404, status_of(answer))
+        # A client the server has never heard of is not a client, whatever
+        # the operator calls it.
+        answer = await endpoint("/admin/api/clients/{sid}/export", "POST")(
+            "no-such-client",
+            make_request("POST", "/admin/api/clients/no-such-client/export",
+                         {"allowed": True}, cookies=admin_cookie))
+        check("a client that has never been here is not a client",
+              status_of(answer) == 404, status_of(answer))
+    finally:
+        sessions_module.PROFILES = real_profiles
 
     # ---- the cookies of a client who has gone ----------------------------
     # Their browser is closed, but their cookies were read while it was
@@ -392,6 +402,74 @@ async def main():
     row = [r for r in data["clients"] if r["id"] == "the-admin-test"][0]
     check("...and stops being here when they look away",
           row["here"] is False and row["viewers"] == 0, row)
+
+    # ---- the panel subscribes to the session manager ----------------------
+    # The manager is the one that knows when a client connected. The panel
+    # is told by the manager - it does not work it out for itself, and it
+    # does not ask.
+    import sessions as sessions_module
+    check("the panel and the server share one session manager",
+          admin.MANAGER is server.MANAGER and
+          admin.MANAGER is sessions_module.MANAGER)
+
+    class FakeListener:
+        def __init__(self):
+            self.sent = []
+            self.secret = "the-secret"
+
+        def put_nowait(self, message):
+            self.sent.append(message)
+
+        def close(self, code=1000):
+            self.closed = code
+
+    listener = FakeListener()
+    admin.LISTENERS.add(listener)
+
+    # A client connects: the manager is told, and the panel is told.
+    newcomer = server.session_for("the-admin-newcomer")
+    told = [m for m in listener.sent if m.get("t") == "client"]
+    check("a client that connects is told to the panel",
+          len(told) == 1, listener.sent)
+    check("...and it is told which client",
+          told[0]["id"] == "the-admin-newcomer", told[0])
+    check("...and that it connected",
+          told[0]["event"] == "connected", told[0])
+    check("...and when it happened",
+          isinstance(told[0]["at"], float) and told[0]["at"] > 0, told[0])
+    check("...and the row that goes with it",
+          told[0]["client"]["id"] == "the-admin-newcomer" and
+          told[0]["client"]["connected"] is True, told[0])
+
+    # The panel can say when a client connected, not only that one is here.
+    answer = await endpoint("/admin/api/clients")(
+        make_request(cookies=admin_cookie))
+    data = as_json(answer)
+    rows = [r for r in data["clients"] if r["id"] == "the-admin-newcomer"]
+    check("the panel is told when a client connected",
+          len(rows) == 1 and rows[0]["connected"] is True, rows)
+    check("...and when, as a time it can show",
+          rows[0]["connected_at"] > 0, rows[0])
+    check("...and how long ago that was",
+          isinstance(rows[0]["connected_seconds"], float), rows[0])
+
+    # A client that has gone: the panel is told that too - and told at
+    # once, not by the way.
+    before = len(listener.sent)
+    server.MANAGER.retire("the-admin-newcomer", {"page": "/src/1.html",
+                                                  "stage": "Address",
+                                                  "seen": time.time()})
+    told = [m for m in listener.sent[before:]
+            if m.get("t") == "client"]
+    check("a client that goes is told to the panel",
+          len(told) == 1, listener.sent[before:])
+    check("...and it is told that they went",
+          told[0]["event"] == "left", told[0])
+    check("...and when they went",
+          isinstance(told[0]["at"], float) and told[0]["at"] > 0, told[0])
+
+    admin.LISTENERS.discard(listener)
+    server.MANAGER.sessions.pop("the-admin-newcomer", None)
 
     # ---- the Telegram settings -------------------------------------------
     the_panel.set_telegram("123456789:AAsecretsecretsecret", "42", True)
