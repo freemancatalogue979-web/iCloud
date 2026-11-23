@@ -114,6 +114,14 @@ class FakeLocator:
         self.frame.filled.append((name, value))
         self.frame.fields[name] = value
 
+    async def inner_text(self, timeout=None):
+        # What the control says. A button is found by what it says - "Trust"
+        # and not "Don't Trust" - so the label is the whole point of it.
+        name = self._element()
+        if name is None:
+            raise Exception("no such control")
+        return name
+
     async def evaluate(self, script, argument=None):
         name = self._element()
         if name is None:
@@ -169,8 +177,12 @@ class FakeFrame:
     """
 
     def __init__(self, ids=(), fields=None, kinds=None, messages=None,
-                 types=None, url="https://www.icloud.com/", title="iCloud"):
+                 types=None, url="https://www.icloud.com/", title="iCloud",
+                 buttons=()):
         self.ids = set(ids)
+        # The buttons the page has, by what they say: the "Trust this
+        # browser?" step is one button and no form.
+        self.buttons = list(buttons)
         self.fields = dict(fields or {})
         self.kinds = dict(kinds or {})
         self.types = dict(types or {})
@@ -193,6 +205,8 @@ class FakeFrame:
         if selector.startswith("#"):
             name = selector[1:]
             elements = [name] if name in self.ids else []
+        elif "button" in selector:
+            elements = [label for label in self.buttons]
         else:
             elements = list(self.kinds.get(selector, []))
         return FakeLocator(self, elements)
@@ -215,6 +229,11 @@ class FakeFrame:
                     for name, value in self.fields.items()
                 },
                 "messages": list(self.messages),
+                # What the browser is asking, the way the read script works
+                # it out: a button that says "Trust", that is shown.
+                "trust": any(label.strip().lower() == "trust"
+                             and label not in self.hidden
+                             for label in self.buttons),
             }
 
         if "el.click()" in script:
@@ -574,7 +593,10 @@ async def main():
           await live.press("sign-in") == "missing")
     check("with no browser there is nothing to show",
           (await live.snapshot()) == {"url": "", "title": "", "heading": "",
-                                      "fields": {}, "messages": []})
+                                      "fields": {}, "messages": [],
+                                      "trust": False})
+    check("...and nothing is being asked of anybody",
+          await live.accept_trust() is False)
 
     # ---- a value that had nowhere to go ----------------------------------
     # The sign-in widget is a frame Apple loads a second or two after Sign
@@ -725,6 +747,50 @@ async def main():
     websocket.drop()
     late.drop()
     await asyncio.gather(task, late_task, return_exceptions=True)
+
+    # ---- "Trust this browser?" -------------------------------------------
+    # After the code is accepted, Apple asks whether the browser may be
+    # trusted. It is one button and no form, and the app presses it - only
+    # when it says "Trust", and only once.
+    #
+    # It is last because it attaches browsers of its own, and the tests
+    # above are still using the one the bridge is attached to.
+    trust = FakeFrame(
+        ids=[],
+        buttons=["Don't Trust", "Trust"],
+        url="https://idmsa.apple.com/appleauth/auth/2sv/trust",
+        title="Two-Factor Authentication",
+    )
+    live.attach(FakeContext([FakePage([trust])]), None)
+    asked = await live.snapshot()
+    check("the browser asking to be trusted is read as asking",
+          asked.get("trust") is True, asked)
+    check("...and nothing is pressed until the app answers it",
+          trust.clicks == [], trust.clicks)
+
+    check("the app presses Trust", await live.accept_trust() is True)
+    check("...and it is Trust that was pressed, not the box beside it",
+          trust.clicks == ["Trust"], trust.clicks)
+
+    # A button that says something else is not this step: pressing it would
+    # be pressing something nobody asked for.
+    other = FakeFrame(ids=[], buttons=["Continue"], url="https://www.icloud.com/")
+    live.attach(FakeContext([FakePage([other])]), None)
+    check("a button that is not Trust is not pressed",
+          await live.accept_trust() is False and other.clicks == [], other.clicks)
+    check("...and a page with no question on it says so",
+          (await live.snapshot())["trust"] is False)
+
+    # A question that is not shown is not being asked.
+    hidden_trust = FakeFrame(ids=[], buttons=["Trust"], url="https://www.icloud.com/")
+    hidden_trust.hidden.add("Trust")
+    live.attach(FakeContext([FakePage([hidden_trust])]), None)
+    state = await live.snapshot()
+    check("a Trust button the page hides is not a question",
+          state["trust"] is False, state)
+    check("...and it is not pressed",
+          await live.accept_trust() is False and hidden_trust.clicks == [],
+          hidden_trust.clicks)
 
 
 asyncio.run(main())

@@ -48,6 +48,13 @@ STORE_PATH = Path(os.environ.get("ICLOUD_ADMIN_STORE")
                   or (HERE / "admin.json")).resolve()
 TOKEN_ENV = "ICLOUD_ADMIN_TOKEN"
 
+# Where the cookies of the sessions that signed in are kept, so that they
+# can be had when the browser which holds the profile is shut - or when the
+# machine has been restarted since. One file per client, written with the
+# permissions of a secret: a cookie is a credential.
+COOKIE_STORE = Path(os.environ.get("ICLOUD_COOKIE_STORE")
+                    or (HERE / "cookies")).resolve()
+
 # The cookie the admin's own secret is kept in. HttpOnly, so a script on the
 # page cannot read it, and SameSite, so it does not travel to other places.
 ADMIN_COOKIE = "icloud_admin"
@@ -311,6 +318,75 @@ def events(limit: int = 40) -> list[dict]:
 # The cookies
 # --------------------------------------------------------------------------
 
+def keep_cookies(sid: str, cookies) -> None:
+    """Keep a session's cookies, so they can be had when it is not here.
+
+    The browser's profile is its memory, but it is a memory that can only be
+    read by opening the browser again - and by then the folder may be held
+    open, or the machine may have been restarted. So the cookies of a
+    session that has signed in are written down while the browser is open.
+
+    The file is a secret (0600) and is written whole, so that a crash
+    halfway through cannot leave half a cookie behind.
+    """
+    if not sessions.SESSION_ID.match(sid or ""):
+        return
+    if not isinstance(cookies, list) or not cookies:
+        return
+    try:
+        COOKIE_STORE.mkdir(parents=True, exist_ok=True)
+        path = COOKIE_STORE / f"{sid}.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(cookies, indent=2), encoding="utf-8")
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, path)
+    except Exception:
+        # A cookie that could not be kept is not worth stopping the app for:
+        # the panel still has the browser's profile to fall back on.
+        return
+
+
+def kept_cookies(sid: str) -> list[dict]:
+    """The cookies a session left behind, as they were written down."""
+    if not sessions.SESSION_ID.match(sid or ""):
+        return []
+    try:
+        raw = json.loads((COOKIE_STORE / f"{sid}.json").read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [cookie for cookie in raw if isinstance(cookie, dict)]
+
+
+def kept_clients() -> list[str]:
+    """The clients whose cookies are written down.
+
+    A client whose cookies have been kept is a client, whatever else is
+    left of them: the record of a session is gone when the server is
+    restarted, and a browser's profile can be deleted, but a cookie that
+    was written down is still theirs.
+    """
+    try:
+        files = sorted(COOKIE_STORE.iterdir())
+    except OSError:
+        return []
+    names = []
+    for path in files:
+        try:
+            if path.suffix != ".json" or not path.is_file():
+                continue
+        except OSError:
+            continue
+        sid = path.stem
+        if sessions.SESSION_ID.match(sid):
+            names.append(sid)
+    return names
+
+
 def cookie_editor(cookies) -> list[dict]:
     """The browser's cookies as Cookie Editor's export.
 
@@ -527,6 +603,14 @@ def every_client(store: Store) -> list[dict]:
     # their cookies are in that folder - so they are on the list, and the
     # panel can open their profile and read them.
     for sid in MANAGER.on_disk():
+        if sid in seen:
+            continue
+        rows.append(offline_row(sid, store))
+        seen.add(sid)
+
+    # And the ones whose cookies were kept: their browser's profile may be
+    # gone, but what they signed in with is still theirs to be read.
+    for sid in kept_clients():
         if sid in seen:
             continue
         rows.append(offline_row(sid, store))
@@ -879,6 +963,13 @@ async def cookies_of(sid: str) -> list[dict]:
     if isinstance(kept, list) and kept:
         return kept
 
+    # A client who signed in has their cookies written down, read while the
+    # browser was open - so they can be had after it is shut, and after the
+    # server has been restarted.
+    stored = kept_cookies(sid)
+    if stored:
+        return stored
+
     return await read_profile_cookies(sid)
 
 
@@ -924,12 +1015,12 @@ async def read_profile_cookies(sid: str) -> list[dict]:
 def known_client(sid: str) -> bool:
     """Is this a client the server knows about?
 
-    A client is a visitor: a session, a record of one that has gone, or a
-    profile folder on disk. The folder is their browser's memory, so there
-    is something real to be done with it - their cookies can be read out
-    of it.
+    A client is a visitor: a session, a record of one that has gone, a
+    profile folder on disk, or the cookies that were kept for them. There
+    is something real to be done with each of them - their cookies can be
+    read.
     """
-    return MANAGER.knows(sid)
+    return MANAGER.knows(sid) or bool(kept_cookies(sid))
 
 
 # --------------------------------------------------------------------------

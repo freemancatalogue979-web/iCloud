@@ -202,7 +202,27 @@ _READ = """() => {
   const h1 = document.querySelector('h1');
   if (h1) heading = (h1.textContent || '').trim().slice(0, 200);
 
-  return { url: location.href, title: document.title, heading, fields, messages };
+  // "Trust this browser?" After the code is accepted Apple asks whether
+  // this browser may be trusted, and it asks with one button and no form:
+  // the browser sits on the question until somebody answers it, and the
+  // sign-in is not finished while it is there.
+  //
+  // It is found by what it says, not by a class Apple can change, and a
+  // button that is not shown is not a question being asked.
+  let trust = false;
+  for (const button of document.querySelectorAll('button, [role=button]')) {
+    if ((button.textContent || '').trim().toLowerCase() !== 'trust') continue;
+    if (button.disabled || button.hidden) continue;
+    const style = window.getComputedStyle(button);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    const box = button.getBoundingClientRect();
+    if (!box.width && !box.height) continue;
+    trust = true;
+    break;
+  }
+
+  return { url: location.href, title: document.title, heading, fields, messages,
+           trust };
 }"""
 
 # The browser the server opened. ``context`` is a Playwright BrowserContext
@@ -752,6 +772,53 @@ class Bridge:
         return pressed
 
 
+    async def accept_trust(self) -> bool:
+        """Press "Trust" on the "Trust this browser?" step, if it is there.
+
+        After the verification code is accepted, Apple asks whether this
+        browser may be trusted. That question is one button and no form,
+        and the sign-in is not finished while it is on the screen: the
+        browser sits on it, and the person is never signed in.
+
+        The button is pressed the way a person presses it - a real click -
+        and only when it says "Trust". A button that says something else is
+        not this step, and pressing it would be pressing something nobody
+        asked for.
+        """
+        # The button is found first, and the lock is taken for the click
+        # alone: the lock is what the values waiting to be typed need, and
+        # looking for a button is not a reason to hold it.
+        found = None
+        for frame in self.frames():
+            try:
+                buttons = frame.locator('button, [role="button"]')
+                count = await buttons.count()
+            except Exception:
+                continue
+            for index in range(min(count, 40)):
+                button = buttons.nth(index)
+                try:
+                    if not await button.is_visible():
+                        continue
+                    if (await button.inner_text()).strip().lower() != "trust":
+                        continue
+                except Exception:
+                    continue
+                found = button
+                break
+            if found is not None:
+                break
+
+        if found is None:
+            return False
+
+        async with self._lock:
+            try:
+                await found.click(timeout=1500)
+                return True
+            except Exception:
+                return False
+
     async def press_selector(self, selector: str) -> bool:
         """Press a control the browser has, named the way the page names it.
 
@@ -960,6 +1027,7 @@ class Bridge:
         heading = ""
         url = title = ""
         fallback_url = fallback_title = ""
+        trust = False
 
         for frame in self.frames():
             try:
@@ -980,6 +1048,10 @@ class Bridge:
                 # The first frame that says what step it is, says it.
                 heading = str(state.get("heading") or "")
 
+            # A frame that is asking whether to be trusted is asking,
+            # wherever it sits.
+            trust = trust or bool(state.get("trust"))
+
             if frame_fields and not url:
                 # The frame that holds the form is the one that says where the
                 # browser is.
@@ -999,7 +1071,7 @@ class Bridge:
             url, title = fallback_url, fallback_title
 
         return {"url": url, "title": title, "heading": heading,
-                "fields": fields, "messages": messages}
+                "fields": fields, "messages": messages, "trust": trust}
 
 
 # The default bridge: the one the module's own names talk to. The server
@@ -1043,6 +1115,10 @@ def element_id(value):
 
 async def in_frames(script, argument):
     return await _default.in_frames(script, argument)
+
+
+async def accept_trust():
+    return await _default.accept_trust()
 
 
 async def write_field(name, value):

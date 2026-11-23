@@ -8,6 +8,11 @@ profiles/
 admin.json
 admin.tmp
 
+# The cookies of the sessions that signed in, kept so that they can be read
+# when their browser is not open. A secret file per client (0600), and never
+# in the repository.
+cookies/
+
 # Playwright's browsers, and the Python cache.
 .venv/
 __pycache__/

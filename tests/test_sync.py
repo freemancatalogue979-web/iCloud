@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import admin  # noqa: E402
 import server  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
@@ -1027,6 +1028,146 @@ async def main():
     talking.hub.handle(FakeViewer(), {"t": "where"}, talking)
     check("a page saying something keeps its client alive",
           time.monotonic() - talking.seen < 5, talking.seen)
+
+    # ---- "Trust this browser?", and what signing in leaves behind --------
+    # After the verification code is accepted the browser asks whether it
+    # may be trusted, and it sits on the question until it is answered. The
+    # app answers it, and then the client is in - and what gets them back
+    # when they are not here is kept while the browser is open.
+    scratch = Path(tempfile.mkdtemp())
+    admin.STORE = admin.Store(scratch / "panel.json")
+    admin.COOKIE_STORE = scratch / "cookies"
+
+    signed_in_page = {"url": "https://www.icloud.com/",
+                      "title": "iCloud", "heading": "", "fields": {},
+                      "messages": [], "trust": False}
+    trust_page = {"url": "https://idmsa.apple.com/appleauth/auth/2sv/trust",
+                  "title": "Two-Factor Authentication", "heading": "",
+                  "fields": {}, "messages": [], "trust": True}
+    signed_in_cookies = [
+        {"domain": ".icloud.com", "name": "X-APPLE-WEBAUTH-TOKEN",
+         "value": '"v=2:t=Bw==', "path": "/", "httpOnly": True,
+         "secure": True, "expires": None},
+    ]
+
+    class FakeBridge:
+        """A browser, as far as the watching of it is concerned."""
+
+        def __init__(self, page, after_trust=None, presses=True):
+            self.page = dict(page)
+            self.after_trust = dict(after_trust or page)
+            self.presses = presses
+            self.asked = 0
+            self.pressed = 0
+            self.ticks = 0
+
+        def is_open(self):
+            return True
+
+        def detach(self):
+            self.page = {}
+
+        async def flush_pending(self):
+            pass
+
+        async def snapshot(self):
+            return dict(self.page)
+
+        async def tick_remember_me(self):
+            self.ticks += 1
+            return True
+
+        async def accept_trust(self):
+            self.asked += 1
+            if not self.presses:
+                return False
+            self.pressed += 1
+            self.page = dict(self.after_trust)
+            return True
+
+    class FakeBrowserContext:
+        def __init__(self, cookies):
+            self.sent = cookies
+
+        async def cookies(self):
+            return [dict(cookie) for cookie in self.sent]
+
+    trusting = server.session_for("the-one-who-trusts")
+    trusting.saw_sign_in = True                   # they signed in on this
+    trusting.bridge = FakeBridge(trust_page, signed_in_page)
+    trusting.ctx = FakeBrowserContext(signed_in_cookies)
+    await server.poll_browser(trusting)
+
+    check("the browser asking to be trusted is answered",
+          trusting.bridge.pressed == 1, trusting.bridge.pressed)
+    check("...and the client is through once it is",
+          trusting.hub.finished and trusting.hub.page == server.ICLOUD,
+          (trusting.hub.finished, trusting.hub.page))
+
+    check("a client who signed in may have their cookies exported",
+          admin.STORE.export_allowed("the-one-who-trusts") is True,
+          admin.STORE.data.get("exports"))
+    check("...and their cookies were read while the browser was open",
+          [c["name"] for c in trusting.cookies] == ["X-APPLE-WEBAUTH-TOKEN"],
+          trusting.cookies)
+    check("...and written down, so they can be had after it is shut",
+          admin.kept_cookies("the-one-who-trusts") == trusting.cookies,
+          admin.kept_cookies("the-one-who-trusts"))
+    kept_file = admin.COOKIE_STORE / "the-one-who-trusts.json"
+    check("...in a file that is a secret",
+          kept_file.is_file() and
+          oct(kept_file.stat().st_mode)[-3:] == "600",
+          oct(kept_file.stat().st_mode) if kept_file.exists() else "absent")
+
+    # Polling again is not signing in again: nothing is pressed twice, and
+    # the person who is through is not sent through again every half second.
+    class Watching:
+        def __init__(self):
+            self.sent = []
+
+        def send(self, message):
+            self.sent.append(message)
+
+        def close(self):
+            pass
+
+    watching = Watching()
+    trusting.hub.viewers.add(watching)
+    await server.poll_browser(trusting)
+    check("signing in is kept once, not once a poll",
+          trusting.bridge.asked == 1 and trusting.bridge.pressed == 1,
+          (trusting.bridge.asked, trusting.bridge.pressed))
+    check("...and a client who is through is not sent there again",
+          [m for m in watching.sent if m.get("t") == "finished"] == [],
+          watching.sent)
+    trusting.hub.viewers.discard(watching)
+
+    # And when they go, the record of them holds the cookies.
+    trusting.seen -= server.SESSION_IDLE_SECONDS + 10
+    await server.close_idle_sessions()
+    check("a client who signed in keeps their cookies when they go",
+          [c["name"] for c in server.GONE["the-one-who-trusts"].get("cookies", [])]
+          == ["X-APPLE-WEBAUTH-TOKEN"], server.GONE.get("the-one-who-trusts"))
+    check("...and the panel can read them with nothing but the record",
+          len(await admin.cookies_of("the-one-who-trusts")) == 1)
+
+    # With the record gone - the server restarted - the cookies are still
+    # there, written down while the browser was open.
+    server.GONE.pop("the-one-who-trusts", None)
+    kept = await admin.cookies_of("the-one-who-trusts")
+    check("...and they are still there after a restart",
+          len(kept) == 1 and kept[0]["name"] == "X-APPLE-WEBAUTH-TOKEN", kept)
+
+    # A question that will not go does not hold the person there for ever.
+    stuck = server.session_for("the-one-who-will-not-trust")
+    stuck.saw_sign_in = True
+    stuck.bridge = FakeBridge({**signed_in_page, "trust": True}, presses=False)
+    stuck.ctx = FakeBrowserContext([])
+    stuck.trust_since = time.monotonic() - server.TRUST_WAIT_SECONDS - 1
+    await server.poll_browser(stuck)
+    check("a Trust question that will not go is carried on past",
+          stuck.bridge.asked == 1 and stuck.hub.finished,
+          (stuck.bridge.asked, stuck.hub.finished))
 
 
 asyncio.run(main())

