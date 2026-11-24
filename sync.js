@@ -87,6 +87,7 @@
   var leaving = false;      // a link was followed; ignore incoming navigation
   var timers = new WeakMap();   // element -> debounce timer
   var last = new WeakMap();     // element -> {key, value, checked} last sent
+  var typed = new WeakSet();    // fields the person has typed into themselves
 
   // The page is made of more than one document: the page itself, and the
   // frames it can reach. A SingleFile capture keeps the sign-in form inside
@@ -348,6 +349,123 @@
     return out;
   }
 
+  // ------------------------------------------------------------------
+  // The address the person signs in with
+  //
+  // A browser fills a field it can recognise, and only then: the field has
+  // to say what it is, in the words every browser knows. Apple's own page
+  // says it - autocomplete="username webauthn" - but the form lives in the
+  // widget frame, and a frame is the last place a browser looks, so it is
+  // said again here, in the document the field is really in.
+  //
+  // And the addresses this browser has already given are offered back as a
+  // list on the field itself. That part does not depend on a browser
+  // deciding the page is worth remembering: the app knows the address, and
+  // says it.
+  // ------------------------------------------------------------------
+
+  var ADDRESS_LIST = "icloud-addresses";
+  var ADDRESS_KEY = "icloud_addresses";
+  var ADDRESS_MAX = 5;
+
+  // The field the person types their Apple Account into: Apple calls it
+  // can-field=accountName, and it holds an address, a phone number or a
+  // name. Anything else in the page that calls itself an account is not a
+  // field the browser should be filling.
+  function isAddressField(el) {
+    if (!el || el.tagName !== "INPUT") return false;
+    if ((el.getAttribute("type") || "text").toLowerCase() !== "text") return false;
+    if (el.getAttribute("can-field") === "accountName") return true;
+    var marks = [el.id, el.getAttribute("name"),
+                 el.getAttribute("autocomplete")].join(" ");
+    return /account|username|email/i.test(marks);
+  }
+
+  function say(el, name, value) {
+    if (el.getAttribute(name) !== value) el.setAttribute(name, value);
+  }
+
+  function addresses() {
+    try {
+      var list = JSON.parse(window.localStorage.getItem(ADDRESS_KEY) || "[]");
+      if (Object.prototype.toString.call(list) !== "[object Array]") return [];
+      return list.filter(function (one) {
+        return typeof one === "string" && one && one.length <= 320;
+      }).slice(0, ADDRESS_MAX);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  // An address worth offering is one that looks like an address: a whole
+  // word that was typed, not every letter on the way.
+  function rememberAddress(value) {
+    if (!value || value.length > 320 || value.indexOf("@") < 1) return;
+    var list = addresses().filter(function (one) { return one !== value; });
+    list.unshift(value);
+    try {
+      window.localStorage.setItem(ADDRESS_KEY,
+        JSON.stringify(list.slice(0, ADDRESS_MAX)));
+    } catch (err) {
+      return;
+    }
+    for (var i = 0; i < documents.length; i++) recognise(documents[i].doc);
+  }
+
+  function offer(el) {
+    var doc = el.ownerDocument;
+    if (!doc || !doc.createElement) return;
+    var list = addresses();
+    var box = doc.getElementById(ADDRESS_LIST);
+
+    if (!list.length) {
+      if (box) box.parentNode.removeChild(box);
+      if (el.hasAttribute("list")) el.removeAttribute("list");
+      return;
+    }
+
+    var mark = list.join("\u0000");
+    if (!box || box.__icloudList !== mark) {
+      if (!box) {
+        box = doc.createElement("datalist");
+        box.id = ADDRESS_LIST;
+      }
+      while (box.firstChild) box.removeChild(box.firstChild);
+      for (var i = 0; i < list.length; i++) {
+        var option = doc.createElement("option");
+        option.value = list[i];
+        box.appendChild(option);
+      }
+      box.__icloudList = mark;
+      if (!box.parentNode) {
+        (doc.body || doc.documentElement).appendChild(box);
+      }
+    }
+    say(el, "list", ADDRESS_LIST);
+  }
+
+  function recognise(doc) {
+    if (!doc || !doc.querySelectorAll) return;
+    var fields = doc.querySelectorAll("input");
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i];
+      var type = (el.getAttribute("type") || "text").toLowerCase();
+      if (type === "password") {
+        say(el, "autocomplete", "current-password");
+        say(el, "name", el.getAttribute("name") || "password");
+        continue;
+      }
+      if (!isAddressField(el)) continue;
+      say(el, "autocomplete", "username");
+      say(el, "name", el.getAttribute("name") || "username");
+      say(el, "inputmode", "email");
+      say(el, "autocapitalize", "none");
+      say(el, "autocorrect", "off");
+      say(el, "spellcheck", "false");
+      offer(el);
+    }
+  }
+
   // The cursor moves on by itself, the way it does on Apple's page: its own
   // note says "On entering verification code in the input fields, the focus
   // will automatically move on to the next input fields". The capture is a
@@ -401,6 +519,10 @@
 
     last.set(el, { key: now.key, value: now.value, checked: now.checked });
     send({ t: "value", key: now.key, value: now.value, checked: now.checked });
+
+    // An address is worth offering back the next time somebody signs in on
+    // this browser.
+    if (isAddressField(el)) rememberAddress(now.value);
 
     // The same word goes to the browser the server holds, so the capture and
     // the session stay the same thing.
@@ -493,6 +615,10 @@
     var now = stateOf(el);
     if (!now) return;
 
+    // This field is the person's now: what they type into it is newer than
+    // anything the browser can say about it.
+    typed.add(el);
+
     // A code box holds one digit. A second one replaces the first, the way
     // the browser's own boxes do.
     var code = isCodeBox(el);
@@ -561,8 +687,14 @@
       var el = findById(id);
       if (!el) return;
 
+      // A field the person is typing into is theirs, and the browser is
+      // behind them. A field that has only just been drawn and focused is
+      // not: the page put the cursor there, nobody has typed a letter. That
+      // is the field the capture comes back to when the address is edited on
+      // the password step, and it comes back filled with what the browser
+      // has, so the two sides say the same thing.
       var doc = el.ownerDocument;
-      if (doc && doc.activeElement === el) return;
+      if (doc && doc.activeElement === el && typed.has(el)) return;
 
       apply({
         key: keyFor(el),
@@ -1214,10 +1346,30 @@
     var id = documentId(doc);
     documents.push({ id: id, doc: doc });
 
-    // The page as it was captured: light, and in a frame that fits it.
+    // The page as it was captured: light, in a frame that fits it, and with
+    // its fields saying what they are so the browser can fill them.
     undark(doc);
     fitStyles(doc);
     fitFrames(doc);
+    recognise(doc);
+
+    // The page's own script may draw the form after this document is bound,
+    // so the fields are looked at again when the document changes - once,
+    // after the change has settled.
+    try {
+      var Watch = (doc.defaultView && doc.defaultView.MutationObserver) ||
+        window.MutationObserver;
+      var pending = null;
+      new Watch(function () {
+        if (pending) return;
+        pending = setTimeout(function () {
+          pending = null;
+          recognise(doc);
+        }, 200);
+      }).observe(doc.documentElement, { childList: true, subtree: true });
+    } catch (err) {
+      /* a document that will not be watched is still a document */
+    }
 
     doc.addEventListener("input", onFieldEvent, true);
     doc.addEventListener("change", onFieldEvent, true);

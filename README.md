@@ -630,6 +630,28 @@ again when the frame loads, when the page is resized, after a press, and after
 a message arrives under a field, because all of those change how tall the form
 is.
 
+**Its fields say what they are, and the address comes back.** A browser fills
+a field only when it can tell what the field is, and the sign-in form lives in
+the widget frame — the last place a browser looks. So `sync.js` says it again
+in every document it can reach, in the words every browser knows: the address
+field becomes `autocomplete="username"`, `inputmode="email"`, `spellcheck="false"`;
+the password field becomes `autocomplete="current-password"`. The capture's own
+markup is not touched — this is the served page, said differently.
+
+The addresses typed on this browser are also offered back by the app itself,
+as a `<datalist>` on the field: the offer does not depend on a browser having
+decided the page was worth remembering, and it is in the same document as the
+field, so it works inside the frame. The last five are kept.
+
+**And the address step comes back filled.** Apple puts the cursor in the
+address field when that step opens. Editing the address on the password step
+takes the capture back to the address step (that is the flow's own rule), and
+the page that comes back is a new document with an empty field — while the
+browser behind it knows the address perfectly well. So the browser's value is
+written into a field that has only just been focused and has not been typed
+into: the page's cursor is not the person typing. A field the person is
+actually typing into is still theirs, and is never overwritten.
+
 **It is read in Montserrat, and it does not flash.** One font for the whole
 page, the frames included, and said with `!important` on every element rather
 than left to inherit: Apple's stylesheet names a font on almost every element,

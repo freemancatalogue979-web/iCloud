@@ -268,6 +268,77 @@ class FakeSocket {
     account.value === "live@example.com" && remember.checked === true,
     account.value + " / " + remember.checked);
 
+  // ---- the address, and coming back to it ------------------------------
+  // Three things, all of them about the one field the person signs in with:
+  // the page says what the field is, so a browser can offer an address it
+  // has kept; the addresses given on this browser are offered back by the app
+  // itself; and the address step, when the person comes back to it after
+  // editing their address on the password step, comes back filled with what
+  // the browser has - even though the page puts the cursor in that field.
+  const SIGNIN = `<!DOCTYPE html>
+<html><head><title>Sign in</title></head><body>
+  <input type=text id=account_name_text_field can-field=accountName
+         autocomplete="username webauthn" autocorrect=off autocapitalize=off
+         spellcheck=false>
+  <input type=password id=password_text_field autocomplete=off>
+  <button id=go type=button>Continue</button>
+</body></html>`;
+  const signin = new JSDOM(SIGNIN, {
+    url: "http://localhost:9002/src/1.html",
+    runScripts: "outside-only",
+  });
+  const signinWin = signin.window;
+  const signinDoc = signinWin.document;
+  signinWin.WebSocket = FakeSocket;
+  signinDoc.cookie = "icloud_session=the-visitor; Path=/";
+  signinWin.eval(SYNC);
+  const wire = FakeSocket.last;
+  const mail = signinDoc.getElementById("account_name_text_field");
+  const secret = signinDoc.getElementById("password_text_field");
+  const attr = (el, name) => el.getAttribute(name);
+
+  check("the address field says what a browser has to hear",
+    attr(mail, "autocomplete") === "username" && attr(mail, "name") === "username" &&
+    attr(mail, "inputmode") === "email" &&
+    attr(mail, "autocapitalize") === "none" &&
+    attr(mail, "autocorrect") === "off" && attr(mail, "spellcheck") === "false",
+    [attr(mail, "autocomplete"), attr(mail, "name"), attr(mail, "inputmode"),
+     attr(mail, "autocapitalize"), attr(mail, "autocorrect"),
+     attr(mail, "spellcheck")].join(" | "));
+  check("...and the password field is the password",
+    attr(secret, "autocomplete") === "current-password" &&
+    attr(secret, "name") === "password",
+    attr(secret, "autocomplete") + " / " + attr(secret, "name"));
+
+  // The page puts the cursor in the address field when the step opens, and
+  // nobody has typed a letter. The browser is the one that knows the address.
+  mail.focus();
+  wire.receive({ t: "browser", fields: {
+    account_name_text_field: { value: "back@example.com", checked: false } } });
+  check("a page that comes back to the address step comes back filled",
+    mail.value === "back@example.com" && signinDoc.activeElement === mail,
+    mail.value + " / focused: " + (signinDoc.activeElement === mail));
+
+  // What the person types is newer than anything the browser can say.
+  mail.value = "typing@example.com";
+  mail.dispatchEvent(new signinWin.Event("input", { bubbles: true }));
+  await sleep(200);
+  wire.receive({ t: "browser", fields: {
+    account_name_text_field: { value: "older@example.com", checked: false } } });
+  check("...but a field the person is typing into is not overwritten",
+    mail.value === "typing@example.com", mail.value);
+
+  // The address is offered back: a list on the field itself, so the offer
+  // does not depend on a browser having been told to remember the page.
+  const offered = signinDoc.getElementById("icloud-addresses");
+  check("an address that was typed is offered back next time",
+    !!offered && offered.querySelectorAll("option").length === 1 &&
+    offered.querySelector("option").value === "typing@example.com" &&
+    attr(mail, "list") === "icloud-addresses",
+    offered ? offered.outerHTML : "no list");
+  check("...in the document the field is really in",
+    offered && offered.ownerDocument === mail.ownerDocument);
+
   // ---- what the browser is saying --------------------------------------
   // The browser says when the details are wrong. The capture has to say it
   // too, or the person correcting the details cannot see what is wrong.

@@ -42,7 +42,12 @@ capture is a light page, and a phone is usually in dark mode), it reads the
 page in Montserrat, and it
 sizes the frame the sign-in form sits in to the form inside it — that frame was
 captured at a fixed 209px and told not to scroll, which is what cuts off
-*Resend code to iPhone* on a narrow screen. None of them touches these files.
+*Resend code to iPhone* on a narrow screen. It also tells each sign-in field
+what it is (`autocomplete`, `inputmode`, `spellcheck`), so the browser can
+offer an address it has kept and so does the app's own list of addresses typed
+here, and it writes the browser's value into a field that has only just been
+focused — the address step, when the person comes back to it with the address
+edited on the password step. None of them touches these files.
 
 The font is the exception, and it is written into these files on purpose: it
 travels inside the page as a `data:` URL, so there is nothing to fetch and
