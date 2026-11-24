@@ -360,6 +360,79 @@ const text = (dom, id) => dom.window.document.getElementById(id).textContent;
     phone.indexOf("content: attr(data-label)") >= 0 &&
     phone.indexOf("display: flex") >= 0, phone.slice(0, 200));
 
+  // ---- deleting what has piled up --------------------------------------
+  // A server that has been up for a while has a feed nobody will read again
+  // and a list of clients who have gone. The panel can delete: one line of
+  // the feed, the whole feed, or a client who has gone. None of it touches
+  // the clients who are still here.
+  const tidy = open({ signedIn: true });
+  await sleep(120);
+  tidy.sockets[0].onopen();
+  push(tidy.sockets[0], 60, [row({ live: false, online: false, known: false })], [
+    { id: 7, at: Date.now() / 1000, event: "connected", session: "aprobevisitor42" },
+    { id: 6, at: Date.now() / 1000 - 5, event: "finished", session: "aprobevisitor42" },
+  ]);
+  await sleep(20);
+  const tdoc = tidy.dom.window.document;
+
+  const crosses = tdoc.querySelectorAll("#events button[data-forget]");
+  check("every line of the feed can be deleted", crosses.length === 2,
+    crosses.length);
+  check("...and carries the number the server gave it",
+    crosses[0].getAttribute("data-forget") === "7",
+    crosses[0].getAttribute("data-forget"));
+
+  crosses[1].click();
+  await sleep(20);
+  const forgotten = tidy.calls.filter((call) => call.url === "/admin/api/events/forget");
+  check("deleting a line tells the server which line",
+    forgotten.length === 1 && forgotten[0].method === "POST" &&
+    JSON.parse(forgotten[0].body).id === 6, forgotten);
+
+  tdoc.getElementById("events-clear").click();
+  await sleep(20);
+  const cleared = tidy.calls.filter((call) => call.url === "/admin/api/events/clear");
+  check("the whole feed can be emptied", cleared.length === 1 &&
+    cleared[0].method === "POST", cleared);
+  check("...and the panel does not wait to say so",
+    tdoc.getElementById("events").textContent.indexOf("Nothing yet") >= 0,
+    tdoc.getElementById("events").textContent);
+
+  // A client who has gone: deleting them is the whole client - the record,
+  // the cookies that were written down, and the profile.
+  const deletes = tdoc.querySelectorAll("#clients-body button[data-delete]");
+  check("a client who has gone can be deleted", deletes.length === 1 &&
+    deletes[0].getAttribute("data-delete") === "aprobevisitor42",
+    tdoc.getElementById("clients-body").innerHTML.slice(0, 160));
+  deletes[0].click();
+  await sleep(20);
+  const deleting = tidy.calls.filter((call) => /\/delete$/.test(call.url));
+  check("...and it is the client's own address that is asked",
+    deleting.length === 1 && deleting[0].method === "POST" &&
+    deleting[0].url === "/admin/api/clients/aprobevisitor42/delete", deleting);
+
+  // A client whose browser is still running is not deleted from under
+  // themselves: closing comes first, and closing keeps them.
+  push(tidy.sockets[0], 61, [row({ online: true, browser_open: true })], []);
+  await sleep(20);
+  check("a client who is here can be closed, not deleted",
+    !tdoc.querySelector("#clients-body button[data-delete]") &&
+    !!tdoc.querySelector("#clients-body button[data-close]"),
+    tdoc.getElementById("clients-body").innerHTML.slice(0, 160));
+
+  // Nothing so final happens without being asked.
+  const wary = open({ signedIn: true });
+  await sleep(120);
+  wary.sockets[0].onopen();
+  push(wary.sockets[0], 1, [row({ live: false, online: false, known: false })], []);
+  await sleep(20);
+  wary.disagree();
+  wary.dom.window.document.querySelector("#clients-body button[data-delete]").click();
+  await sleep(20);
+  check("a client is not deleted without being asked first",
+    wary.calls.filter((call) => /\/delete$/.test(call.url)).length === 0,
+    wary.calls);
+
   // ---- a server with no secret at all ----------------------------------
   const bare = open({ signedIn: false, missingSecret: true });
   await sleep(120);

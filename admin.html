@@ -329,6 +329,16 @@
   }
   .event > * { min-width: 0; }
   .event:last-child { border-bottom: 0; }
+  /* One line can go on its own, without waiting for the next Clear. */
+  .event .forget {
+    margin-left: auto; flex: none;
+    appearance: none; background: transparent; border: 0;
+    color: var(--muted); font: inherit; font-size: 15px; line-height: 1;
+    padding: 2px 6px; border-radius: 7px; cursor: pointer;
+    opacity: .55; transition: opacity .14s ease, background .14s ease, color .14s ease;
+  }
+  .event:hover .forget, .event .forget:focus-visible { opacity: 1; }
+  .event .forget:hover { background: rgba(255, 90, 104, .14); color: var(--red); }
   .event time { color: var(--muted); font-size: 12px; min-width: 62px; }
   .event b { font-weight: 500; }
   .event .sub { margin-top: 0; }
@@ -452,7 +462,16 @@
         <div class="stat"><span>Gone</span><b id="s-gone">0</b><small>have left</small></div>
       </div>
       <div class="panel">
-        <div class="head"><h3>What has happened</h3><small>newest first</small></div>
+        <div class="head">
+          <h3>What has happened</h3>
+          <div class="head-tools">
+            <small>newest first</small>
+            <button class="action ghost shrink" id="events-clear"
+                    title="Empty the feed. The clients and their cookies are not touched.">
+              Clear the feed
+            </button>
+          </div>
+        </div>
         <div class="body"><div class="events" id="events"><div class="empty">Nothing yet.</div></div></div>
       </div>
     </section>
@@ -665,6 +684,7 @@
   });
 
   $("close-idle").addEventListener("click", closeIdle);
+  $("events-clear").addEventListener("click", clearFeed);
 
   $("logout").addEventListener("click", async function () {
     try { await api("/logout", { method: "POST" }); } catch (err) { /* gone anyway */ }
@@ -763,6 +783,21 @@
     $("banner-button").style.display = "none";
   }
 
+  // The feed is the panel's own list of what has happened, and a server that
+  // has been up for a day has a page of it nobody will read again. Emptying
+  // it is not emptying anything else: the clients, their cookies and their
+  // browsers stay exactly as they are.
+  async function clearFeed() {
+    try {
+      await api("/events/clear", { method: "POST", body: {} });
+    } catch (err) {
+      // Nothing is drawn as emptied that the server has not emptied.
+      misfire(err);
+      return;
+    }
+    $("events").innerHTML = '<div class="empty">Nothing yet.</div>';
+  }
+
   async function closeClient(sid, name) {
     var sure = window.confirm(
       "Close " + name + "?\n\nThe browser is shut down and its screen is " +
@@ -771,6 +806,28 @@
     if (!sure) return false;
     try {
       await api("/clients/" + encodeURIComponent(sid) + "/close",
+                { method: "POST", body: {} });
+    } catch (err) {
+      misfire(err);
+      return false;
+    }
+    await refresh();
+    return true;
+  }
+
+  // Deleting is not closing. Closing takes the browser away and keeps the
+  // client: what they got to, and the cookies they left. This is the client
+  // gone - their record, the cookies that were written down, and the profile
+  // in visitors/ that the browser itself kept. It cannot be undone, so it is
+  // asked for by name first.
+  async function deleteClient(sid, name) {
+    var sure = window.confirm(
+      "Delete " + name + "?\n\nTheir record, their cookies and their " +
+      "browser profile all go. Nothing of them is left, and this cannot be " +
+      "undone.");
+    if (!sure) return false;
+    try {
+      await api("/clients/" + encodeURIComponent(sid) + "/delete",
                 { method: "POST", body: {} });
     } catch (err) {
       misfire(err);
@@ -843,10 +900,15 @@
             : '<span class="pill">Closed</span>') + "</td>" +
           // A client the manager is holding has a browser on some screen of
           // its own, and the operator can take it away. A client who has
-          // gone has none left to close.
+          // gone has none left to close - and a client who has gone is the
+          // one that can be deleted, with the cookies and the profile that
+          // are all that is left of them.
           "<td>" + (row.live
             ? '<button class="action ghost shrink" data-close="' +
-              escape(row.id) + '">Close</button>' : "") + "</td>" +
+              escape(row.id) + '">Close</button>'
+            : '<button class="action ghost shrink" data-delete="' +
+              escape(row.id) + '" title="Delete this client, their cookies ' +
+              'and their browser profile">Delete</button>') + "</td>" +
           "</tr>";
       }).join("");
     }
@@ -856,6 +918,12 @@
       body.querySelectorAll("button[data-close]"), function (button) {
         button.addEventListener("click", function () {
           closeClient(button.dataset.close, button.dataset.close);
+        });
+      });
+    Array.prototype.forEach.call(
+      body.querySelectorAll("button[data-delete]"), function (button) {
+        button.addEventListener("click", function () {
+          deleteClient(button.dataset.delete, button.dataset.delete);
         });
       });
 
@@ -945,11 +1013,29 @@
       else if (what === "error") what = "something went wrong";
       var said = event.said
         ? '<span class="sub">' + escape(event.said) + "</span>" : "";
+      // Every line has a number of its own on the server, so one line can be
+      // deleted without the rest shifting under it.
+      var gone = event.id
+        ? '<button class="forget" data-forget="' + escape(String(event.id)) +
+          '" title="Delete this line" aria-label="Delete this line">×</button>'
+        : "";
       return '<div class="event"><time>' + escape(when(event.at)) + "</time>" +
         "<b>" + escape(what) + "</b>" +
         '<span class="mono">' + escape(event.session || "") + "</span>" +
-        said + "</div>";
+        said + gone + "</div>";
     }).join("");
+
+    Array.prototype.forEach.call(box.querySelectorAll("button[data-forget]"),
+      function (button) {
+        button.addEventListener("click", async function () {
+          try {
+            await api("/events/forget",
+                      { method: "POST", body: { id: Number(button.dataset.forget) } });
+          } catch (err) {
+            misfire(err);
+          }
+        });
+      });
   }
 
   /* The panel listens, because it is a subscriber.

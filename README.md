@@ -128,6 +128,20 @@ drawn as a card, one value to a line with the name of its column beside it,
 and in the widths in between the table scrolls inside its own panel. The page
 stays where it is; nothing has to be found by dragging it left and right.
 
+**And what has piled up can be deleted.** A server that has been up for a day
+has a feed of things nobody is going to read again, and a list of clients who
+have gone. So the feed can be emptied — all of it with one button, or one line
+at a time with the × beside it — and that is all it empties: the clients, their
+cookies and their browsers are untouched.
+
+A client who has gone can be deleted outright: their record, the cookies that
+were written down, and their profile in `visitors/`, which is the cookies the
+browser kept for itself. Deleting is not closing. Closing takes the browser
+away and **keeps** the client — what they got to, and the cookies they left —
+while deleting is the client gone, and nothing of them is left. That is why a
+client whose browser is still running is refused: close the browser first, then
+delete. Deleting asks before it does it.
+
 **Presence is the person's, not the server's.** The server asks the browser
 a question every half second, and that does not count as the visitor being
 here: a session that counts the server's own polling as the visitor's

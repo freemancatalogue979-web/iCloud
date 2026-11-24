@@ -32,6 +32,7 @@ import asyncio
 import json
 import os
 import secrets
+import shutil
 import time
 from pathlib import Path
 
@@ -210,11 +211,43 @@ STORE = Store()
 # What has happened
 # --------------------------------------------------------------------------
 
+# Every line in the feed has a number of its own, so that one line can be
+# taken away without the rest shifting under the panel.
+_event_number = 0
+
+
 def note(event: str, **fields) -> None:
     """Something worth seeing in the panel."""
-    EVENTS.append({"at": time.time(), "event": event, **fields})
+    global _event_number
+    _event_number += 1
+    EVENTS.append({"id": _event_number, "at": time.time(),
+                   "event": event, **fields})
     del EVENTS[:-EVENT_LIMIT]
     push()
+
+
+def clear_events() -> int:
+    """Forget what has happened, all of it. Says how many lines went.
+
+    The feed is for looking at, not for keeping: a server that has been up
+    for a day has a page of lines nobody is going to read again, and the
+    operator is the one who decides when they have been read. It is not
+    history - what the manager holds is the state, and that is untouched.
+    """
+    dropped = len(EVENTS)
+    EVENTS.clear()
+    push()
+    return dropped
+
+
+def forget_event(event_id: int) -> bool:
+    """Forget one line of the feed. Says whether there was such a line."""
+    for at, entry in enumerate(EVENTS):
+        if entry.get("id") == event_id:
+            del EVENTS[at]
+            push()
+            return True
+    return False
 
 
 def state_message() -> dict:
@@ -556,6 +589,60 @@ async def close_client(sid: str) -> bool:
         pass
     MANAGER.retire(sid, record)
     return True
+
+
+def forget_client(sid: str) -> dict:
+    """Delete what the server holds about one client.
+
+    A client who has gone is kept on the panel on purpose - their cookies can
+    still be read, and where they got to is still worth seeing. But a list
+    that only ever grows is a list nobody reads, so the operator can delete
+    one: the record of the session, the cookies that were written down, and
+    the browser's profile in ``visitors/``, which is the cookies the browser
+    kept itself. What is left of them afterwards is nothing.
+
+    A client who is here is not deleted from under themselves: their browser
+    is running and somebody may be at the app. That is refused, and closing
+    the browser is what the panel says to do first - a thing it already has a
+    button for, because closing is not deleting.
+    """
+    if not sessions.SESSION_ID.match(sid or ""):
+        return {"deleted": False, "reason": "no such client"}
+
+    if MANAGER.get(sid) is not None:
+        return {"deleted": False, "reason": "running"}
+
+    deleted = {"session": False, "cookies": False, "profile": False}
+
+    if MANAGER.gone.pop(sid, None) is not None:
+        deleted["session"] = True
+
+    kept = COOKIE_STORE / f"{sid}.json"
+    try:
+        if kept.is_file():
+            kept.unlink()
+            deleted["cookies"] = True
+    except OSError:
+        deleted["cookies"] = False
+
+    profile = MANAGER.profile(sid)
+    try:
+        if profile.is_dir():
+            shutil.rmtree(profile)
+            deleted["profile"] = True
+    except OSError:
+        deleted["profile"] = False
+
+    # Nothing about them may be left in the settings either: a permission to
+    # export the cookies of somebody who does not exist is a permission
+    # waiting to be asked about.
+    try:
+        STORE.set_export(sid, False)
+    except Exception:
+        pass
+
+    push()
+    return {"deleted": True, **deleted}
 
 
 def client_row(session, store: Store) -> dict:
@@ -1014,6 +1101,53 @@ def build_router() -> APIRouter:
                         or getattr(session, "ctx", None) is not None)
         await close_client(sid)
         return {"ok": True, "closed": True, "session": sid, "browser": was_open}
+
+    @router.post("/api/events/clear")
+    async def events_clear(request: Request):
+        """Forget the feed: every line of it.
+
+        The feed is the panel's to empty. What the manager holds is the
+        state and is not touched, so a panel that clears the feed still
+        knows every client it knew before.
+        """
+        if not _authed(request, STORE):
+            return _denied("the admin's secret is needed")
+        return {"ok": True, "dropped": clear_events()}
+
+    @router.post("/api/events/forget")
+    async def events_forget(request: Request):
+        """Forget one line of the feed, by its number."""
+        if not _authed(request, STORE):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        try:
+            event_id = int(body.get("id"))
+        except (TypeError, ValueError):
+            return _denied("which line?", 400)
+        return {"ok": True, "forgotten": forget_event(event_id)}
+
+    @router.post("/api/clients/{sid}/delete")
+    async def delete_one(sid: str, request: Request):
+        """Delete a client: their record, their cookies, their profile.
+
+        Not the same thing as closing their browser. Closing takes the
+        browser away and keeps the client; this is the client gone. A client
+        whose browser is still running is refused - close it first - because
+        deleting a profile out from under a running browser is two things at
+        once, and neither of them can be undone.
+        """
+        if not _authed(request, STORE):
+            return _denied("the admin's secret is needed")
+        if not known_client(sid):
+            return _denied("there is no such client", status=404)
+        answer = forget_client(sid)
+        if not answer.get("deleted"):
+            if answer.get("reason") == "running":
+                return _denied(
+                    "this client's browser is still running - close it "
+                    "first", status=409)
+            return _denied(answer.get("reason") or "not deleted", status=409)
+        return {"ok": True, **answer, "session": sid}
 
     @router.post("/api/clients/{sid}/export")
     async def allow_export(sid: str, request: Request):

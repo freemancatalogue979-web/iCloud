@@ -306,6 +306,117 @@ async def main():
                                       "session", "storeId", "value"},
           sorted(data["cookies"][0]))
 
+    # ---- deleting what has piled up --------------------------------------
+    # The feed is a list to look at, not a record to keep: a server that has
+    # been up for a day has a page of lines nobody is going to read again. So
+    # the panel can empty it - and delete one line at a time, which is why
+    # every line has a number of its own.
+    admin.EVENTS.clear()
+    admin.note("connected", session="the-admin-kept")
+    admin.note("finished", session="the-admin-kept")
+    lines = admin.events()
+    check("every line of the feed has a number",
+          len(lines) == 2 and all(isinstance(line.get("id"), int)
+                                  for line in lines), lines)
+    check("...and no two lines have the same one",
+          len({line["id"] for line in lines}) == len(lines), lines)
+
+    newest, older = lines[0]["id"], lines[1]["id"]
+    check("one line of the feed can be deleted", admin.forget_event(newest))
+    check("...and only that one", [line["id"] for line in admin.events()] == [older],
+          admin.events())
+    check("...and a line that is not there is not deleted",
+          admin.forget_event(newest) is False)
+    check("the feed can be emptied in one go",
+          admin.clear_events() == 1 and admin.events() == [], admin.events())
+
+    # Through the routes, the way the panel does it.
+    answer = await endpoint("/admin/api/events/clear", "POST")(
+        make_request("POST", "/admin/api/events/clear", {}))
+    check("emptying the feed takes the admin's secret",
+          status_of(answer) == 403, status_of(answer))
+
+    admin.note("connected", session="the-admin-kept")
+    answer = await endpoint("/admin/api/events/clear", "POST")(
+        make_request("POST", "/admin/api/events/clear", {}, cookies=admin_cookie))
+    check("...and empties it when it is given", status_of(answer) == 200 and
+          as_json(answer).get("dropped") == 1 and admin.EVENTS == [],
+          (status_of(answer), as_json(answer), admin.EVENTS))
+
+    admin.note("connected", session="the-admin-kept")
+    the_one = admin.events()[0]["id"]
+    answer = await endpoint("/admin/api/events/forget", "POST")(
+        make_request("POST", "/admin/api/events/forget",
+                     {"id": the_one}, cookies=admin_cookie))
+    check("one line can be forgotten through the panel",
+          status_of(answer) == 200 and as_json(answer).get("forgotten") is True and
+          admin.EVENTS == [], (status_of(answer), as_json(answer)))
+    answer = await endpoint("/admin/api/events/forget", "POST")(
+        make_request("POST", "/admin/api/events/forget",
+                     {"id": "not a number"}, cookies=admin_cookie))
+    check("...and a line has to be named by its number",
+          status_of(answer) == 400, status_of(answer))
+
+    # ---- deleting a client ------------------------------------------------
+    # Deleting is not closing. Closing takes the browser away and keeps the
+    # client - their record, their cookies. This is the client gone.
+    admin.COOKIE_STORE = scratch / "cookies-deleted"
+    admin.keep_cookies("the-admin-deleted",
+                       [{"name": "X-APPLE-WEBAUTH-TOKEN", "value": "v=2:t=Bw=="}])
+    server.GONE["the-admin-deleted"] = {
+        "page": "/src/1.html", "stage": "Address", "seen": time.time()}
+    doomed = server.PROFILES / "the-admin-deleted"
+    doomed.mkdir(parents=True, exist_ok=True)
+    (doomed / "Cookies").write_text("the browser's own memory")
+    admin.STORE.set_export("the-admin-deleted", True)
+
+    answer = await endpoint("/admin/api/clients/{sid}/delete", "POST")(
+        "the-admin-deleted",
+        make_request("POST", "/admin/api/clients/the-admin-deleted/delete",
+                     {}, cookies=admin_cookie))
+    data = as_json(answer)
+    check("a client who has gone can be deleted",
+          status_of(answer) == 200 and data.get("deleted") is True, data)
+    check("...their record goes", "the-admin-deleted" not in server.GONE,
+          list(server.GONE))
+    check("...and the cookies that were written down go",
+          not (admin.COOKIE_STORE / "the-admin-deleted.json").exists(),
+          list(admin.COOKIE_STORE.glob("*")))
+    check("...and so does the browser's profile", not doomed.exists(),
+          doomed.exists())
+    check("...and the permission to export their cookies goes",
+          admin.STORE.export_allowed("the-admin-deleted") is False)
+
+    answer = await endpoint("/admin/api/clients")(make_request(cookies=admin_cookie))
+    check("...and nothing of them is left on the panel",
+          all(row["id"] != "the-admin-deleted"
+              for row in as_json(answer).get("clients", [])),
+          [row["id"] for row in as_json(answer).get("clients", [])])
+
+    # A client whose browser is still running is not deleted from under
+    # themselves: closing comes first, and it is a button of its own.
+    answer = await endpoint("/admin/api/clients/{sid}/delete", "POST")(
+        "the-admin-test",
+        make_request("POST", "/admin/api/clients/the-admin-test/delete",
+                     {}, cookies=admin_cookie))
+    check("a client whose browser is running is not deleted",
+          status_of(answer) == 409, status_of(answer))
+    check("...and is still here", "the-admin-test" in server.SESSIONS,
+          list(server.SESSIONS))
+
+    answer = await endpoint("/admin/api/clients/{sid}/delete", "POST")(
+        "no-such-client",
+        make_request("POST", "/admin/api/clients/no-such-client/delete",
+                     {}, cookies=admin_cookie))
+    check("a client who was never here is not deleted",
+          status_of(answer) == 404, status_of(answer))
+
+    answer = await endpoint("/admin/api/clients/{sid}/delete", "POST")(
+        "the-admin-before",
+        make_request("POST", "/admin/api/clients/the-admin-before/delete", {}))
+    check("deleting a client takes the admin's secret",
+          status_of(answer) == 403, status_of(answer))
+
     # ---- the panel listens, it does not ask -----------------------------
     # The panel opens one line to the server and the server pushes to it.
     # A panel that asked the server the same question every two seconds
