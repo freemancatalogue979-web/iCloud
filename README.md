@@ -619,33 +619,66 @@ again when the frame loads, when the page is resized, after a press, and after
 a message arrives under a field, because all of those change how tall the form
 is.
 
-**It is read in Montserrat.** One font for the whole page, the frames
-included, and said with `!important` on every element rather than left to
-inherit: Apple's stylesheet names a font on almost every element, and a font
-named on the element itself is not inherited over.
+**It is read in Montserrat, and it does not flash.** One font for the whole
+page, the frames included, and said with `!important` on every element rather
+than left to inherit: Apple's stylesheet names a font on almost every element,
+and a font named on the element itself is not inherited over.
 
-The font is served by this app from `/fonts/`, declared by the engine right
-next to the rule that uses it, and **not** fetched from a font house: a page
-that asks somebody else for its font is a page that looks broken wherever that
-somebody cannot be reached, and this app is meant to run on a machine that may
-have no network at all. It is one variable file
-(`fonts/montserrat-latin.woff2`, weights 100–900), so one request covers the
-headings, the body, the buttons and the six code boxes alike. The licence sits
-beside it: SIL Open Font License 1.1, `fonts/OFL-Montserrat.txt`.
+The font is **carried inside the capture**, not fetched. `inline_font.py` puts
+one `<style data-icloud=font>` into each file in `src/` — in the page's head,
+and again in the head of the frame it carries, since a `<iframe srcdoc>` is a
+document of its own and does not inherit the page's faces. The `@font-face`
+source is the font file itself, base64, in a `data:` URL: there is nothing to
+fetch, so nothing can arrive after the page has been drawn. The first line laid
+out is already in Montserrat. A page that carried the font and then swapped it
+in is exactly the flash this avoids, and `font-display: block` says so as well
+— a font that arrives late should not be drawn over a fallback nobody asked
+for.
+
+It also means the files stand on their own: `src/2.html` opened straight from
+disk, with no server and no engine, still reads in Montserrat.
+
+The font is one variable file (`fonts/montserrat-latin.woff2`, weights
+100–900), so one copy covers the headings, the body, the buttons and the six
+code boxes alike: ~38 KB, ~51 KB once it is base64. It is not fetched from a
+font house — a page that asks somebody else for its font is a page that looks
+broken wherever that somebody cannot be reached, and this app is meant to run on
+a machine that may have no network at all. The licence sits beside it: SIL Open
+Font License 1.1, `fonts/OFL-Montserrat.txt`.
+
+A page that did **not** bring its own copy — a capture refreshed and not yet run
+through `inline_font.py` — is given the same face by the engine instead,
+pointing at `/fonts/montserrat-latin.woff2`, which the server serves. Two faces
+for one family is a choice the later one wins, so the engine leaves this one out
+when the page already carries the font: otherwise the fallback, a fetch and the
+flash would all come back.
 
 The stack behind it is `"Helvetica Neue", Helvetica, Arial, sans-serif` — what
-is used while the font is still arriving, or on a machine that will not take
-it. Nothing here is a glyph that stops being a glyph: the capture has no icon
-font of its own, its symbols are SVG and images.
+is used on a machine that will not take the font. Nothing here is a glyph that
+stops being a glyph: the capture has no icon font of its own, its symbols are
+SVG and images.
 
-All of it, in one place — the stylesheet the engine adds to every document it
-can reach, and nothing else:
+What the script writes into each page — one line, the base64 in full:
+
+```html
+<style data-icloud=font>
+@font-face { font-family: 'Montserrat'; font-style: normal;
+  font-weight: 100 900; font-display: block;
+  src: url('data:font/woff2;base64,d09GMgABAAAA…') format('woff2'); }
+html, body, body * {
+  font-family: 'Montserrat', 'Helvetica Neue', Helvetica, Arial, sans-serif
+               !important; }
+</style>
+```
+
+And what the engine adds to every document it can reach, and nothing else:
 
 ```css
+/* only for a page that did not bring its own copy of the font */
 @font-face {
   font-family: "Montserrat";
   font-weight: 100 900;
-  font-display: swap;
+  font-display: block;
   src: url("/fonts/montserrat-latin.woff2") format("woff2");
 }
 html, body, body * {
@@ -1067,7 +1100,7 @@ npm install   # once, pulls jsdom
 npm test
 ```
 
-Eight suites:
+Nine suites:
 
 - `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
   pins the splash: the screen is only the mark — no text, no buttons, nothing
@@ -1119,6 +1152,11 @@ Eight suites:
   turns up, that what the browser is showing reaches the viewers, and that
   "Trust this browser?" is read as a question and answered by pressing
   *Trust* — and only *Trust*.
+- `test_inline_font.py` runs `inline_font.py` over the captures on disk: every
+  page carries the font, and its frame carries it too, the bytes carried are
+  the font file itself, there is no address in the page to fetch a font from,
+  the page asks for Montserrat on every element and does not swap a fallback
+  in first, and a second run changes nothing.
 - `test_admin.py` runs the control room's own rules: the settings file is a
   secret and is read again when it changes, the token is masked, a cookie is
   exported in Cookie Editor's format, the clients and the Telegram settings
@@ -1159,6 +1197,9 @@ the project virtualenv by itself.
 - `telegram.py` — the Telegram notifier
 - `fonts/` — Space Grotesk for the panel and Montserrat for the captures,
   both served by the app (SIL Open Font License 1.1)
+- `inline_font.py` — puts the font into the captures themselves, so nothing is
+  fetched and nothing flashes; run it after a capture is refreshed (`python3
+  inline_font.py`, or `--check` to say whether one still needs it)
 - `run.bat` — Windows launcher
 - `run.sh` — Linux (and macOS) launcher: sets up `.venv`, installs the
   requirements and Chromium, sets `ICLOUD_ADMIN_TOKEN`, says what the machine

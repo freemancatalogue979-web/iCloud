@@ -30,18 +30,32 @@ engine in it:
   SingleFile export lives in such a frame, and without this the page cannot
   reach it at all — not its fields, not its buttons, nothing.
 
-No meta is rewritten, no script is stripped, and the file on disk is never
-written to.
+No meta is rewritten, no script is stripped, and nothing is written to these
+files while the app runs — the one thing these files carry that the capture did
+not is the font, and that is put there once, by a script, before the app starts
+(see below).
 
-The engine also puts three things right at run time, all of them for the screen
-the page is shown on rather than for the file: it takes the
+The engine also puts things right at run time, all of them for the screen the
+page is shown on rather than for the file: it takes the
 `@media (prefers-color-scheme: dark)` rules out of the page's stylesheet (a
 capture is a light page, and a phone is usually in dark mode), it reads the
-page in Montserrat (served by the app itself, at `/fonts/`, so no font house has
-to be reachable), and it
+page in Montserrat, and it
 sizes the frame the sign-in form sits in to the form inside it — that frame was
 captured at a fixed 209px and told not to scroll, which is what cuts off
 *Resend code to iPhone* on a narrow screen. None of them touches these files.
+
+The font is the exception, and it is written into these files on purpose: it
+travels inside the page as a `data:` URL, so there is nothing to fetch and
+nothing to arrive late — a page that draws itself in a fallback and then swaps
+Montserrat in is a page that flashes. It is put there by `inline_font.py` in the
+repository root, not by hand, so **a refreshed capture needs one command**:
+
+    python3 inline_font.py          # every file here
+    python3 inline_font.py --check  # say whether one still needs it
+
+The engine still hands the same face to any page that did not bring its own
+copy (served from `/fonts/`), so a capture is never left reading in a font
+nobody chose.
 
 The tag only ever lands in the page's own markup. Markup that sits inside a
 quoted attribute value is not a place to put it, and a SingleFile export is

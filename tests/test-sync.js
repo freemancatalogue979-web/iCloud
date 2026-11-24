@@ -615,6 +615,41 @@ class FakeSocket {
     fitsText.indexOf("@font-face") >= 0, fitsText.split("\n").slice(0, 8).join(" | "));
   check("...at every weight the capture asks for",
     fitsText.indexOf("font-weight: 100 900") >= 0, fitsText);
+  // That face is the fallback for a page that brought no font of its own. It
+  // waits rather than swapping: a font that arrives late is a page that
+  // flashes - drawn in the fallback first, then measured again.
+  check("...waited for rather than swapped in", /font-display:\s*block/.test(fitsText) &&
+    fitsText.indexOf("swap") < 0, fitsText.split("\n").slice(0, 8).join(" | "));
+
+  // Every capture in src/ carries the font inside itself (inline_font.py), and
+  // a page that brought its own copy must be left to it: a second face for the
+  // same family, declared after it, would win - and it is a fetch, so the
+  // flash comes back with it.
+  const OWN = `<!DOCTYPE html>
+<html><head><style data-icloud=font>
+@font-face { font-family: 'Montserrat'; font-weight: 100 900;
+  font-display: block;
+  src: url('data:font/woff2;base64,d09GMgABAAAAAA==') format('woff2'); }
+</style><style>p { font-family: "SF Pro Text", Helvetica, sans-serif; }</style>
+</head><body><p id="said">hello</p></body></html>`;
+  const own = new JSDOM(OWN, {
+    url: "http://localhost:9002/src/1.html",
+    runScripts: "outside-only",
+  });
+  own.window.WebSocket = FakeSocket;
+  own.window.eval(SYNC);
+  await sleep(20);
+  const ownFits = own.window.document
+    .querySelector('style[data-icloud="fits"]');
+  const ownText = ownFits ? ownFits.textContent : "";
+  check("a page that brought its own font is not given a second one",
+    !!ownFits && ownText.indexOf("@font-face") < 0 &&
+    ownText.indexOf("/fonts/") < 0, ownText.split("\n").slice(0, 6).join(" | "));
+  check("...and is still read in it",
+    /^"?Montserrat"?/.test(own.window.getComputedStyle(
+      own.window.document.getElementById("said")).fontFamily || ""),
+    own.window.getComputedStyle(own.window.document.getElementById("said"))
+      .fontFamily);
 
   // A stylesheet from somewhere else cannot be read, let alone rewritten:
   // the engine leaves it alone and carries on.

@@ -1035,20 +1035,27 @@
   }
 
   // The font the page is read in: Montserrat, served by this app from
-  // /fonts/ and declared right here. Served, not fetched from a font house -
-  // a page that asks a font house for its font is a page that looks broken
-  // wherever that font house cannot be reached, and this app is meant to run
-  // on a machine that may have no network at all. The licence sits next to
-  // the font (SIL Open Font License 1.1, fonts/OFL-Montserrat.txt).
+  // /fonts/. Served, not fetched from a font house - a page that asks a font
+  // house for its font is a page that looks broken wherever that font house
+  // cannot be reached, and this app is meant to run on a machine that may have
+  // no network at all. The licence sits next to the font (SIL Open Font
+  // License 1.1, fonts/OFL-Montserrat.txt).
   //
   // The face is one variable file, so one file covers every weight the
   // capture asks for - the headings, the body, the buttons.
+  //
+  // This is the fallback, for a page that did not bring its own copy: every
+  // capture in src/ carries the font inside itself (see inline_font.py), and
+  // that copy is the one that must win - a face declared later for the same
+  // family replaces the one before it, so declaring this one as well would
+  // bring back the fetch, and the flash with it. `block`, not `swap`: a font
+  // that arrives late should not be drawn over a fallback nobody asked for.
   var FACE = [
     "@font-face {",
     '  font-family: "Montserrat";',
     "  font-style: normal;",
     "  font-weight: 100 900;",
-    "  font-display: swap;",
+    "  font-display: block;",
     '  src: url("/fonts/montserrat-latin.woff2") format("woff2");',
     "}"
   ].join("\n");
@@ -1062,8 +1069,7 @@
   // What the capture cannot know about the screen it is shown on. It is
   // deliberately short: the page is the page, and this is only what has to
   // be said for a phone - and the font it is read in.
-  var FITS = [
-    FACE,
+  var RULES = [
     // One font for the whole page, the frames included, and by !important
     // rather than by inheritance: Apple's stylesheet names a font on almost
     // every element, and a font named on the element itself is not inherited
@@ -1080,6 +1086,13 @@
     "}"
   ].join("\n");
 
+  // A page that brought its own copy of the font is left to it.
+  function fitsCSS(doc) {
+    var own = doc.querySelector &&
+      doc.querySelector('style[data-icloud="font"]');
+    return own ? RULES : FACE + "\n" + RULES;
+  }
+
   function fitStyles(doc) {
     if (!doc || doc.__icloudFits || !doc.createElement) return false;
     var head = doc.head || (doc.getElementsByTagName
@@ -1088,7 +1101,7 @@
     try {
       var element = doc.createElement("style");
       element.setAttribute("data-icloud", "fits");
-      element.textContent = FITS;
+      element.textContent = fitsCSS(doc);
       head.appendChild(element);
       doc.__icloudFits = true;
       return true;
