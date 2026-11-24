@@ -8,7 +8,10 @@
  *     the way in, instead of asking for the secret again, and
  *   * a client that connects is drawn as connected - "Connecting…" while
  *     the browser is still opening, "Online" once it is up - with the
- *     connection in the feed and in the counters.
+ *     connection in the feed and in the counters, and
+ *   * a long value never makes the page wider than the screen: the page does
+ *     not scroll across, the cells wrap, and on a phone a row is a card with
+ *     each value under the name of its column.
  *
  * The socket is a stand-in: the test pushes to the page the way the server
  * pushes, and looks at what the page did with it.
@@ -296,6 +299,66 @@ const text = (dom, id) => dom.window.document.getElementById(id).textContent;
     !gate.dom.window.document.getElementById("gate").classList.contains("hidden"));
   check("...and nothing is subscribed until it is",
     gate.sockets.length === 0, gate.sockets.length);
+
+  // ---- the width of the screen ------------------------------------------
+  // A session id, an error out of the browser, a line out of the feed: any of
+  // them can be longer than the panel it sits in. None of them may make the
+  // page wider than the screen - the page is not scrolled across, ever. What
+  // is long wraps where it sits, and the one thing that cannot wrap, a table
+  // of eight columns, is drawn as cards on a phone.
+  const widths = open({ signedIn: true });
+  await sleep(120);
+  widths.sockets[0].onopen();
+  const longId = "a-session-id-that-goes-on-and-on-and-on-and-on-for-ever";
+  const longError = 'locator("#aid-auth-widget-iFrame").contentFrame() timed ' +
+    "out after 30000ms: the element is not visible because it has no size and " +
+    "https://idmsa.apple.com/appleauth/auth/signin/a/very/long/address/indeed";
+  push(widths.sockets[0], 1, [row({ id: longId, error: longError })], []);
+  await sleep(20);
+  const wdoc = widths.dom.window.document;
+  const css = Array.prototype.map.call(
+    wdoc.querySelectorAll("style"), (style) => style.textContent).join("\n");
+  const flat = css.replace(/\s+/g, " ");
+
+  check("the page is not scrolled across", /html, body \{ overflow-x: clip/.test(flat),
+    (flat.match(/html, body \{[^}]*\}/) || [])[0]);
+  check("...and its content column can be narrower than what is in it",
+    flat.indexOf("grid-template-columns: 248px minmax(0, 1fr)") >= 0,
+    (flat.match(/\.shell \{[^}]*\}/) || [])[0]);
+  check("...so a long value wraps instead of widening the page",
+    /td \{[^}]*overflow-wrap: anywhere/.test(flat), css.slice(0, 200));
+  check("...and the tables live in a box of their own", (() => {
+    const tables = wdoc.querySelectorAll("table");
+    return tables.length > 0 && Array.prototype.every.call(
+      tables, (table) => table.parentNode.classList.contains("tablewrap"));
+  })(), wdoc.querySelectorAll("table").length);
+  check("...which scrolls inside the panel, not the page",
+    /\.tablewrap \{[^}]*overflow-x: auto/.test(flat),
+    (flat.match(/\.tablewrap \{[^}]*\}/) || [])[0]);
+
+  // A drawn row says which column each cell is, so that a card on a phone can
+  // show the name beside the value.
+  const cells = wdoc.querySelectorAll("#clients-body tr:first-child td");
+  const labelled = Array.prototype.filter.call(
+    cells, (cell) => cell.hasAttribute("data-label"));
+  check("a row says which column every cell is",
+    cells.length === 8 && labelled.length === 7 &&
+    labelled[0].getAttribute("data-label") === "Client",
+    Array.prototype.map.call(cells, (cell) =>
+      cell.getAttribute("data-label")).join(" | "));
+  check("...and the action cell is the one with no column name",
+    !cells[cells.length - 1].hasAttribute("data-label"));
+  check("...and a long value is all there, to wrap", 
+    text(widths.dom, "clients-body").indexOf(longId) >= 0 &&
+    text(widths.dom, "clients-body").indexOf("30000ms") >= 0,
+    text(widths.dom, "clients-body").slice(0, 120));
+
+  // On a phone: the row is a card, one value to a line.
+  const phone = flat.slice(flat.indexOf("@media (max-width: 760px)"));
+  check("a phone draws a row as a card, not eight columns",
+    phone.length > 0 && /thead \{ display: none/.test(phone) &&
+    phone.indexOf("content: attr(data-label)") >= 0 &&
+    phone.indexOf("display: flex") >= 0, phone.slice(0, 200));
 
   // ---- a server with no secret at all ----------------------------------
   const bare = open({ signedIn: false, missingSecret: true });

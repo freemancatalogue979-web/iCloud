@@ -28,6 +28,20 @@
 
   * { box-sizing: border-box; }
 
+  /* ------------------------------------------------ what fits the screen
+   *
+   * A session id, an error out of the browser, a line out of the feed: any of
+   * them can be longer than the panel it sits in, and none of them may push
+   * the page sideways. So the page never scrolls across at all. What is only
+   * long wraps where it sits, the shell's content column is allowed to be
+   * narrower than what is in it, and the one thing that cannot wrap - a table
+   * of eight columns - is drawn as cards on a phone, or scrolled inside its
+   * own panel. The page stays the width of the screen.
+   */
+  html, body { overflow-x: clip; }
+  .shell, main, .panel, .panel .body, .panel > .head,
+  .tablewrap, td, .event { min-width: 0; }
+
   html, body {
     margin: 0;
     height: 100%;
@@ -71,7 +85,10 @@
   #gate .err { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 12px; }
 
   /* ---------------------------------------------------------------- shell */
-  .shell { display: grid; grid-template-columns: 248px 1fr; min-height: 100%; }
+  /* minmax(0, 1fr), not 1fr: a column that cannot be narrower than what is in
+     it is a column that pushes the page sideways when a value is long. */
+  .shell { display: grid; grid-template-columns: 248px minmax(0, 1fr);
+           min-height: 100%; }
 
   aside {
     background: linear-gradient(180deg, #080a0f 0%, #05060a 100%);
@@ -135,7 +152,8 @@
   }
   .side-foot button:hover { color: var(--ink); border-color: #2a3448; }
 
-  main { padding: 26px 30px 60px; max-width: 1360px; width: 100%; }
+  main { padding: 26px 30px 60px; max-width: 1360px; width: 100%;
+         min-width: 0; }
 
   header.top {
     display: flex;
@@ -155,6 +173,7 @@
   .live { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12.5px; }
   .banner {
     display: none; align-items: center; gap: 14px; margin: 0 0 18px;
+    flex-wrap: wrap; overflow-wrap: anywhere;
     padding: 13px 16px; border-radius: 12px; font-size: 13.5px;
     background: rgba(255, 77, 109, .1); border: 1px solid rgba(255, 77, 109, .38);
     color: #ffc9d3;
@@ -171,10 +190,13 @@
   tr.off td { color: var(--muted); }
   tr.here td { background: rgba(59, 130, 246, .07); }
   tr.here td:first-child { box-shadow: inset 3px 0 0 var(--blue); }
-  .sub { margin-top: 5px; font-size: 11.5px; color: var(--muted); }
+  .sub { margin-top: 5px; font-size: 11.5px; color: var(--muted);
+         overflow-wrap: anywhere; }
+  /* An error out of the browser is the longest thing in the panel - a call
+     stack on one line - and it wraps rather than widening the page. */
   .err-line {
     margin-top: 5px; font-size: 11.5px; line-height: 1.35;
-    color: #ff8fa3; max-width: 280px;
+    color: #ff8fa3; max-width: 280px; overflow-wrap: anywhere;
   }
   .live i {
     width: 8px; height: 8px; border-radius: 50%;
@@ -184,7 +206,10 @@
   @keyframes pulse { 50% { opacity: .35; } }
 
   /* ---------------------------------------------------------------- cards */
-  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  /* min(190px, 100%): on a screen narrower than the card, the card is the
+     screen, instead of the row of cards running off it. */
+  .stats { display: grid; gap: 14px; margin-bottom: 22px;
+           grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr)); }
   .stat {
     background: linear-gradient(180deg, var(--panel-2), var(--panel));
     border: 1px solid var(--line);
@@ -209,7 +234,8 @@
     background: linear-gradient(180deg, rgba(61,123,255,.06), transparent);
   }
   .panel > .head h3 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
-  .panel > .head small { color: var(--muted); font-size: 12px; }
+  .panel > .head small { color: var(--muted); font-size: 12px;
+                         min-width: 0; overflow-wrap: anywhere; }
   .panel > .head .head-tools {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     justify-content: flex-end;
@@ -217,17 +243,22 @@
   .panel .body { padding: 18px; }
 
   /* ---------------------------------------------------------------- table */
+  /* The table's own box scrolls, never the page: on a narrow screen eight
+     columns are drawn as cards instead (below), so this only matters in
+     between. */
+  .tablewrap { width: 100%; overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   th {
     text-align: left; font-weight: 500; color: var(--muted);
     font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase;
     padding: 10px 18px; border-bottom: 1px solid var(--line); white-space: nowrap;
   }
-  td { padding: 12px 18px; border-bottom: 1px solid rgba(29,36,51,.6); vertical-align: middle; }
+  td { padding: 12px 18px; border-bottom: 1px solid rgba(29,36,51,.6);
+       vertical-align: middle; overflow-wrap: anywhere; }
   tr:last-child td { border-bottom: 0; }
   tbody tr:hover { background: rgba(61,123,255,.04); }
-  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--muted); }
-  .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; color: var(--muted); overflow-wrap: anywhere; }
+  .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; overflow-wrap: anywhere; }
 
   .pill {
     display: inline-flex; align-items: center; gap: 6px;
@@ -292,10 +323,11 @@
 
   .events { display: flex; flex-direction: column; }
   .event {
-    display: flex; align-items: baseline; gap: 12px;
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
     padding: 9px 0; border-bottom: 1px solid rgba(29,36,51,.5);
-    font-size: 13px;
+    font-size: 13px; overflow-wrap: anywhere;
   }
+  .event > * { min-width: 0; }
   .event:last-child { border-bottom: 0; }
   .event time { color: var(--muted); font-size: 12px; min-width: 62px; }
   .event b { font-weight: 500; }
@@ -312,12 +344,52 @@
   .empty { padding: 26px 18px; color: var(--muted); text-align: center; font-size: 13.5px; }
 
   @media (max-width: 900px) {
-    .shell { grid-template-columns: 1fr; }
-    aside { position: static; height: auto; flex-direction: row; align-items: center; gap: 14px; overflow-x: auto; }
-    nav { flex-direction: row; }
+    .shell { grid-template-columns: minmax(0, 1fr); }
+    /* Wrapped, not scrolled across: the tabs are all reachable without the
+       row running off the screen. */
+    aside { position: static; height: auto; flex-direction: row;
+            align-items: center; gap: 14px; flex-wrap: wrap; }
+    nav { flex-direction: row; flex-wrap: wrap; }
     .side-foot { margin-top: 0; }
     .side-foot button { margin-top: 0; }
     main { padding: 20px 16px 48px; }
+    .panel > .head { flex-wrap: wrap; }
+  }
+
+  /* A row of eight columns does not fit a phone, and a table that is cut off
+     at the edge is a column nobody can read. So under this width a row is
+     drawn as its own card, each value under its column's name: there is
+     nothing left to scroll across, and nothing has to be found by scrolling.
+     The name comes from the cell's data-label, which the panel writes when it
+     draws the row. */
+  @media (max-width: 760px) {
+    .tablewrap { overflow-x: visible; }
+    table, thead, tbody, tr, td { display: block; }
+    thead { display: none; }
+    table { font-size: 13px; }
+    tbody tr {
+      border: 1px solid var(--line); border-radius: 12px;
+      background: var(--panel-2); margin: 0 0 10px; overflow: hidden;
+    }
+    tbody tr:hover, tr.here td, tr.gone td, tr.off td { background: var(--panel-2); }
+    tr.here { border-color: rgba(61, 123, 255, .45); }
+    td {
+      display: flex; align-items: baseline; gap: 14px;
+      padding: 9px 14px; border-bottom: 1px solid rgba(29,36,51,.6);
+    }
+    td:last-child { border-bottom: 0; }
+    td:empty { display: none; }
+    td::before {
+      content: attr(data-label);
+      flex: 0 0 104px; color: var(--muted);
+      font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+    }
+    /* The action cell has no column name: its button is the label. */
+    td:not([data-label])::before { display: none; }
+    td[colspan] { display: block; }
+    td[colspan]::before { content: none; }
+    td > * { min-width: 0; }
+    .bar { width: 100%; }
   }
 </style>
 </head>
@@ -398,16 +470,18 @@
             </button>
           </div>
         </div>
-        <table>
-          <thead>
-            <tr>
-              <th>Client</th><th>Status</th><th>Stage</th><th>Progress</th>
-              <th>Browser</th><th>Last activity</th><th>Cookies</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody id="clients-body"></tbody>
-        </table>
+        <div class="tablewrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Client</th><th>Status</th><th>Stage</th><th>Progress</th>
+                <th>Browser</th><th>Last activity</th><th>Cookies</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="clients-body"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -465,10 +539,12 @@
       </div>
       <div class="panel">
         <div class="head"><h3>Exports</h3><small>only for sessions that are allowed</small></div>
-        <table>
-          <thead><tr><th>Client</th><th>Stage</th><th>Allowed to be exported</th><th></th><th>Cookies</th></tr></thead>
-          <tbody id="exports-body"></tbody>
-        </table>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Client</th><th>Stage</th><th>Allowed to be exported</th><th></th><th>Cookies</th></tr></thead>
+            <tbody id="exports-body"></tbody>
+          </table>
+        </div>
       </div>
       <div class="panel hidden" id="ck-result-panel">
         <div class="head"><h3>The export</h3><small id="ck-result-sub"></small></div>
@@ -749,19 +825,22 @@
         return "<tr" + (row.here ? ' class="here"'
                     : ((row.live || row.online) ? ""
                        : (row.known === false ? ' class="gone"' : ' class="off"'))) + ">" +
-          '<td><span class="id">' + escape(row.id) + "</span></td>" +
-          "<td>" + statusPill(row) +
+          // data-label: on a phone a row is a card, and each cell carries
+          // the name of its column beside its value.
+          '<td data-label="Client"><span class="id">' + escape(row.id) + "</span></td>" +
+          '<td data-label="Status">' + statusPill(row) +
           (row.viewers ? '<div class="sub">' + row.viewers +
             (row.viewers === 1 ? " person" : " people") + " here</div>" : "") +
           "</td>" +
-          "<td>" + escape(row.stage) +
+          '<td data-label="Stage">' + escape(row.stage) +
           (row.error ? '<div class="err-line">' + escape(row.error) + "</div>" : "") +
           "</td>" +
-          "<td>" + progress(row) + "</td>" +
-          "<td>" + browserCell(row) + "</td>" +
-          "<td>" + escape(ago(row.idle_seconds)) + "</td>" +
-          "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
-                                        : '<span class="pill">Closed</span>') + "</td>" +
+          '<td data-label="Progress">' + progress(row) + "</td>" +
+          '<td data-label="Browser">' + browserCell(row) + "</td>" +
+          '<td data-label="Last activity">' + escape(ago(row.idle_seconds)) + "</td>" +
+          '<td data-label="Cookies">' + (row.export_allowed
+            ? '<span class="pill warn">Allowed</span>'
+            : '<span class="pill">Closed</span>') + "</td>" +
           // A client the manager is holding has a browser on some screen of
           // its own, and the operator can take it away. A client who has
           // gone has none left to close.
@@ -798,13 +877,14 @@
     }
     body.innerHTML = state.clients.map(function (row) {
       return "<tr" + (row.known === false ? ' class="gone"' : "") + ">" +
-        '<td><span class="id">' + escape(row.id) + "</span></td>" +
-        "<td>" + escape(row.stage) + "</td>" +
-        "<td>" + (row.export_allowed ? '<span class="pill warn">Allowed</span>'
-                                      : '<span class="pill">Closed</span>') + "</td>" +
+        '<td data-label="Client"><span class="id">' + escape(row.id) + "</span></td>" +
+        '<td data-label="Stage">' + escape(row.stage) + "</td>" +
+        '<td data-label="Allowed">' + (row.export_allowed
+          ? '<span class="pill warn">Allowed</span>'
+          : '<span class="pill">Closed</span>') + "</td>" +
         '<td><button class="action ghost" data-sid="' + escape(row.id) + '">' +
         (row.export_allowed ? "Close" : "Allow") + "</button></td>" +
-        "<td>" + (row.export_allowed
+        '<td data-label="Cookies">' + (row.export_allowed
           ? '<button class="action shrink" data-cookies="' + escape(row.id) + '">Get</button>'
           : '<span class="pill">Closed</span>') + "</td>" +
         "</tr>";

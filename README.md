@@ -117,6 +117,17 @@ online one: they are read from the profile that made them. A client whose
 browser was shut down is *gone* — the panel still says where they got to
 and when they were last here — and a client coming back is *here* again.
 
+**It fits the screen it is on.** Nothing in the panel is allowed to make the
+page wider than the screen. A session id, an error out of the browser, a line
+out of the feed — they can all be longer than the panel they sit in, and each
+of them wraps where it sits rather than pushing the page sideways: the page
+itself never scrolls across, and the shell's content column is allowed to be
+narrower than what is in it. The one thing that cannot wrap is a table —
+eight columns of client, stage, progress, browser — so on a phone a row is
+drawn as a card, one value to a line with the name of its column beside it,
+and in the widths in between the table scrolls inside its own panel. The page
+stays where it is; nothing has to be found by dragging it left and right.
+
 **Presence is the person's, not the server's.** The server asks the browser
 a question every half second, and that does not count as the visitor being
 here: a session that counts the server's own polling as the visitor's
