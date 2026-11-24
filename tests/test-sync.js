@@ -128,6 +128,21 @@ class FakeSocket {
     JSON.parse(theSecond.window.localStorage.getItem("icloud_state")).stage === "Password",
     theSecond.window.localStorage.getItem("icloud_state"));
 
+  // The page that says the account is locked is a page of its own, and the
+  // client's own state says so - it is not a step of the sign-in, and it is
+  // not the end of it either.
+  const locked = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/5.html",
+    runScripts: "outside-only",
+  });
+  locked.window.WebSocket = FakeSocket;
+  locked.window.eval(SYNC);
+  FakeSocket.last.onopen();
+  const lockedHello = FakeSocket.last.sent[0] || {};
+  check("the locked page is a step of its own",
+    lockedHello.state && lockedHello.state.stage === "Locked" &&
+    lockedHello.state.finished === false, JSON.stringify(lockedHello.state));
+
   // The server says they have finished: the browser is told first, and
   // then it goes to iCloud.
   const gone = new JSDOM(PAGE, {

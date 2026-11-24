@@ -211,6 +211,16 @@ async def main():
     check("...and that its cookies are closed",
           row["export_allowed"] is False, row)
 
+    # The page that says the account is locked is a step of its own, and the
+    # panel says which: it is not the sign-in carried on, and not the end.
+    session.hub.page = "/src/5.html"
+    answer = await endpoint("/admin/api/clients")(make_request(cookies=admin_cookie))
+    locked_row = [row for row in as_json(answer).get("clients", [])
+                  if row["id"] == "the-admin-test"][0]
+    check("an account that is locked is its own step on the panel",
+          locked_row["stage"] == "Locked", locked_row["stage"])
+    session.hub.page = "/src/4.html"
+
     # ---- the clients who are not here any more --------------------------
     # A visitor whose browser has been shut down is still a visitor. The
     # panel says they have gone, and where they got to - rather than

@@ -202,6 +202,21 @@ _READ = """() => {
   const h1 = document.querySelector('h1');
   if (h1) heading = (h1.textContent || '').trim().slice(0, 200);
 
+  // What the page says when it is not asking for anything. Apple tells a
+  // person their account has been locked with a dialog, and the dialog's
+  // title is #alertInfo: "This Apple Account has been locked for security
+  // reasons." That is the whole answer - there is no form coming - and it is
+  // read here, with the general shapes behind it, because which capture to
+  // show is the flow's business and not this script's.
+  let alert = '';
+  const alert_title = document.querySelector(
+    '#alertInfo, [role=alertdialog] h1, [role=alertdialog] h2, ' +
+    '[role=alert] h1, [role=alert] h2');
+  if (alert_title) {
+    alert = (alert_title.textContent || '').replace(/\s+/g, ' ').trim()
+      .slice(0, 200);
+  }
+
   // "Trust this browser?" After the code is accepted Apple asks whether
   // this browser may be trusted, and it asks with one button and no form:
   // the browser sits on the question until somebody answers it, and the
@@ -221,8 +236,8 @@ _READ = """() => {
     break;
   }
 
-  return { url: location.href, title: document.title, heading, fields, messages,
-           trust };
+  return { url: location.href, title: document.title, heading, alert, fields,
+           messages, trust };
 }"""
 
 # The browser the server opened. ``context`` is a Playwright BrowserContext
@@ -1025,6 +1040,7 @@ class Bridge:
         fields: dict = {}
         messages: list = []
         heading = ""
+        alert = ""
         url = title = ""
         fallback_url = fallback_title = ""
         trust = False
@@ -1048,6 +1064,11 @@ class Bridge:
                 # The first frame that says what step it is, says it.
                 heading = str(state.get("heading") or "")
 
+            if not alert:
+                # The first frame that says the page is not asking anything -
+                # that the account is locked, say - is the one that says it.
+                alert = str(state.get("alert") or "")
+
             # A frame that is asking whether to be trusted is asking,
             # wherever it sits.
             trust = trust or bool(state.get("trust"))
@@ -1070,7 +1091,7 @@ class Bridge:
         if not url:
             url, title = fallback_url, fallback_title
 
-        return {"url": url, "title": title, "heading": heading,
+        return {"url": url, "title": title, "heading": heading, "alert": alert,
                 "fields": fields, "messages": messages, "trust": trust}
 
 

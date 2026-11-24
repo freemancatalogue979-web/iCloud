@@ -805,6 +805,72 @@ async def main():
     check("...and it stops waiting",
           session.waiting is None, session.waiting)
 
+    # ---- the account that is locked --------------------------------------
+    # Apple locks an account that has been signed in to from somewhere new,
+    # and the page it shows says so - "This Apple Account has been locked for
+    # security reasons." - instead of asking for the code. Nothing else in the
+    # journey is coming, so the person is taken to the capture that says what
+    # happened, and the session is marked as one that went wrong.
+    (flow_root / "flow.json").write_text(json.dumps({
+        "blocked": {"says": "This Apple Account has been locked for security reasons",
+                    "go": "/src/5.html"},
+        "steps": [
+            {"page": "/src/4.html", "press": "sign-in", "go": "/src/2.html",
+             "live": True, "wait": True,
+             "until": {"heading": "Two-Factor Authentication"}},
+        ]
+    }), encoding="utf-8")
+
+    check("the flow says which words mean the account is locked",
+          server.flow_blocked().get("go") == "/src/5.html" and
+          "locked for security reasons" in server.flow_blocked().get("says", ""),
+          server.flow_blocked())
+
+    locked_page = {
+        "url": "https://idmsa.apple.com/appleauth/auth/signin",
+        "title": "Sign in to your Apple Account",
+        "heading": "",
+        "alert": "This Apple Account has been locked for security reasons.",
+        "fields": {},
+        "messages": [],
+    }
+    check("the browser saying it is what is looked for",
+          server.account_is_locked(locked_page).startswith(
+              "This Apple Account has been locked"),
+          server.account_is_locked(locked_page))
+    check("...and a page that says something else is not it",
+          server.account_is_locked({"alert": "",
+                                    "heading": "Two-Factor Authentication"}) == "")
+
+    session.hub.page = "/src/4.html"
+    session.state["error"] = ""
+    session.waiting = {"field": "sign-in", "fields": ["account_name_text_field"],
+                       "heading": "", "url": "", "go": "/src/2.html",
+                       "page": "/src/4.html", "since": time.monotonic()}
+    check("a locked account is not carried on to the code",
+          await server.check_locked(session, locked_page) is True and
+          session.hub.page == "/src/5.html", session.hub.page)
+    check("...and the step that is not coming is not waited for",
+          session.waiting is None, session.waiting)
+    check("...and what the browser said is what the panel shows",
+          session.state["error"].startswith("This Apple Account has been locked"),
+          session.state["error"])
+
+    # And it holds: a person who goes back to the sign-in is taken to the page
+    # that says why, rather than to a form that cannot work.
+    session.hub.page = "/src/1.html"
+    await server.check_locked(session, locked_page)
+    check("...and a page that goes back to the form is sent to it again",
+          session.hub.page == "/src/5.html", session.hub.page)
+
+    # A flow with no such page says nothing, and nothing is taken away.
+    (flow_root / "flow.json").write_text(json.dumps({"steps": []}),
+                                         encoding="utf-8")
+    session.hub.page = "/src/4.html"
+    check("a flow that says nothing about it leaves the capture alone",
+          await server.check_locked(session, locked_page) is False and
+          session.hub.page == "/src/4.html", session.hub.page)
+
     # ---- editing the address ---------------------------------------------
     # The password step: the address can be edited there, and when it is,
     # the capture goes back to the address - the way iCloud does it. The

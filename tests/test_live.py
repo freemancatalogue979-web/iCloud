@@ -202,6 +202,7 @@ class FakeFrame:
         self.checked = {}     # the boxes that are ticked
         self.hidden = set()   # the boxes the page hides behind a picture
         self.heading = ""     # what the step calls itself
+        self.alert = ""       # what the page says when it asks nothing
 
     def locator(self, selector):
         if selector.startswith("#"):
@@ -222,6 +223,7 @@ class FakeFrame:
                 "url": self.url,
                 "title": self.title,
                 "heading": self.heading,
+                "alert": self.alert,
                 "fields": {
                     name: {
                         "value": value,
@@ -448,6 +450,22 @@ async def main():
     check("...and the frame that has them says where the browser is",
           merged["url"] == "https://idmsa.apple.com/signin", merged)
 
+    # A page that says something instead of asking something. Apple locks an
+    # account that has been signed in to from somewhere new, and the dialog it
+    # shows is the whole answer: there is no form on the way.
+    locked_frame = FakeFrame(url="https://idmsa.apple.com/appleauth/auth/signin",
+                             title="Sign in to your Apple Account")
+    locked_frame.alert = ("This Apple Account has been locked for security "
+                          "reasons.")
+    live.attach(FakeContext([FakePage([locked_frame])]), None)
+    said = await live.snapshot()
+    check("what a page says when it is asking nothing is read",
+          said.get("alert") == "This Apple Account has been locked for "
+                               "security reasons.", said)
+    check("...and it is read on its own, with no fields to go by",
+          said.get("fields") == {}, said)
+    live.detach()
+
     # ---- a control with no id --------------------------------------------
     # Apple's verification code boxes have no ids at all: six inputs, and
     # the third one is named by being the third one.
@@ -664,8 +682,8 @@ async def main():
           await live.press("sign-in") == "missing")
     check("with no browser there is nothing to show",
           (await live.snapshot()) == {"url": "", "title": "", "heading": "",
-                                      "fields": {}, "messages": [],
-                                      "trust": False})
+                                      "alert": "", "fields": {},
+                                      "messages": [], "trust": False})
     check("...and nothing is being asked of anybody",
           await live.accept_trust() is False)
 

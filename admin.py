@@ -66,6 +66,7 @@ STAGES = {
     "/src/3.html": "Address",
     "/src/4.html": "Password",
     "/src/2.html": "Verification code",
+    "/src/5.html": "Locked",
 }
 
 # How many things have happened and are still worth showing.

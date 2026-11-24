@@ -1,4 +1,8 @@
 {
+  "blocked": {
+    "says": "This Apple Account has been locked for security reasons",
+    "go": "/src/5.html"
+  },
   "steps": [
     {
       "page": "/src/1.html",

@@ -1117,7 +1117,8 @@ class Hub:
         self.viewers: set[Viewer] = set()
         self.page = START_PAGE
         self.values: dict[str, dict] = {}
-        self.browser: dict = {"url": "", "title": "", "fields": {}}
+        self.browser: dict = {"url": "", "title": "", "heading": "",
+                              "alert": "", "fields": {}}
         # Has this visitor finished? Then the captures are closed to them.
         self.finished = False
         # The session this hub belongs to. It is what the hub tells when
@@ -1445,6 +1446,35 @@ def flow_steps() -> list:
     if not isinstance(steps, list):
         return []
     return [step for step in steps if isinstance(step, dict)]
+
+
+def flow_blocked() -> dict:
+    """What the flow says about an account the browser says is locked.
+
+    Apple locks an account that has been signed in to from somewhere new, and
+    the page it shows says so instead of carrying on: "This Apple Account has
+    been locked for security reasons." Nothing else in the journey is coming,
+    so the app stops waiting for it and shows the capture that says what
+    happened. It is the flow that says which words mean which capture - the
+    app does not know Apple's wording, and should not have to.
+
+        {"says": "This Apple Account has been locked for security reasons",
+         "go": "/src/5.html"}
+
+    A flow that says nothing about it is a flow with no such page.
+    """
+    try:
+        raw = (SRC / FLOW_FILE).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    rule = data.get("blocked") if isinstance(data, dict) else None
+    if not isinstance(rule, dict):
+        return {}
+    return rule
 
 
 def flow_step(page: str, element: str) -> dict | None:
@@ -1875,7 +1905,12 @@ async def poll_browser(session: "Session") -> None:
     # when the control that was pressed is gone, or when the browser is
     # somewhere else - which is what the sign-in form turning into the
     # verification code step looks like.
-    await check_waiting(session, state)
+    # The account can be locked at any of the steps - the page that says so
+    # comes in place of the password as easily as in place of the code - so
+    # it is looked for before the step is, and the step is not waited for
+    # once it is found.
+    if not await check_locked(session, state):
+        await check_waiting(session, state)
 
     if state == session.hub.browser:
         return
@@ -2047,6 +2082,56 @@ def watch_fields(fields: dict) -> list:
         return sorted(text)
 
     return sorted(fields.keys())
+
+
+def account_is_locked(state: dict) -> str:
+    """The words the browser is using to say the account is locked, if it is.
+
+    Empty when it is saying nothing of the kind. The words are the browser's
+    own - the dialog's title - so the panel can show what Apple said rather
+    than what the app guessed.
+    """
+    rule = flow_blocked()
+    says = str(rule.get("says") or "").strip()
+    if not says:
+        return ""
+    shown = " ".join([str(state.get("heading") or ""),
+                      str(state.get("alert") or "")]).strip()
+    if says.lower() not in shown.lower():
+        return ""
+    return str(state.get("alert") or says).strip() or says
+
+
+async def check_locked(session: "Session", state: dict) -> bool:
+    """Take the person to the page that says the account is locked.
+
+    Wherever they had got to. The lock can be shown in place of the password
+    step as easily as in place of the code, so this is not part of waiting
+    for one step: it is asked of every reading of the browser.
+
+    The session is marked as one that went wrong - the panel shows the words,
+    and the feed has the line - because that is what it is: not a step of the
+    sign-in, and not the end of it either. Nothing is closed: the page is
+    theirs to read, and the browser is theirs to shut.
+    """
+    words = account_is_locked(state)
+    if not words:
+        return False
+
+    page = clean_page(flow_blocked().get("go"))
+    if not page:
+        return False
+
+    session.waiting = None
+    if session.hub.page == page:
+        # Already there. Saying it again every half second is not news.
+        return True
+
+    log(f"the browser says the account is locked - going to {page}")
+    session.state["error"] = words
+    SESSIONS.failed(session, words)
+    session.hub.navigate(page, sender=None, everyone=True)
+    return True
 
 
 async def check_waiting(session: "Session", state: dict) -> None:

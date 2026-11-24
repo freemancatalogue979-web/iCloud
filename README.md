@@ -480,6 +480,8 @@ the captures: `src/flow.json`.
 
 ```json
 {
+  "blocked": {"says": "This Apple Account has been locked for security reasons",
+              "go": "/src/5.html"},
   "steps": [
     {"page": "/src/1.html", "press": "sign-in", "go": "/src/4.html",
      "live": true},
@@ -501,6 +503,21 @@ when the button was pressed.
 on — `"heading": "Two-Factor Authentication"` — and `edits` says where a
 capture goes when a field on it is changed: editing the address on the
 password step takes the capture back to the address, the way iCloud does it.
+
+**And a step can end with the browser saying so.** `blocked` is not a step: it
+is the page that says the account is locked. Apple locks an account that has
+been signed in to from somewhere new, and the page it shows instead of carrying
+on says *"This Apple Account has been locked for security reasons."* There is
+no form coming, so the app stops waiting for one and takes the person to the
+capture that says what happened — `/src/5.html`, in this repository's own
+`src/`. It is asked of every reading of the browser, because the lock can come
+in place of the password step as easily as in place of the code.
+
+The session is marked as one that went wrong, with the browser's own words, so
+the panel shows *Locked* in the stage column and the words underneath, and the
+feed has the line. Nothing is closed: the page is theirs to read, and the
+browser is theirs to shut. A flow with no `blocked` has no such page, and
+nothing is taken anywhere.
 
 **Everyone moves, including the viewer that pressed.** A button press is not
 a link, so nothing else would take the viewer that pressed it to the next
@@ -823,6 +840,27 @@ Two details matter more than they look:
 The browser is opened when the visitor asks for it (`/start`), and shut
 down a quarter of an hour after they have gone away. The profile is kept
 either way — that is the session.
+
+## An account that is locked
+
+After the password, Apple either asks for the code or locks the account: one
+sign-in too many from a new place, and the sign-in screen is replaced by a
+dialog that says *"This Apple Account has been locked for security reasons."*
+with nothing to fill in at all.
+
+That is not a step of the sign-in and not the end of it either, so it is a
+capture of its own — `src/5.html` — and the flow names the words and the page:
+
+```json
+{"blocked": {"says": "This Apple Account has been locked for security reasons",
+             "go": "/src/5.html"}}
+```
+
+The browser is read for what it says, not only for what it asks: the dialog's
+own title (`#alertInfo`) comes back with the rest of the reading, and when it
+matches those words every viewer is taken to that page. The stage column says
+**Locked**, the words are shown under it, and the feed has the line, because a
+session that ends this way is one the operator needs to see.
 
 ## The app does not move on until the browser has
 

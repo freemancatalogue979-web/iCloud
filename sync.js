@@ -223,6 +223,9 @@
     "/src/3.html": "Address",
     "/src/4.html": "Password",
     "/src/2.html": "Verification code",
+    // Where a person ends up when the account is locked: not a step of the
+    // sign-in, and not the end of it either.
+    "/src/5.html": "Locked",
   };
 
   function readState() {

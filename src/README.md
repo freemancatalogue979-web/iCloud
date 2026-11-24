@@ -4,6 +4,11 @@ Put the HTML files you captured in this folder. Once the browser is open and
 Sign In has been clicked, the app opens `src/1.html` as its own document; every
 page here is reachable at `/src/<name>.html`.
 
+`5.html` is the page Apple shows when it locks an account instead of asking for
+the code. It is not on the way anywhere: the flow sends a person there when the
+browser says those words, and they stay there. Which words, and which page, is
+said in `flow.json` (`"blocked": {"says": …, "go": "/src/5.html"}`).
+
 What the server does with them: **three things, and all three are so that the
 page can be used.**
 
