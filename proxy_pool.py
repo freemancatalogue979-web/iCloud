@@ -383,18 +383,34 @@ class Pool:
             server += f":{port}"
         return {"server": server, "username": user, "password": self.password}
 
+    def playwright_proxy(self, group_id: str, country: str = "") -> dict | None:
+        """The proxy as Playwright wants it, for a check made with a browser.
+
+        ``None`` when there is no proxy to be had.
+        """
+        settings = self.settings(group_id, country=country, force=True)
+        if not settings:
+            return None
+        return {"server": settings["server"],
+                "username": settings.get("username", ""),
+                "password": settings.get("password", "")}
+
     def check(self, group_id: str, country: str = "",
               force: bool = False) -> dict:
         """Ask the provider what address this group is leaving from.
 
-        This is a quick check made from the machine, before the browser is
-        involved. The browser's own check is the one that counts; this one
-        is here to say whether the address is there at all before a
-        session is started on it.
+        This is a quick check made from the machine with curl, and it is
+        here for a machine that has curl and wants an answer in a second.
+        A machine that has not is answered by the browser instead - see
+        ``check_in_browser`` - which is what the panel uses.
         """
         settings = self.settings(group_id, country=country, force=force)
-        if not settings or not shutil.which("curl"):
-            return {"ok": False, "ip": "", "country": "", "said": "no way to ask"}
+        if not settings:
+            return {"ok": False, "ip": "", "country": "", "said": "no proxy"}
+        if not shutil.which("curl"):
+            return {"ok": False, "ip": "", "country": "", "said": "",
+                    "reason": "curl is not installed on this machine",
+                    "no_curl": True}
 
         server = settings["server"]
         host = server.split("://", 1)[-1]
@@ -502,6 +518,47 @@ def origin_ip() -> str:
         return ""
     _own_address = parse_exit(body).get("ip", "")
     return _own_address
+
+
+async def check_in_browser(proxy: dict, url: str = "") -> dict:
+    """Ask the proxy who it is, from a browser.
+
+    The browser is the thing that will use the proxy, and it is the only
+    thing on the machine that can speak to a SOCKS5 entrance without
+    anything else being installed: curl may not be there, and Python's
+    own libraries cannot speak SOCKS5 at all. So the check is made with a
+    browser - the same kind of browser that will do the sign-in - and it
+    says what the address is and where it is.
+    """
+    if proxy is None:
+        return {"ok": False, "ip": "", "country": "", "said": "no proxy"}
+
+    from playwright.async_api import async_playwright  # noqa: PLC0415
+
+    said = {"ok": False, "ip": "", "country": "", "said": ""}
+    playwright = await async_playwright().start()
+    browser = None
+    try:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox"],
+            **({"proxy": proxy} if proxy.get("server") else {}),
+        )
+        page = await browser.new_page()
+        await page.goto(url or EXIT_CHECK_URL, wait_until="domcontentloaded",
+                        timeout=45000)
+        body = await page.inner_text("body")
+        said.update(parse_exit(body or ""))
+    except Exception as exc:
+        said["said"] = str(exc).splitlines()[0]
+    finally:
+        if browser is not None:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        await playwright.stop()
+    return said
 
 
 def missing(pool) -> list:

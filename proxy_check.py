@@ -14,6 +14,7 @@ that has moved is worth knowing about before a sign-in starts rather
 than in the middle of one.
 """
 
+import asyncio
 import os
 import sys
 from pathlib import Path
@@ -46,17 +47,28 @@ def main(argv):
         print("The dashboard's Authentication section has both.")
         return 1
 
-    settings = pool.settings(group, country=country)
+    settings = pool.settings(group, country=country, force=True)
     print(f"country     {country}")
     print(f"group       {group}")
     print(f"server      {settings['server']}")
     print(f"username    {settings['username']}")
     print(f"password    {'*' * len(settings['password'])}")
 
-    said = pool.check(group, country=country)
+    said = asyncio.run(proxy_pool.check_in_browser(
+        pool.playwright_proxy(group, country=country)))
+    if not said.get("ok"):
+        # The browser could not do it. If curl is there, it may say more.
+        quick = pool.check(group, country=country, force=True)
+        if quick.get("ok"):
+            said = quick
+        elif quick.get("reason") and not said.get("said"):
+            said["said"] = quick["reason"]
+        elif quick.get("said") and not said.get("said"):
+            said["said"] = quick["said"]
+
     print("")
     if not said.get("ok"):
-        print(f"it did not answer: {said.get('said')}")
+        print(f"it did not answer: {said.get('said') or said.get('reason')}")
         print("")
         print("The usual reasons:")
         print("  - the user name or the password is wrong")

@@ -1229,9 +1229,34 @@ def build_router() -> APIRouter:
 
         country = str(trial.country or "US").upper()
         group = f"{country.lower()}-0"
-        said = trial.check(group, country=country, force=True)
+        proxy = trial.playwright_proxy(group, country=country)
+
+        # The check is made with a browser, because a browser is what will
+        # use the proxy - and because a browser is the only thing on the
+        # machine that can speak to a SOCKS5 entrance on its own. curl may
+        # not be installed, and Python's own libraries cannot speak SOCKS5
+        # at all.
+        said = await proxy_pool.check_in_browser(proxy)
+
+        if not said.get("ok") and not said.get("ip"):
+            # The browser could not do it. If curl is there, it may say
+            # more about why.
+            quick = trial.check(group, country=country, force=True)
+            if quick.get("ok"):
+                said = quick
+            elif quick.get("reason") and not said.get("said"):
+                said["said"] = quick["reason"]
+            elif quick.get("said") and not said.get("said"):
+                said["said"] = quick["said"]
+
         if said.get("ok"):
             note(f"the proxy answered: {said.get('ip')}")
+            if said.get("country") and said["country"] != country:
+                said["ok"] = False
+                said["reason"] = (f"it left from {said['country']}, not "
+                                  f"{country}")
+        elif not said.get("reason"):
+            said["reason"] = said.get("said") or "it did not answer"
         return said
 
     # -- the standalone copy ------------------------------------------------

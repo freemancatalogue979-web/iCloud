@@ -22,6 +22,7 @@ import asyncio
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import zipfile
@@ -251,6 +252,57 @@ async def main():
     check("...and nothing was changed by it",
           admin.STORE.proxy().get("enabled") is False, admin.STORE.proxy())
     proxy_pool.POOL.enabled = True
+
+    # ---- and a test does not need curl -------------------------------------
+    # The check is made with a browser, because a browser is the only thing
+    # on the machine that can speak to a SOCKS5 entrance on its own. A
+    # machine with no curl must still get an answer.
+    real_which = shutil.which
+    shutil.which = lambda name: None if name == "curl" else real_which(name)
+    try:
+        answer = await endpoint("/admin/api/proxy/test", "POST")(
+            make_request("POST", "/admin/api/proxy/test", {
+                "kind": "decodo", "server": "gate.decodo.com:7000",
+                "username": "alice", "password": "the-secret-password",
+            }, cookies=cookie))
+        said = as_json(answer)
+        check("a machine with no curl is still answered",
+              "ok" in said, said)
+        check("...and it is not told there is no way to ask",
+              "no way to ask" not in (said.get("said") or "")
+              and "no way to ask" not in (said.get("reason") or ""),
+              said)
+    finally:
+        shutil.which = real_which
+
+    # ---- and the check really does go out with a browser -------------------
+    # A small server of our own answers the way an address-echo service
+    # does, so that the check itself is proved - and proved without a proxy
+    # and without a network.
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = b'{"ip": "203.0.113.9", "country_code": "US"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    said = await proxy_pool.check_in_browser({}, f"http://127.0.0.1:{port}/json")
+    check("the check goes out with a browser and reads the answer",
+          said.get("ok") and said.get("ip") == "203.0.113.9", said)
+    check("...and the country with it", said.get("country") == "US", said)
 
     # ---- the standalone copy ----------------------------------------------
     answer = await endpoint("/admin/api/standalone")(make_request(cookies=cookie))
