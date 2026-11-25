@@ -1,6 +1,7 @@
 """What a browser will and will not do with a proxy.
 
-This is the test that pins the reason the app speaks HTTP and not SOCKS5.
+This is the test that pins the reason the app speaks HTTP and not SOCKS5,
+and that the browser that does the sign-in is the browser that is asked.
 
 Chromium cannot use a SOCKS5 proxy with a password. Playwright says so
 before the browser is even opened - "Browser does not support socks5 proxy
@@ -16,14 +17,17 @@ resolve names locally when it has an HTTP proxy. It sends the *name*:
 and the proxy resolves it. This machine's resolver is not asked, so the
 DNS leak that made SOCKS5 look necessary is not there with HTTP either.
 
-Both of those are proved here with a real browser, against a small proxy of
-our own that records what it is sent. If Chromium ever stops sending the
-name, or ever starts accepting a SOCKS5 password, this test will say so.
+And the proxy has to be accepted by **the browser that will do the
+sign-in**, which is the system's own Chrome where there is one. So the
+browsers are asked in turn, each with a proxy that asks for a name and a
+password and only goes on to the request when the credentials are right -
+and each one has to answer.
 
 If there is no browser to be had, the suite says so and is skipped.
 """
 
 import asyncio
+import base64
 import os
 import sys
 import threading
@@ -32,8 +36,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import browsers  # noqa: E402
+
 passed = 0
 failed = 0
+
+USER = "alice"
+PASSWORD = "the-secret-password"
 
 
 def check(name, cond, detail=""):
@@ -81,24 +90,55 @@ def browser_path():
 
 
 class Recorder(BaseHTTPRequestHandler):
-    """A proxy that only writes down what it was sent."""
+    """A proxy that wants a name and a password, like a real one.
 
+    It answers 407 with a challenge, and only goes on to the request when
+    the credentials that come back are the right ones. Whatever it is sent
+    is written down, so the suite can say what the browser did.
+    """
+
+    protocol_version = "HTTP/1.1"
     seen = []
 
     def log_message(self, *args):
         return
 
-    def do_CONNECT(self):
-        Recorder.seen.append(("CONNECT", self.path))
-        self.send_response(502)
+    def _authorized(self):
+        head = self.headers.get("Proxy-Authorization", "")
+        if not head.startswith("Basic "):
+            return False
+        try:
+            raw = base64.b64decode(head[6:]).decode()
+        except Exception:
+            return False
+        return raw == f"{USER}:{PASSWORD}"
+
+    def _challenge(self):
+        Recorder.seen.append((self.command, self.path, "407",
+                              self.headers.get("Proxy-Authorization", "")))
+        body = b"the proxy wants a name"
+        self.send_response(407)
+        self.send_header("Proxy-Authenticate", 'Basic realm="decodo"')
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        self.wfile.write(body)
+
+    def _answer(self):
+        Recorder.seen.append((self.command, self.path, "200",
+                              self.headers.get("Proxy-Authorization", "")))
+        body = b'{"ip":"203.0.113.9","country":"US"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
-        Recorder.seen.append(("GET", self.path))
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.end_headers()
-        self.wfile.write(b"<html>ok</html>")
+        if not self._authorized():
+            return self._challenge()
+        return self._answer()
+
+    do_CONNECT = do_GET
 
 
 async def run():
@@ -108,6 +148,9 @@ async def run():
     port = httpd.server_address[1]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
+    proxy = {"server": f"http://127.0.0.1:{port}",
+             "username": USER, "password": PASSWORD}
+
     async with async_playwright() as pw:
         # ---- a SOCKS5 proxy with a password is refused ---------------
         refused = ""
@@ -116,7 +159,7 @@ async def run():
                 headless=True,
                 args=["--no-sandbox"],
                 proxy={"server": "socks5://gate.decodo.com:7000",
-                       "username": "alice", "password": "the-secret"},
+                       "username": USER, "password": PASSWORD},
             )
             await browser.close()
         except Exception as exc:
@@ -125,27 +168,68 @@ async def run():
               "socks5" in refused.lower() and "authentication" in refused.lower(),
               refused)
 
-        # ---- and the same proxy over HTTP is accepted ---------------
-        Recorder.seen.clear()
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox"],
-            proxy={"server": f"http://127.0.0.1:{port}",
-                   "username": "alice", "password": "the-secret"},
-        )
-        page = await browser.new_page()
-        try:
-            await page.goto("https://icloud.example.com/signin", timeout=15000)
-        except Exception:
-            pass
-        await browser.close()
+        # ---- and each browser that will do the sign-in is asked ------
+        for label, extra in browsers.candidates():
+            if extra.get("channel") == "msedge":
+                continue        # Edge is not on most machines
+            path = extra.get("executable_path")
+            if path and not Path(path).exists():
+                continue
+            Recorder.seen.clear()
+            try:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox"],
+                    proxy=proxy,
+                    **extra,
+                )
+            except Exception as exc:
+                check(f"{label} takes the proxy", False,
+                      str(exc).splitlines()[0][:70])
+                continue
+            page = await browser.new_page()
+            body = ""
+            try:
+                await page.goto("http://ip.decodo.com/json", timeout=20000)
+                body = await page.inner_text("body")
+            except Exception:
+                pass
+            await browser.close()
 
-        check("an HTTP proxy with a password is accepted",
-              True, "")
-        check("...and the name is sent, not the address",
-              any(kind == "CONNECT" and target.startswith("icloud.example.com")
-                  for kind, target in Recorder.seen),
-              Recorder.seen)
+            answered = any(code == "200" for _, _, code, _ in Recorder.seen)
+            challenged = any(code == "407" for _, _, code, _ in Recorder.seen)
+            check(f"{label} takes the proxy and answers the challenge",
+                  answered and challenged and "203.0.113.9" in body,
+                  f"answered={answered} challenged={challenged} body={body[:40]!r}")
+
+            # ---- and the name is sent, not the address ----------------
+            Recorder.seen.clear()
+            try:
+                browser = await pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox"],
+                    proxy={"server": f"http://127.0.0.1:{port}"},
+                    **extra,
+                )
+                page = await browser.new_page()
+                try:
+                    await page.goto("https://icloud.example.com/signin",
+                                    timeout=20000)
+                except Exception:
+                    pass
+                await browser.close()
+            except Exception as exc:
+                check(f"{label} sends the name, not the address", False,
+                      str(exc).splitlines()[0][:70])
+                continue
+
+            # The CONNECT line carries the name or the address. The
+            # address would mean this machine resolved it, and the
+            # resolver's answers are the machine's own business.
+            check(f"{label} sends the name, not the address",
+                  any(method == "CONNECT" and target.startswith("icloud.example.com")
+                      for method, target, _, _ in Recorder.seen),
+                  Recorder.seen)
 
 
 def main():

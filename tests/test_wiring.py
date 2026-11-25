@@ -28,6 +28,7 @@ os.environ["ICLOUD_PROXY_PASSWORD"] = "secret"
 os.environ["ICLOUD_PROXY_MAX_PER_GROUP"] = "2"
 
 import server  # noqa: E402
+import browsers  # noqa: E402
 import identity as identity_module  # noqa: E402
 import proxy_pool  # noqa: E402
 
@@ -108,6 +109,70 @@ async def main():
     check("...the country", said.get("country") == session.identity.country)
     check("...the screen", said.get("screen") ==
           f"{device.screen['width']}x{device.screen['height']}", said)
+
+    # -- the browsers are the ones the machine has --------------------
+    said = browsers.candidates()
+    check("the system browser is tried first",
+          said[0][0] in ("system chrome", "system chromium"), said[0][0])
+    check("...and the bundled one is there to fall back on",
+          any(label == "bundled chromium" for label, _ in said), said)
+    for label, extra in said:
+        path = extra.get("executable_path")
+        if path:
+            check(f"{label} is a browser that is on the machine",
+                  Path(path).exists(), path)
+    check("the app and the proxy check use one list",
+          server.BROWSERS == said, server.BROWSERS)
+
+    # -- a browser that left from the wrong place is not handed over ---
+    # The sign-in is the whole point of the address, so a browser that
+    # ignored the proxy is a browser that must not be given to the user.
+    class FakeContext:
+        closed = False
+
+        async def close(self):
+            FakeContext.closed = True
+
+    class FakePage:
+        async def evaluate(self, what):
+            return "Mozilla/5.0"
+
+        async def goto(self, *a, **k):
+            raise AssertionError("it must not go anywhere")
+
+    class FakeSessions:
+        @staticmethod
+        def changed(*a, **k):
+            return None
+
+        @staticmethod
+        def failed(*a, **k):
+            return None
+
+    session.ctx = FakeContext()
+    session.page = FakePage()
+    old_sessions = server.SESSIONS
+    server.SESSIONS = FakeSessions
+    old_verify = server.verify_exit
+
+    async def wrong_exit(_session):
+        return {"ok": False, "wrong": True, "ip": "198.51.100.7",
+                "country": "US", "said": "the browser left from the machine itself"}
+
+    server.verify_exit = wrong_exit
+    try:
+        state = await server.start_browser(session)
+    finally:
+        server.verify_exit = old_verify
+        server.SESSIONS = old_sessions
+
+    check("a browser that left from the machine itself is not handed over",
+          state.get("status") == "error", state)
+    check("...and the session holds no browser any more",
+          session.ctx is None and not session.state.get("browser_open"),
+          session.ctx)
+    check("...and the reason is said",
+          "machine itself" in str(state.get("error")), state)
 
     # -- a visitor with no device yet is not given one by looking -----
     plain = server.Session("visitor-two")
