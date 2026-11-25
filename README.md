@@ -406,6 +406,11 @@ the server, and takes the visitor to the server's own copy of the capture —
 which is the same page. The server's log says what happened, and the panel
 shows it on the session's row.
 
+And the panel can ask: **Check the copy** in the Standalone tab asks the
+host for one of its captures and reads the answer. A host that answers
+every path with the launcher is caught there and then, in one click,
+instead of by the shape of a page that reloads.
+
 Three things are different in the copy, and all three are because the pages
 are somewhere else: the engine is found beside the pages rather than at
 `/sync.js`, the pages are told where the server is, and the pages are

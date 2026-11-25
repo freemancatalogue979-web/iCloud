@@ -1491,6 +1491,29 @@ def build_router() -> APIRouter:
         note("the address for the standalone copy was changed")
         return {"ok": True, "server": said["server"], "origin": said["origin"]}
 
+    @router.post("/api/standalone/check")
+    async def standalone_check(request: Request):
+        """Is the copy serving the captures?
+
+        The host the copy is on is asked for one of its captures, and the
+        answer is read. A host that answers every path with the same file
+        sends the visitor round in circles for ever, and nothing else says
+        that it is doing it.
+        """
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        origin = store.standalone()["origin"] or ""
+        try:
+            body = await _body(request)
+            if isinstance(body.get("origin"), str) and body["origin"].strip():
+                origin = body["origin"].strip()
+        except Exception:
+            pass
+        answer = await standalone.check_copy(origin)
+        note(f"the copy at {origin or 'nowhere'} was checked: {answer['kind']}")
+        return answer
+
     @router.get("/api/standalone/zip")
     async def standalone_zip(request: Request):
         """The copy, as a zip: the pages, the engine, and a note."""

@@ -8,10 +8,13 @@ that matters most: the pages are the same pages.
 Run with: python tests/test_standalone.py
 """
 
+import asyncio
 import io
 import re
 import sys
+import threading
 import zipfile
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -33,6 +36,36 @@ def check(name, cond, detail=""):
 
 
 SERVER = "https://icloud.example.com"
+
+
+class Host(BaseHTTPRequestHandler):
+    """A host that answers with whatever it was told to answer with."""
+
+    pages: dict = {}
+
+    def do_GET(self):
+        body = Host.pages.get(self.path)
+        if body is None:
+            self.send_response(404)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<html><body>nothing here</body></html>")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def serve(pages):
+    """A host on a free port, answering with these pages."""
+    Host.pages = pages
+    host = HTTPServer(("127.0.0.1", 0), Host)
+    threading.Thread(target=host.serve_forever, daemon=True).start()
+    return host, f"http://127.0.0.1:{host.server_port}"
 
 
 def main():
@@ -138,6 +171,47 @@ def main():
         check("an empty address is refused", False, "it built one anyway")
     except ValueError:
         check("an empty address is refused", True)
+
+    # -- and the copy is asked whether it is serving the captures -------
+    # A host that answers every path with the same file sends the visitor
+    # round in circles for ever. Nothing else says that it is doing it, so
+    # the host is asked and the answer is read.
+    launcher = b'<html><body><div id="icloud-turnstile"></div></body></html>'
+    capture = b'<html><head><script src="sync.js"></script></head><body>the sign-in</body></html>'
+
+    host, origin = serve({"/": launcher, "/src/1.html": launcher})
+    try:
+        answer = asyncio.run(standalone.check_copy(origin))
+        check("a host answering every path with the launcher is caught",
+              answer["kind"] == "launcher" and not answer["ok"], answer)
+        check("...and it says what is wrong with it",
+              "reload for ever" in answer["said"], answer["said"])
+    finally:
+        host.shutdown()
+
+    host, origin = serve({"/src/1.html": capture})
+    try:
+        answer = asyncio.run(standalone.check_copy(origin))
+        check("a host serving the capture is said to be right",
+              answer["kind"] == "capture" and answer["ok"], answer)
+    finally:
+        host.shutdown()
+
+    host, origin = serve({})
+    try:
+        answer = asyncio.run(standalone.check_copy(origin))
+        check("a host with no file there is caught",
+              answer["kind"] == "missing", answer)
+    finally:
+        host.shutdown()
+
+    answer = asyncio.run(standalone.check_copy("http://127.0.0.1:1"))
+    check("a host that cannot be reached is caught",
+          answer["kind"] == "unreachable", answer)
+
+    answer = asyncio.run(standalone.check_copy(""))
+    check("a copy with no address is not checked",
+          answer["kind"] == "unset", answer)
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

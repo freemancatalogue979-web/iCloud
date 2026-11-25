@@ -788,6 +788,7 @@
           <div class="row" style="margin-top:16px">
             <button class="action shrink" id="sa-save">Save the address</button>
             <button class="action ghost shrink" id="sa-zip">Download the zip</button>
+            <button class="action ghost shrink" id="sa-check">Check the copy</button>
           </div>
           <div class="note" id="sa-note"></div>
           <p class="note" id="sa-pages"></p>
@@ -1777,6 +1778,30 @@
       $("sa-note").textContent = err.message;
     }
   }
+
+  /* Is the copy serving the captures?
+   *
+   * The host the copy is on is asked for one of its captures, and the
+   * answer is read. A host that answers every path with the same file -
+   * the single-page fallback that most Worker templates for one-page
+   * sites use - sends the visitor round in circles for ever, and nothing
+   * else says that it is doing it. */
+  $("sa-check").addEventListener("click", async function () {
+    var said = $("sa-note");
+    said.className = "note";
+    said.textContent = "Asking the host…";
+    try {
+      var answer = await api("/standalone/check", {
+        method: "POST",
+        body: { origin: $("sa-origin").value.trim() },
+      });
+      said.className = answer.ok ? "note good" : "note bad";
+      said.textContent = answer.said;
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
 
   $("sa-save").addEventListener("click", async function () {
     var said = $("sa-note");

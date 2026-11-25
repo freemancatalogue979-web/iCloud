@@ -397,6 +397,16 @@ async def main():
           'not_found_handling = "single-page-application"' not in worker
           or "must not" in worker, worker)
 
+    # -- and the copy can be asked what it is serving --------------------
+    # The host the copy is on is asked for one of its captures, and the
+    # answer is read. Nothing else says whether a host is answering every
+    # path with the launcher - and that is what sends the visitor round in
+    # circles.
+    check("the copy can be asked what it is serving",
+          "sa-check" in page and "/standalone/check" in page, "")
+    check("...and the server does the asking",
+          "standalone.check_copy(origin)" in panel, "")
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

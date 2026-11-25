@@ -22,6 +22,8 @@ what the visitor sees is what they would have seen.
 
 import io
 import re
+import urllib.error
+import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -200,6 +202,76 @@ def remember_refused(origin: str) -> bool:
 def refused_origins() -> list:
     """The addresses of the copies that have been refused, newest last."""
     return list(REFUSED_ORIGINS)
+
+
+# How long the copy is given to answer, and how much of its answer is read.
+# The launcher and the engine's own tag are both near the top of a page, so
+# a little of it is enough - and a capture is a megabyte of a page.
+CHECK_TIMEOUT = 12
+CHECK_BYTES = 262144
+
+
+async def check_copy(origin: str, page: str = "/src/1.html") -> dict:
+    """Is the copy serving the captures?
+
+    The host the copy is on is asked for one of its captures, and the
+    answer is read. There are three answers that matter, and nothing else
+    says which of them it is:
+
+    * the capture - the copy is right;
+    * the launcher - the host answers every path with the same file, and
+      the visitor's page reloads for ever;
+    * nothing at all - the files were never uploaded.
+
+    So the host is asked, and the answer is read.
+    """
+    said = (origin or "").strip().rstrip("/")
+    if not said:
+        return {"ok": False, "kind": "unset",
+                "said": "the copy has no address yet - put it in "
+                        "\"Where the copy will live\" first"}
+    if not re.match(r"^https?://", said, re.IGNORECASE):
+        said = "https://" + said
+    url = said + page
+
+    request = urllib.request.Request(url, method="GET")
+
+    def ask():
+        with urllib.request.urlopen(request, timeout=CHECK_TIMEOUT) as answer:
+            return answer.status, answer.read(CHECK_BYTES).decode("utf-8",
+                                                                  "replace")
+
+    try:
+        import asyncio  # noqa: PLC0415
+
+        status, body = await asyncio.to_thread(ask)
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        body = ""
+    except Exception as exc:
+        return {"ok": False, "kind": "unreachable", "url": url,
+                "said": f"the copy could not be reached: {exc}"}
+
+    if status == 404:
+        return {"ok": False, "kind": "missing", "status": status, "url": url,
+                "said": f"the host answered 404 - there is no file at {page}. "
+                        f"The zip's files have to be uploaded so that {page} "
+                        f"is one of them."}
+
+    # The launcher is the page that asks the server for the question and
+    # draws the mark; the capture is the page with the engine in it.
+    if "icloud-turnstile" in body:
+        return {"ok": False, "kind": "launcher", "status": status, "url": url,
+                "said": "the host is serving the launcher where the capture "
+                        "should be - it answers every path with the same "
+                        "file, and the visitor's page will reload for ever"}
+    if "sync.js" in body:
+        return {"ok": True, "kind": "capture", "status": status, "url": url,
+                "said": "the host is serving the capture. The copy is right."}
+
+    return {"ok": False, "kind": "other", "status": status, "url": url,
+            "said": f"the host answered {status} with something that is "
+                    f"neither the launcher nor a capture"}
 
 
 def with_server(page_html: str, server: str) -> str:
