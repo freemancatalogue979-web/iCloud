@@ -22,6 +22,7 @@ say "I am a person" would be worth nothing.
 
 import json
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +36,26 @@ TIMEOUT = 15
 
 # The name of the question, so that a token made for something else is not
 # taken for this. Cloudflare gives the name back with the answer.
+#
+# It is set on the widget, in the page, and it comes back with the answer
+# when the answer is checked. It is not a thing that is sent to Cloudflare
+# when the answer is checked: the answer carries it.
 ACTION = "start"
+
+# The longest answer that can be an answer. Cloudflare's own are a few
+# hundred characters long; anything longer is not one, and is not worth
+# sending to Cloudflare to find out.
+MAX_TOKEN = 2048
+
+# The widget this app asks. The site's key is public - it is in every copy
+# of the page a visitor sees - so it can be written down here. The secret
+# is the other half of it, and it is never written down anywhere: it goes
+# in the panel, or in the environment.
+#
+# This is what the panel offers the operator to start from. It is not
+# used as a key on its own: a machine with a site's key and no secret is
+# a misreading, and a misreading must not open a door by accident.
+DEFAULT_SITE_KEY = "0x4AAAAAAGScd9OlAOg39QC3"
 
 # The header the answer travels in. A header rather than the address,
 # because an address is written down in logs and a token is no secret once
@@ -129,28 +149,120 @@ def settings(store=None) -> dict:
     }
 
 
+def host_of(address: str) -> str:
+    """The host of an address, and nothing else.
+
+    No scheme, no port, no path, and all in lower case - because that is
+    the shape Cloudflare gives a host back in, and a host is compared to
+    be the same host.
+    """
+    said = (address or "").strip()
+    found = re.match(r"^[a-z][a-z0-9+.-]*://([^/?#]+)", said, re.IGNORECASE)
+    if found:
+        said = found.group(1)
+    if "@" in said:
+        said = said.split("@")[-1]
+    if said.startswith("["):
+        said = said[1:].split("]")[0]        # an address in brackets
+    else:
+        said = said.split(":")[0]
+    return said.strip().lower()
+
+
+def expected_hosts(store=None, request_host: str = "") -> set:
+    """The hosts an answer may come from.
+
+    An answer is given on a host, and Cloudflare says which one. So the
+    server has to say which hosts it will take an answer from: the
+    address this server is reached at, the address the copy of the pages
+    lives at, and anything said outright in ``ICLOUD_TURNSTILE_HOSTNAMES``.
+    And the host the visitor used to get here - an answer is given on a
+    host, and the host it was given on is the one it is checked against.
+
+    The copy of the pages has to be told where it lives for the browser to
+    let it ask this server anything at all, so its address is here too.
+    An answer from a copy that has not been registered is an answer this
+    server will not take.
+    """
+    said = set()
+
+    for one in os.environ.get("ICLOUD_TURNSTILE_HOSTNAMES", "").split(","):
+        host = host_of(one)
+        if host:
+            said.add(host)
+
+    if store is not None:
+        try:
+            stored = store.standalone()
+        except Exception:
+            stored = {}
+        for one in (stored.get("server", ""), stored.get("origin", "")):
+            host = host_of(one)
+            if host:
+                said.add(host)
+
+    for one in os.environ.get("ICLOUD_STANDALONE_ORIGINS", "").split(","):
+        host = host_of(one)
+        if host:
+            said.add(host)
+
+    host = host_of(request_host)
+    if host:
+        said.add(host)
+
+    return said
+
+
 async def verify(token: str, given_secret: str = "", ip: str = "",
-                 action: str = ACTION) -> dict:
+                 action: str = ACTION, hostnames=None) -> dict:
     """Ask Cloudflare whether the token is good.
 
     Returns a dictionary with ``ok`` - whether the person may through - and
     ``said``, which is what to tell them if not.
+
+    Three things are asked of the answer, and all three have to be right:
+
+    * that Cloudflare says the answer is good;
+    * that the answer was given to *this* question - the action is set on
+      the widget and comes back with the answer, so an answer made for
+      something else is not taken for this one; and
+    * that the answer was given on a host this server knows about. The
+      host comes back with the answer too, and the hosts it may come from
+      are the deployment's own - the address the server is reached at and
+      the address the copy of the pages lives at.
+
+    A token is single use. Cloudflare says so the second time one is
+    offered, and so does this: an answer that is replayed is not an
+    answer.
+
+    ``hostnames`` may be left out when there is nothing to say about it;
+    then the host is not checked. The server always says what the hosts
+    are, so it is always checked there.
     """
-    said = {"ok": False, "said": "", "hostname": "", "action": ""}
+    said = {"ok": False, "said": "", "hostname": "", "action": "",
+             "codes": [], "reason": ""}
 
     token = (token or "").strip()
     if not token:
         said["said"] = "no answer was given"
+        said["reason"] = "no-answer"
+        return said
+    if len(token) > MAX_TOKEN:
+        said["said"] = "the answer was too long to be an answer"
+        said["reason"] = "too-long"
         return said
     if not given_secret:
         said["said"] = ("the secret is not set, so the answer cannot be "
                         "checked")
+        said["reason"] = "no-secret"
         return said
 
+    # What Cloudflare is asked: the secret, the answer, and where the
+    # answer came from. The question's name is not sent - it is on the
+    # widget, and it comes back with the answer.
     body = urllib.parse.urlencode({
         "secret": given_secret,
         "response": token,
-        "action": action,
         **({"remoteip": ip} if ip else {}),
     }).encode("utf-8")
 
@@ -168,27 +280,49 @@ async def verify(token: str, given_secret: str = "", ip: str = "",
         raw = await asyncio.to_thread(ask)
     except urllib.error.HTTPError as exc:
         said["said"] = f"cloudflare said {exc.code}"
+        said["reason"] = "unreachable"
         return said
     except Exception as exc:
         said["said"] = f"cloudflare could not be reached: {exc}"
+        said["reason"] = "unreachable"
         return said
 
     try:
         answer = json.loads(raw)
     except Exception:
         said["said"] = "cloudflare's answer was not understood"
+        said["reason"] = "unreadable"
         return said
 
     said["hostname"] = str(answer.get("hostname") or "")
     said["action"] = str(answer.get("action") or "")
+    codes = answer.get("error-codes") or []
+    said["codes"] = [str(one) for one in codes]
 
-    if answer.get("success"):
-        said["ok"] = True
-        said["said"] = "the answer is good"
+    if not answer.get("success"):
+        said["said"] = "the answer was not good"
+        if codes:
+            said["said"] += " (" + ", ".join(str(one) for one in codes) + ")"
+        said["reason"] = "not-good"
         return said
 
-    codes = answer.get("error-codes") or []
-    said["said"] = "the answer was not good"
-    if codes:
-        said["said"] += " (" + ", ".join(str(one) for one in codes) + ")"
+    # The answer must have been given to this question.
+    if action and said["action"] != action:
+        said["said"] = (f"the answer was given to another question "
+                        f"({said['action'] or 'none'}), not to this one")
+        said["reason"] = "action"
+        return said
+
+    # And it must have been given on a host this server knows about.
+    if hostnames:
+        host = said["hostname"].lower()
+        if host not in hostnames:
+            said["said"] = (f"the answer came from "
+                            f"{said['hostname'] or 'a host with no name'}, "
+                            f"which this server does not know")
+            said["reason"] = "hostname"
+            return said
+
+    said["ok"] = True
+    said["said"] = "the answer is good"
     return said

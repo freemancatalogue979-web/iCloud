@@ -676,6 +676,26 @@ def origin_allowed(origin: str) -> bool:
     return any(origin.lower() == one.lower() for one in allowed_origins())
 
 
+def expected_hostnames(request) -> set:
+    """The hosts an answer may come from.
+
+    An answer is given on a host, and Cloudflare says which one. So the
+    server has to say which hosts it will take an answer from - the
+    address this server is reached at, the address the copy of the pages
+    lives at, and the host the visitor used to get here.
+
+    The copy of the pages has to be told where it lives for the browser to
+    let it ask this server anything at all, so its address is in there
+    too. An answer from a copy that has not been registered is an answer
+    this server will not take, and the door says so when it refuses one.
+    """
+    try:
+        host = request.headers.get("host", "")
+    except Exception:
+        host = ""
+    return turnstile.expected_hosts(admin.STORE, request_host=host)
+
+
 @app.middleware("http")
 async def allow_the_copy(request: Request, call_next):
     """Let the copy's pages ask the server - and only them."""
@@ -840,9 +860,16 @@ async def check_person(request: Request) -> dict:
                         "allowed by the widget"}
 
     said = await turnstile.verify(token, given_secret=given,
-                                  ip=geo.client_ip(request))
+                                  ip=geo.client_ip(request),
+                                  hostnames=expected_hostnames(request))
     if said.get("ok"):
         log("the question was answered properly")
+    elif said.get("reason") == "hostname":
+        # The most common way for an answer to be refused: the copy of the
+        # pages is somewhere the server has not been told about, so the
+        # answer came from a host it does not know.
+        said["said"] += (" - if this is the copy of the pages, it has to be "
+                         "told where it lives, in the Standalone tab")
     return said
 
 

@@ -298,6 +298,22 @@ browser is opened, the session is marked failed, and the panel says why.
 A check that can be walked around is not a check, and the failure mode of
 a check that fails open is a stranger with twenty browsers.
 
+**Three things have to be right about an answer**, and the server asks
+Cloudflare about all three:
+
+- Cloudflare has to say the answer is good;
+- the answer has to have been given to *this* question — the widget is
+  given the name `start`, and Cloudflare gives the name back with the
+  answer, so an answer made for something else is not taken for this one;
+- and the answer has to have been given on a host this deployment is
+  reached at — Cloudflare gives that back too. The hosts are worked out
+  from the panel: the address this server is reached at, and the address
+  the copy of the pages lives at. `ICLOUD_TURNSTILE_HOSTNAMES` says them
+  outright if you would rather.
+
+An answer is good exactly once. Cloudflare says so the second time one is
+offered, and so does this: an answer that is replayed is not an answer.
+
 The widget is **non-interactive**: nothing is shown to the visitor, and
 Cloudflare answers on its own. The answer travels in a header, not in the
 address — an address is written down in logs, and there is no need for
@@ -309,6 +325,11 @@ the live control and the environment is what the machine falls back to
 until then; the panel says which one is in use. Either key being there
 means the question is asked: a page with the site's key and a server with
 no secret is a misreading, and it stops the door rather than opening it.
+
+This app asks the widget `0x4AAAAAAGScd9OlAOg39QC3`. The site's key is
+public, so it can be written down; the secret is the other half of it and
+goes in the panel, or in the environment — never in the repository, and
+never in a chat.
 
 **The copy of the pages that lives elsewhere is asked the question too** —
 it calls the same server, so it gets the site's key and the script that

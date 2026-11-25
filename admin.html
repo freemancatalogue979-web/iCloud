@@ -575,7 +575,7 @@
             misbehaves and the door has to be opened again.
           </p>
           <label class="field">
-            <span>The site&rsquo;s key &mdash; it goes in the page</span>
+            <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
             <input type="text" id="ts-site" placeholder="0x4AAAAAAA..." autocomplete="off">
           </label>
           <label class="field">
@@ -587,6 +587,7 @@
           </div>
           <div class="note" id="ts-note"></div>
           <p class="note" id="ts-state"></p>
+          <p class="note" id="ts-hosts"></p>
           <p class="note" style="margin-top:18px">
             The page asks the server for the site&rsquo;s key when it loads
             &mdash; it is public, and no secret is in it &mdash; and
@@ -1629,7 +1630,7 @@
     if (turnstileLoaded) return;
     try {
       var settings = await api("/turnstile");
-      $("ts-site").value = settings.site_key || "";
+      $("ts-site").value = settings.site_key || settings.default_site_key || "";
       $("ts-asked").checked = !!settings.asked;
       $("ts-secret").placeholder = settings.secret_set
         ? "saved \u2014 type to replace"
@@ -1655,6 +1656,14 @@
         $("ts-state").textContent =
           "The question is being asked. A visitor is let through only with a good answer." + note;
       }
+      // The hosts an answer may come from. Cloudflare says which host an
+      // answer was given on, and the server only takes answers from the
+      // hosts this deployment is reached at - so the widget in Cloudflare
+      // has to be allowed to answer on them.
+      $("ts-hosts").textContent = (settings.hostnames && settings.hostnames.length)
+        ? "An answer is only taken from these hosts: " + settings.hostnames.join(", ") +
+          ". The widget in Cloudflare has to be allowed to answer on them."
+        : "";
       turnstileLoaded = true;
     } catch (err) {
       $("ts-note").className = "note bad";

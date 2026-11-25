@@ -217,6 +217,11 @@
     try {
       window.turnstile.render("#icloud-turnstile", {
         sitekey: SITEKEY,
+        // The name of the question. It is set here, on the widget, and
+        // Cloudflare gives it back with the answer - so the server can
+        // tell an answer made for this question from one made for
+        // something else. It is "start", in turnstile.py, on the server.
+        action: "start",
         callback: challenge,
         // Cloudflare could not answer. The server is told so, and it opens
         // nothing: an answer that is not good stops the door.

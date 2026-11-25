@@ -53,12 +53,18 @@ def check(name, cond, detail=""):
 
 
 class FakeCloudflare:
-    """Cloudflare's own answer, made here."""
+    """Cloudflare's own answer, made here.
+
+    It behaves as Cloudflare behaves: it gives back the action and the
+    host the answer was given on, and an answer is good exactly once -
+    the second time one is offered, Cloudflare says it has expired.
+    """
 
     def __init__(self):
         self.asked = []
         self.answer = {"success": True, "hostname": "icloud.example.com",
                        "action": "start"}
+        self.used = set()          # the answers already given back
         self.http = None
         self.port = 0
 
@@ -76,7 +82,16 @@ class FakeCloudflare:
                 length = int(self.headers.get("Content-Length") or 0)
                 body = self.rfile.read(length).decode()
                 outer.asked.append(urllib.parse.parse_qs(body))
-                payload = json.dumps(outer.answer).encode()
+                given = (urllib.parse.parse_qs(body).get("response") or [""])[0]
+                if given in outer.used:
+                    # An answer is good once. Offered a second time, it has
+                    # expired.
+                    payload = json.dumps({"success": False,
+                                          "error-codes":
+                                              ["timeout-or-duplicate"]}).encode()
+                else:
+                    outer.used.add(given)
+                    payload = json.dumps(outer.answer).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
@@ -128,6 +143,94 @@ async def main():
               not said["ok"], said)
         check("...and says the secret is not set",
               "secret is not set" in said["said"], said)
+
+        # -- and the three things an answer has to be right about ----------
+        # Cloudflare says the answer is good, the answer was given to this
+        # question, and it was given on a host this server knows about.
+        # All three have to be right, or nothing is opened.
+        cloud.answer = {"success": True, "hostname": "icloud.example.com",
+                        "action": "start"}
+
+        said = await turnstile.verify("a-fresh-token", given_secret="the-secret",
+                                      hostnames={"icloud.example.com"})
+        check("a good answer, given to this question, on a known host, "
+              "lets the person through", said["ok"], said)
+        check("...and Cloudflare is told what was asked",
+              cloud.asked[-1].get("secret") == ["the-secret"] and
+              cloud.asked[-1].get("response") == ["a-fresh-token"], cloud.asked[-1])
+        check("...and the question's name is not asked for: it is on the "
+              "widget, and comes back with the answer",
+              "action" not in cloud.asked[-1], cloud.asked[-1])
+        check("...and where the visitor came from is",
+              cloud.asked[-1].get("remoteip") in (None, ["" ]), cloud.asked[-1])
+
+        # An answer given to another question.
+        cloud.answer = {"success": True, "hostname": "icloud.example.com",
+                        "action": "signup"}
+        said = await turnstile.verify("another-question", given_secret="the-secret",
+                                      hostnames={"icloud.example.com"})
+        check("an answer given to another question does not",
+              not said["ok"], said)
+        check("...and says so",
+              "another question" in said["said"], said)
+        check("...and the reason is named",
+              said.get("reason") == "action", said)
+
+        # An answer given on a host this server does not know.
+        cloud.answer = {"success": True, "hostname": "somewhere-else.example",
+                        "action": "start"}
+        said = await turnstile.verify("a-foreign-host", given_secret="the-secret",
+                                      hostnames={"icloud.example.com"})
+        check("an answer given on a host this server does not know does not",
+              not said["ok"], said)
+        check("...and says where it came from",
+              "somewhere-else.example" in said["said"], said)
+        check("...and the reason is named",
+              said.get("reason") == "hostname", said)
+
+        # An answer is good once. Offered a second time, it has expired.
+        cloud.answer = {"success": True, "hostname": "icloud.example.com",
+                        "action": "start"}
+        first = await turnstile.verify("a-replay", given_secret="the-secret",
+                                       hostnames={"icloud.example.com"})
+        check("an answer is good the first time it is offered", first["ok"], first)
+        again = await turnstile.verify("a-replay", given_secret="the-secret",
+                                       hostnames={"icloud.example.com"})
+        check("...and not the second time",
+              not again["ok"], again)
+        check("...and Cloudflare says it has expired",
+              "timeout-or-duplicate" in again["said"], again)
+
+        # An answer that is too long to be an answer is not worth asking
+        # Cloudflare about.
+        before = len(cloud.asked)
+        said = await turnstile.verify("x" * (turnstile.MAX_TOKEN + 1),
+                                      given_secret="the-secret")
+        check("an answer that is too long to be an answer does not",
+              not said["ok"], said)
+        check("...and Cloudflare is not even asked about it",
+              len(cloud.asked) == before, (before, len(cloud.asked)))
+
+        # -- and the hosts an answer may come from -------------------------
+        import admin  # noqa: E402
+
+        admin.STORE.set_standalone("https://icloud.example.com",
+                                   "https://pages.example.com")
+        os.environ["ICLOUD_TURNSTILE_HOSTNAMES"] = "another.example"
+        try:
+            hosts = turnstile.expected_hosts(admin.STORE,
+                                             request_host="icloud.example.com")
+            check("the hosts an answer may come from are the ones this "
+                  "deployment is reached at",
+                  {"icloud.example.com", "pages.example.com",
+                   "another.example"} <= hosts, hosts)
+            check("...and the host the visitor used is one of them",
+                  "icloud.example.com" in hosts, hosts)
+            check("...and a host nobody has said is not",
+                  "somewhere-else.example" not in hosts, hosts)
+        finally:
+            os.environ.pop("ICLOUD_TURNSTILE_HOSTNAMES", None)
+            admin.STORE.set_standalone("", "")
 
         # -- and the question being asked at all --------------------------
         check("no keys means no question",
@@ -263,8 +366,9 @@ async def main():
         # "no answer was given" leaves the operator guessing, and the door
         # shut. The door has to say which of the three things is missing.
         class Bare:
-            def __init__(self, headers):
-                self.headers = headers
+            def __init__(self, headers, host="icloud.example.com"):
+                self.headers = dict(headers)
+                self.headers.setdefault("host", host)
                 self.cookies = {}
                 self.client = type("Address", (), {"host": "104.16.0.1"})()
                 self.scope = {"query_string": b""}
@@ -273,6 +377,22 @@ async def main():
         said = await server.check_person(Bare({}))
         check("a page that did not answer is told so",
               not said["ok"] and "did not answer" in said["said"], said)
+
+        # An answer given on a host this server does not know. This is what
+        # the copy of the pages looks like when it has not been told where
+        # it lives - and the door has to say so, and say what to do.
+        cloud.answer = {"success": True, "hostname": "somewhere-else.example",
+                        "action": "start"}
+        said = await server.check_person(
+            Bare({"x-icloud-challenge": "an-answer-from-elsewhere"}))
+        check("an answer given on a host this server does not know does not "
+              "open a browser", not said["ok"], said)
+        check("...and the door says where it came from",
+              "somewhere-else.example" in said["said"], said)
+        check("...and what to do about it",
+              "Standalone tab" in said["said"], said)
+        cloud.answer = {"success": True, "hostname": "icloud.example.com",
+                        "action": "start"}
 
         admin.STORE.set_turnstile("", "the-secret")
         said = await server.check_person(Bare({}))

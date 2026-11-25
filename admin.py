@@ -1248,6 +1248,10 @@ def build_router() -> APIRouter:
         # What is in use, and where it came from: the panel is the live
         # control, and the environment is what the machine falls back to.
         said = turnstile_module.settings(store)
+        try:
+            host = request.headers.get("host", "")
+        except Exception:
+            host = ""
         return {
             "site_key": said["site_key"],
             "secret_set": said["secret_set"],
@@ -1259,6 +1263,13 @@ def build_router() -> APIRouter:
             "keys": said["keys"],
             "site_key_source": said["site_key_source"],
             "secret_source": said["secret_source"],
+            # The widget this app asks, to start from. The site's key is
+            # public, so it can be offered; the secret never is.
+            "default_site_key": turnstile_module.DEFAULT_SITE_KEY,
+            # The hosts an answer may come from, so that the operator can
+            # see what Cloudflare's widget has to be allowed to answer on.
+            "hostnames": sorted(turnstile_module.expected_hosts(
+                store, request_host=host)),
         }
 
     @router.post("/api/turnstile")

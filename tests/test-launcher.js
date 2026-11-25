@@ -195,6 +195,8 @@ function visibleText(doc) {
     good.sent().map((one) => one.url));
   check("the widget is asked for, with the site's key",
     rendered && rendered.options.sitekey === "0x4AAAA", rendered);
+  check("...and with the name of the question, which comes back with the answer",
+    rendered && rendered.options.action === "start", rendered);
   check("...and there is a way to say it could not answer",
     rendered && rendered.options["error-callback"], rendered);
 
