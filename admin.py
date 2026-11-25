@@ -257,14 +257,25 @@ class Store:
     # -- the standalone copy -----------------------------------------------
 
     def standalone(self) -> dict:
-        """Where the server is, for a copy of the pages that lives elsewhere."""
+        """Where the server is, for a copy of the pages that lives elsewhere.
+
+        And where that copy lives: the pages on another host ask this
+        server for things, and a browser will not let a page on one host
+        ask a server on another unless the server says that it may. So the
+        server has to be told where the copy is.
+        """
         settings = self.data.get("standalone")
         if not isinstance(settings, dict):
             settings = {}
-        return {"server": str(settings.get("server") or "").strip()}
+        return {"server": str(settings.get("server") or "").strip(),
+                "origin": str(settings.get("origin") or "").strip()}
 
-    def set_standalone(self, server: str) -> dict:
-        self.data["standalone"] = {"server": str(server or "").strip()}
+    def set_standalone(self, server: str, origin: str = "") -> dict:
+        current = self.standalone()
+        self.data["standalone"] = {
+            "server": str(server or current.get("server") or "").strip(),
+            "origin": str(origin or current.get("origin") or "").strip(),
+        }
         self.save()
         return self.standalone()
 
@@ -1298,6 +1309,7 @@ def build_router() -> APIRouter:
         said = store.standalone()
         return {
             "server": said["server"] or server_url(request),
+            "origin": said["origin"],
             "saved": bool(said["server"]),
             "pages": sorted(p.name for p in standalone.SRC.glob("*.html")),
             "engine": standalone.ENGINE.is_file(),
@@ -1311,9 +1323,11 @@ def build_router() -> APIRouter:
             return _denied("the admin's secret is needed")
         body = await _body(request)
         url = body.get("server")
-        said = store.set_standalone(url if isinstance(url, str) else "")
+        origin = body.get("origin")
+        said = store.set_standalone(url if isinstance(url, str) else "",
+                                   origin if isinstance(origin, str) else "")
         note("the address for the standalone copy was changed")
-        return {"ok": True, "server": said["server"]}
+        return {"ok": True, "server": said["server"], "origin": said["origin"]}
 
     @router.get("/api/standalone/zip")
     async def standalone_zip(request: Request):

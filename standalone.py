@@ -76,13 +76,24 @@ Two things worth knowing
   browser, which is the visitor's own machine, not this host.
 * The pages are served over https, so the server has to be as well: a
   page on https talking to a server on http is refused by the browser.
+* **The server has to be told where this copy lives.** A browser will not
+  let a page on one host ask a server on another unless the server says it
+  may. Put the address of this copy - the folder it was unpacked into, as
+  the browser sees it - in the server's panel, in the Standalone tab, under
+  "Where the copy will live". Until that is done, the pages can be seen
+  but the browser will not open.
 
 If the pages do not come up
 ---------------------------
 
-Open the browser's console (F12) and look. "Refused to connect" means the
-server cannot be reached; a policy error means the page was not allowed
-to talk to it.
+Open the browser's console (F12) and look.
+
+* "Refused to connect" means the server cannot be reached.
+* "a policy error means the page was not allowed to talk to it" - and the
+  server is what says that. Put this copy's address in the panel.
+* "was loaded over HTTPS, but attempted to connect to the insecure
+  WebSocket endpoint" means the server's address in the panel is on http.
+  It has to be on https.
 """
 
 

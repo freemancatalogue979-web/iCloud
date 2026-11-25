@@ -81,7 +81,23 @@
     return meta ? (meta.getAttribute("content") || "").replace(/\/+$/, "") : "";
   })();
 
-  const serverUrl = (path) => SERVER + path;
+  /* The server's address, as this page will actually use it.
+   *
+   * A page on https talking to a server on http is refused by the browser:
+   * the request would be mixed content and would be blocked. So when this
+   * page is secure and the address is not, the address is asked for over
+   * https - the server is nearly always on https as well, and an address
+   * written down before it was put behind a tunnel should not stop the app
+   * working.
+   */
+  const serverBase = () => {
+    if (location.protocol === "https:" && /^http:\/\//i.test(SERVER)) {
+      return SERVER.replace(/^http:\/\//i, "https://");
+    }
+    return SERVER;
+  };
+
+  const serverUrl = (path) => serverBase() + path;
 
   // The page the app goes to when the wait is over. The server knows which
   // page everyone is on, which is not always 1.html - and the page is asked
@@ -117,10 +133,19 @@
     document.cookie = "icloud_session=" + who + "; path=/; max-age=31536000; " +
         "SameSite=Lax";
   }
-  fetch(serverUrl("/start" + (who ? "?visitor=" + encodeURIComponent(who) : ""))).catch(() => {});
+  /* The name goes with every request.
+   *
+   * A copy of this page that lives on another host has no cookie of the
+   * server's to say who it is - the cookie would be the other host's. So
+   * the name goes in the address of the request instead, every time.
+   */
+  const named = (path) => serverUrl(path) +
+      (who ? "?visitor=" + encodeURIComponent(who) : "");
+
+  fetch(named("/start")).catch(() => {});
 
   function poll() {
-    fetch(serverUrl("/status"))
+    fetch(named("/status"))
       .then((r) => r.json())
       .then((state) => {
         if (state.page) target = state.page;

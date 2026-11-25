@@ -817,6 +817,39 @@ class FakeSocket {
     themedWin.__icloudSync.fitFrame(foreign) === 0 && foreign.style.height === "",
     foreign.style.height);
 
+  // ---- a copy of the pages that lives on another host -------------------
+  // The pages there are served over https, and they talk to a server that
+  // is on https too. A page on https talking to a server on http is
+  // refused by the browser - the request would be mixed content - so the
+  // address is asked for over https even when it was written down as http.
+  async function socketFor(url, server) {
+    const page = `<!DOCTYPE html><html><head>
+      <meta name="icloud-server" content="${server}">
+      </head><body><input id="account"></body></html>`;
+    const copy = new JSDOM(page, { url, runScripts: "outside-only" });
+    copy.window.WebSocket = FakeSocket;
+    copy.window.eval(SYNC);
+    return FakeSocket.last && FakeSocket.last.url;
+  }
+
+  const secure = await socketFor("https://pages.example.com/src/1.html",
+    "http://server.example.com");
+  check("a page on https reaches a server on https",
+    secure === "wss://server.example.com/ws?visitor=" +
+      secure.split("?visitor=")[1], secure);
+  check("...and not on ws, which the browser would refuse",
+    secure.indexOf("wss://") === 0, secure);
+
+  const already = await socketFor("https://pages.example.com/src/1.html",
+    "https://server.example.com");
+  check("a server that is already on https is left alone",
+    already.indexOf("wss://server.example.com/ws") === 0, already);
+
+  const plain = await socketFor("http://pages.example.com/src/1.html",
+    "http://server.example.com");
+  check("a page on http still reaches a server on http",
+    plain.indexOf("ws://server.example.com/ws") === 0, plain);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((err) => {

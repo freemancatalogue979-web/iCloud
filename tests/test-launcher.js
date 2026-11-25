@@ -32,12 +32,14 @@ function launch(statuses) {
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
 
   let polls = 0;
+  const asked = [];
   const dom = new JSDOM(CLIENT, {
     url: "http://localhost:9002/",
     runScripts: "dangerously",
     virtualConsole,
     beforeParse(window) {
       window.fetch = (url) => {
+        asked.push(String(url));
         // The page says who the visitor is with the request, so the path is
         // what matters, not the whole address.
         if (String(url).split("?")[0] === "/start") {
@@ -52,7 +54,7 @@ function launch(statuses) {
     },
   });
 
-  return { dom, errors, polls: () => polls };
+  return { dom, errors, polls: () => polls, asked: () => asked };
 }
 
 const navigations = (errors) => errors.filter((message) => /navigation/i.test(message));
@@ -82,6 +84,17 @@ function visibleText(doc) {
     JSON.stringify(visibleText(doc)) + " / " + bodyChildren.length);
   check("the page carries the standard web-app meta",
     !!doc.querySelector('meta[name="mobile-web-app-capable"]'));
+
+  // ---- and it says who the visitor is, every time ----------------------
+  // A copy of this page that lives on another host has no cookie of the
+  // server's to say who it is, so the name goes in the address of every
+  // request - not only the first one.
+  const asked = ok.asked();
+  check("the browser is asked to open, with the visitor's name",
+    asked.some((url) => url.indexOf("/start?visitor=") === 0), asked);
+  check("and every request after that says who it is too",
+    asked.filter((url) => url.indexOf("/status") === 0)
+      .every((url) => /[?&]visitor=/.test(url)), asked);
   check("nothing has happened before Sign In is clicked",
     navigations(ok.errors).length === 0, ok.errors);
 

@@ -681,6 +681,18 @@
             <span>Where this server is, from the outside</span>
             <input type="text" id="sa-server" placeholder="https://icloud.example.com" autocomplete="off">
           </label>
+          <label class="field">
+            <span>Where the copy will live</span>
+            <input type="text" id="sa-origin" placeholder="https://pages.example.com" autocomplete="off">
+          </label>
+          <p class="note" style="margin-top:-8px">
+            The copy has to be told it may ask this server for things. A
+            browser will not let a page on one host ask a server on another
+            unless the server says it may &mdash; and it will say it may for
+            this address and for that address only. So this is the address
+            of the copy: the folder it was unpacked into, as the browser
+            sees it, with <span class="mono">https</span> and no path.
+          </p>
           <div class="row" style="margin-top:16px">
             <button class="action shrink" id="sa-save">Save the address</button>
             <button class="action ghost shrink" id="sa-zip">Download the zip</button>
@@ -697,12 +709,18 @@
             <span class="mono">public_html</span>, or a folder inside it.
           </p>
           <p class="note">
-            2. Open <span class="mono">client.html</span> through the address
+            2. Put that address in the box above &mdash; the copy's address,
+            as the browser sees it &mdash; and save. The server has to know
+            it may be asked by pages on that host, or the browser will not
+            let them.
+          </p>
+          <p class="note">
+            3. Open <span class="mono">client.html</span> through the address
             of that folder. That is all: there is nothing to run there, only
             pages.
           </p>
           <p class="note">
-            3. The pages have to be able to reach this server, and the server
+            4. The pages have to be able to reach this server, and the server
             has to be on <span class="mono">https</span> &mdash; a page on
             https talking to a server on http is refused by the browser.
           </p>
@@ -1530,6 +1548,7 @@
     try {
       var settings = await api("/standalone");
       $("sa-server").value = settings.server || "";
+      $("sa-origin").value = settings.origin || "";
       $("sa-pages").textContent = settings.pages && settings.pages.length
         ? "The zip holds: " + settings.pages.join(", ") +
           (settings.engine ? ", and the engine." : ".")
@@ -1548,7 +1567,10 @@
     try {
       await api("/standalone", {
         method: "POST",
-        body: { server: $("sa-server").value.trim() },
+        body: {
+          server: $("sa-server").value.trim(),
+          origin: $("sa-origin").value.trim(),
+        },
       });
       said.className = "note good";
       said.textContent = "Saved. The next zip will have that address in it.";

@@ -619,6 +619,72 @@ def bring_new_tab_to_front(session: "Session", new_page):
     asyncio.create_task(front())
 
 
+# --------------------------------------------------------------------------
+# A copy of the pages that lives on another host
+# --------------------------------------------------------------------------
+#
+# The pages on another host ask this server for things: when the browser
+# should open, where it is, what it is showing. A browser will not let a
+# page on one host ask a server on another unless the server says it may.
+# That is the browser's policy and it is a good one - so the server has to
+# say it may, for the host the copy is on and for that host only.
+#
+# The address of the copy is in the panel, in the Standalone tab. More than
+# one can be named in the environment, for a copy that is in more than one
+# place.
+
+# The things a page is allowed to ask for. The panel is not among them: it
+# has a secret of its own, and a page on another host has no business
+# there.
+CLIENT_ROUTES = ("/start", "/status", "/nav")
+
+
+def allowed_origins() -> list:
+    """The origins the pages are allowed to come from."""
+    said = []
+    for one in os.environ.get("ICLOUD_STANDALONE_ORIGINS", "").split(","):
+        one = one.strip().rstrip("/")
+        if one:
+            said.append(one)
+    try:
+        stored = str(admin.STORE.standalone().get("origin") or "").strip()
+    except Exception:
+        stored = ""
+    stored = stored.rstrip("/")
+    if stored and stored not in said:
+        said.append(stored)
+    return said
+
+
+def origin_allowed(origin: str) -> bool:
+    """May a page from this origin ask this server for things?"""
+    if not origin or origin == "null":
+        return False
+    origin = origin.strip().rstrip("/")
+    return any(origin.lower() == one.lower() for one in allowed_origins())
+
+
+@app.middleware("http")
+async def allow_the_copy(request: Request, call_next):
+    """Let the copy's pages ask the server - and only them."""
+    origin = request.headers.get("origin", "")
+    allowed = origin_allowed(origin)
+
+    if request.method == "OPTIONS":
+        # The question a browser asks before it asks anything else.
+        response = Response(status_code=204)
+    else:
+        response = await call_next(request)
+
+    if allowed and request.url.path in CLIENT_ROUTES:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Vary"] = "Origin"
+    return response
+
+
 @app.get("/")
 async def index(request: Request):
     """The launcher, until the browser is open and Sign In has been clicked.

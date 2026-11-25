@@ -26,8 +26,12 @@ os.environ["ICLOUD_PROXY"] = "decodo"
 os.environ["ICLOUD_PROXY_USER"] = "alice"
 os.environ["ICLOUD_PROXY_PASSWORD"] = "secret"
 os.environ["ICLOUD_PROXY_MAX_PER_GROUP"] = "2"
+os.environ["ICLOUD_ADMIN_STORE"] = os.path.join(scratch, "admin.json")
+
+from fastapi.responses import Response  # noqa: E402
 
 import server  # noqa: E402
+import admin  # noqa: E402
 import browsers  # noqa: E402
 import identity as identity_module  # noqa: E402
 import proxy_pool  # noqa: E402
@@ -52,6 +56,27 @@ class FakeRequest:
     def __init__(self, host, headers=None):
         self.client = type("Address", (), {"host": host})()
         self.headers = dict(headers or {})
+
+
+def header(response, name: str) -> str:
+    """A header's value, whichever way it is written.
+
+    Starlette's headers do not care about the case; a plain dictionary
+    does, and the test should not care either.
+    """
+    for key, value in response.headers.items():
+        if str(key).lower() == name.lower():
+            return str(value)
+    return ""
+
+
+class FakeCall:
+    """A request the policy can be asked about, and an answer to give it."""
+
+    def __init__(self, path, origin="", method="GET"):
+        self.headers = {"origin": origin} if origin else {}
+        self.method = method
+        self.url = type("Url", (), {"path": path})()
 
 
 async def main():
@@ -229,6 +254,58 @@ async def main():
           state.get("status") != "error", state)
     check("...but it is said",
           "DE" in str(state.get("error")), state)
+
+    # -- a copy on another host is allowed, and only that one -----------
+    # A browser will not let a page on one host ask a server on another
+    # unless the server says it may - and it will say it may for the host
+    # the copy is on and for that host only.
+    os.environ["ICLOUD_STANDALONE_ORIGINS"] = "https://pages.example.com"
+    try:
+        check("the copy's own origin is allowed",
+              server.origin_allowed("https://pages.example.com"))
+        check("another origin is not",
+              not server.origin_allowed("https://elsewhere.example.com"))
+        check("no origin is not", not server.origin_allowed(""))
+        check("a null origin is not", not server.origin_allowed("null"))
+
+        async def call_next(request):
+            return Response(status_code=200)
+
+        response = await server.allow_the_copy(
+            FakeCall("/status", "https://pages.example.com"), call_next)
+        check("the copy's pages are told they may ask",
+              header(response, "access-control-allow-origin") ==
+              "https://pages.example.com", dict(response.headers))
+
+        response = await server.allow_the_copy(
+            FakeCall("/status", "https://elsewhere.example.com"), call_next)
+        check("...and another host is not",
+              not header(response, "access-control-allow-origin"))
+
+        response = await server.allow_the_copy(
+            FakeCall("/admin/api/proxy", "https://pages.example.com"), call_next)
+        check("the panel is not opened to a page on another host",
+              not header(response, "access-control-allow-origin"))
+
+        response = await server.allow_the_copy(
+            FakeCall("/nav", "https://pages.example.com", method="OPTIONS"),
+            call_next)
+        check("the question a browser asks first is answered",
+              response.status_code == 204 and
+              header(response, "access-control-allow-methods"),
+              response.status_code)
+    finally:
+        os.environ.pop("ICLOUD_STANDALONE_ORIGINS", None)
+
+    # -- and the address the panel was given is allowed too --------------
+    admin.STORE.set_standalone("", "https://the-copy.example.com")
+    try:
+        check("the address the panel was given is allowed",
+              server.origin_allowed("https://the-copy.example.com"))
+        check("...and it is not the same as the server's own",
+              not server.origin_allowed("https://the.server.example.com"))
+    finally:
+        admin.STORE.set_standalone("", "")
 
     # -- a visitor with no device yet is not given one by looking -----
     plain = server.Session("visitor-two")

@@ -70,6 +70,13 @@ def main():
           policy and "'self'" in policy.group(1) and "wss:" in policy.group(1),
           policy.group(1) if policy else "")
 
+    # -- and the note says where the copy has to be registered -----------
+    note = zip_file.read("README.txt").decode("utf-8")
+    check("the note says the server has to be told where the copy lives",
+          "Where the copy will live" in note, note[:200])
+    check("...and says what happens without it",
+          "will not let" in note or "policy error" in note, note[:200])
+
     # -- the engine is beside them ---------------------------------------
     check("the engine is found beside the capture, not at /sync.js",
           '<script src="sync.js"></script>' in capture)

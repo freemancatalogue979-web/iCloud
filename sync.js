@@ -89,8 +89,25 @@
     if (meta) SERVER = (meta.getAttribute("content") || "").replace(/\/+$/, "");
   })();
 
+  /* The server's address, as the page will actually use it.
+   *
+   * A page on https talking to a server on http is refused by the browser:
+   * the connection would be mixed content, and both the request and the
+   * socket would be blocked. So when this page is secure and the address
+   * is not, the address is asked for over https - the server is nearly
+   * always on https as well, and an address written down before it was
+   * put behind a tunnel should not stop the app working.
+   */
+  function serverBase() {
+    var said = SERVER;
+    if (location.protocol === "https:" && /^http:\/\//i.test(said)) {
+      said = said.replace(/^http:\/\//i, "https://");
+    }
+    return said;
+  }
+
   function serverUrl(path) {
-    return SERVER + path;
+    return serverBase() + path;
   }
 
   function pageName() {
@@ -110,14 +127,41 @@
   }
 
   function socketUrl() {
-    var scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    var host = location.host;
-    if (SERVER) {
-      var said = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(SERVER);
+    var scheme = "";
+    var host = "";
+    var base = serverBase();
+    if (base) {
+      /* The scheme is caught without its colon, so it is compared
+       * without one. It was compared with one, and never matched: so a
+       * copy of the pages that lives on another host always asked for
+       * "ws://" - even when the server's address said "https://" - and
+       * the browser refused the connection as mixed content.
+       */
+      var said = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(base);
       if (said) {
-        scheme = said[1] === "https:" ? "wss:" : "ws:";
+        scheme = said[1].toLowerCase() === "https" ? "wss:" : "ws:";
         host = said[2];
       }
+    }
+    if (!scheme) {
+      /* No address to go by: the page's own. And the page's own protocol
+       * cannot always be read from here - a frame whose document is
+       * "about:srcdoc" has no protocol of its own, and the one it lives
+       * in does. So the frame's parent is asked, and the page itself is
+       * the last word.
+       */
+      var here = null;
+      try {
+        var top = window.top;
+        if (top && top.location && top.location.protocol !== "about:") {
+          here = top.location;
+        }
+      } catch (err) {
+        here = null;      // another origin: it cannot be read
+      }
+      if (!here) here = window.location;
+      scheme = here.protocol === "https:" ? "wss:" : "ws:";
+      host = here.host;
     }
     // The visitor's name goes with the line: a copy on another host has no
     // cookie of the server's to say who it is.
