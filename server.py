@@ -465,7 +465,7 @@ async def verify_exit(session: "Session") -> dict:
         return {"ok": False, "ip": "", "country": "", "said": "nothing to check"}
 
     said = {"ok": False, "ip": "", "country": "", "said": "",
-            "hints": "", "wrong": False}
+            "hints": "", "wrong": False, "mismatch": False}
     page = None
     try:
         page = await session.ctx.new_page()
@@ -490,7 +490,13 @@ async def verify_exit(session: "Session") -> dict:
                             said="the browser left from the machine itself")
             elif said.get("ip") and identity.country:
                 if said.get("country") and said["country"] != identity.country:
-                    said.update(ok=False, wrong=True,
+                    # A different country is said out loud, but it does not
+                    # stop the sign-in by itself: the country comes from
+                    # where the visitor was seen, and the operator may
+                    # want another one (the panel has a field for it). The
+                    # address is what matters - it is the machine's own
+                    # address that stops everything.
+                    said.update(ok=False, mismatch=True,
                                 said=f"it left from {said['country']}, "
                                      f"not {identity.country}")
                 else:
@@ -714,16 +720,18 @@ async def start_browser(session: "Session"):
                 session.state["error"] = session.exit.get("said", "")
             SESSIONS.changed(session, why="exit-checked")
 
-            # A browser that left from the machine's own address, or from
-            # a country that is not the one the device was built for, is
-            # the one thing this whole arrangement is here to prevent. It
-            # is not handed over: the sign-in is not started at all, and
-            # the browser is closed.
+            # A browser that left from the machine's own address is the one
+            # thing this whole arrangement is here to prevent: the proxy
+            # was not used, and the sign-in would be done from here. It is
+            # not handed over - the sign-in is not started at all, and the
+            # browser is closed.
             #
-            # A check that could not be made is another matter - the
-            # service may be down, and the proxy may be working perfectly
-            # well. That is noted and shown in the panel, and the sign-in
-            # goes on, unless the operator asks for it to be strict
+            # Everything else is another matter - the check could not be
+            # made at all (the service may be down, and the proxy may be
+            # working perfectly well), or the address is a good one in a
+            # country other than the one the visitor was seen in. Those
+            # are noted and shown in the panel, and the sign-in goes on,
+            # unless the operator asks for it to be strict
             # (ICLOUD_EXIT_STRICT=1).
             strict = os.environ.get("ICLOUD_EXIT_STRICT", "").strip() in \
                 ("1", "true", "yes", "on")

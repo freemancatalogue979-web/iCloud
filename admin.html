@@ -954,9 +954,14 @@
     var out = '<span class="mono">' + where + "</span>";
     if (row.exit_ip) {
       out += '<div class="sub mono">' + escape(row.exit_ip) + "</div>";
-      out += row.exit_ok
-        ? '<span class="pill ok">Checked</span>'
-        : '<span class="pill warn">Not checked</span>';
+      if (row.exit_mismatch) {
+        // It was checked, and it is a good address - in another country.
+        out += '<span class="pill warn">Other country</span>';
+      } else {
+        out += row.exit_ok
+          ? '<span class="pill ok">Checked</span>'
+          : '<span class="pill warn">Not checked</span>';
+      }
       if (!row.exit_ok && row.exit_said) {
         out += '<div class="err-line">' + escape(row.exit_said) + "</div>";
       }

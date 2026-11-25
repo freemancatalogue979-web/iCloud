@@ -133,12 +133,33 @@ async def main():
         async def close(self):
             FakeContext.closed = True
 
+        def on(self, *a, **k):
+            return None
+
+    class FakeLocator:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        async def click(self, *a, **k):
+            return None
+
     class FakePage:
         async def evaluate(self, what):
             return "Mozilla/5.0"
 
         async def goto(self, *a, **k):
-            raise AssertionError("it must not go anywhere")
+            return None
+
+        async def inner_text(self, what):
+            return ""
+
+        async def bring_to_front(self):
+            return None
+
+        def locator(self, what):
+            return FakeLocator()
 
     class FakeSessions:
         @staticmethod
@@ -154,6 +175,12 @@ async def main():
     old_sessions = server.SESSIONS
     server.SESSIONS = FakeSessions
     old_verify = server.verify_exit
+    old_launch = server.launch
+
+    async def fake_launch(_session):
+        return FakeContext(), FakePage()
+
+    server.launch = fake_launch
 
     async def wrong_exit(_session):
         return {"ok": False, "wrong": True, "ip": "198.51.100.7",
@@ -165,6 +192,7 @@ async def main():
     finally:
         server.verify_exit = old_verify
         server.SESSIONS = old_sessions
+        server.launch = old_launch
 
     check("a browser that left from the machine itself is not handed over",
           state.get("status") == "error", state)
@@ -173,6 +201,34 @@ async def main():
           session.ctx)
     check("...and the reason is said",
           "machine itself" in str(state.get("error")), state)
+
+    # -- a good address in another country is not stopped either ------
+    # The country comes from where the visitor was seen, and the operator
+    # may want another one. The address is what matters: it is the
+    # machine's own address that stops everything.
+    session2 = server.Session("visitor-three")
+    await server.prepare_identity(session2, request)
+    session2.ctx = FakeContext()
+    session2.page = FakePage()
+
+    async def other_country(_session):
+        return {"ok": False, "wrong": False, "mismatch": True,
+                "ip": "203.0.113.44", "country": "DE",
+                "said": "it left from DE, not US"}
+
+    server.verify_exit = other_country
+    server.launch = fake_launch
+    try:
+        state = await server.start_browser(session2)
+    finally:
+        server.verify_exit = old_verify
+        server.SESSIONS = old_sessions
+        server.launch = old_launch
+
+    check("an address in another country is not stopped",
+          state.get("status") != "error", state)
+    check("...but it is said",
+          "DE" in str(state.get("error")), state)
 
     # -- a visitor with no device yet is not given one by looking -----
     plain = server.Session("visitor-two")

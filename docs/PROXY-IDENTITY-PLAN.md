@@ -318,6 +318,25 @@ silent fallback to the server's own IP is worse than no proxy at all: every
 session then leaves from the same datacenter address, which is the exact
 signal this plan exists to remove.
 
+**And the one case that is not "noted" is stopped.** A browser that left
+from *this machine's own address* — the proxy failed, or was never applied —
+is not handed over: the sign-in is not started, the browser is closed, and
+the session is marked failed. That is the proxy failing, not the check
+failing, and there is no version of it that is worth continuing through.
+
+The other two are noted and shown, and the sign-in goes on by default:
+
+* the check could not be *made* (the echo service is down, the network is
+  unhappy) — the panel says "Not checked";
+* the address is a good one but in another country than the one the visitor
+  was seen in — the panel says "Other country". The country comes from
+  where the visitor was seen, and the operator may want a different one;
+  there is a field for it in the panel.
+
+`ICLOUD_EXIT_STRICT=1` makes those two stop the sign-in as well, which is
+the right thing on a machine where the proxy is the only thing between the
+sign-in and the server's own address.
+
 ---
 
 ## 5. The launch flags

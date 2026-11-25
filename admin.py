@@ -790,6 +790,9 @@ def client_row(session, store: Store) -> dict:
         "exit_ip": exit_check.get("ip", "") if exit_check else "",
         "exit_ok": bool(exit_check.get("ok")) if exit_check else False,
         "exit_said": exit_check.get("said", "") if exit_check else "",
+        # The address was checked and it was a good one, but in a country
+        # other than the one the visitor was seen in.
+        "exit_mismatch": bool(exit_check.get("mismatch")) if exit_check else False,
         # Which browser did the sign-in, and whether it had a window. A
         # browser with no window says "Headless Chrome" for itself, and
         # every site can read that without asking.
