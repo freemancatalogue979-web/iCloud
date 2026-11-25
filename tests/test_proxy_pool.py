@@ -99,7 +99,10 @@ def main():
 
         settings = pool.settings(one)
         check("the proxy is the backconnect entrance",
-              settings["server"] == "socks5://gate.decodo.com:7000", settings)
+              settings["server"] == "http://gate.decodo.com:7000", settings)
+        check("...and http, because a browser cannot use socks5 with a "
+              "password",
+              pool.scheme == "http", pool.scheme)
         check("...with the country in the name",
               "-country-us" in settings["username"], settings["username"])
         check("...and the session in it",

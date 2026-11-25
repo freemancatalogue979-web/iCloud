@@ -249,13 +249,37 @@ Apple ID from two addresses in two minutes, which is a textbook account
 lock. Two defences: a long `sessionduration` (60–240 min) *and* a
 verification step before the flow starts (§4).
 
-**Use SOCKS5, not HTTP CONNECT, and here is why.** With an HTTP proxy,
-Chromium resolves the hostname locally and sends the resolved IP in the
-`CONNECT` — the server's DNS and its egress IP are both exposed, and DNS
-resolution happens on the wrong side of the tunnel. With SOCKS5, Chromium
-sends the hostname and the proxy resolves it. `gate.decodo.com:7000`
-speaks SOCKS5, so `proxy={"server": "socks5://gate.decodo.com:7000"}` is
-the better default here.
+**Use HTTP CONNECT, not SOCKS5, and here is why.** This was written the other
+way round at first — "SOCKS5, so the proxy resolves the names" — and it was
+wrong on two counts. The first is that Chromium **cannot** use a SOCKS5 proxy
+with a password: Playwright refuses it before the browser is even opened
+(`Browser does not support socks5 proxy authentication`). Since Decodo's
+residential proxy is authenticated by name and password, SOCKS5 was never
+available to the browser at all — only to `curl`.
+
+The second is the reason SOCKS5 was preferred in the first place, and it
+does not hold: Chromium **does not resolve locally** when it has an HTTP
+proxy. It sends the *name*:
+
+```
+CONNECT icloud.com:443        ← the name, not an address
+```
+
+Measured against a local proxy that recorded what it was sent
+(`tests/` and the note in `proxy.env.example`): with an HTTP proxy the
+`CONNECT` line carries the hostname, so the proxy resolves it and this
+machine's resolver is not asked. The DNS-leak argument for SOCKS5 was
+therefore made against a problem HTTP does not have.
+
+So HTTP CONNECT it is — `proxy={"server": "http://gate.decodo.com:7000",
+"username": …, "password": …}` — which the browser accepts, and which
+resolves names at the proxy end anyway. SOCKS5 stays available for the one
+case that works: a proxy that needs **no** password, i.e. Decodo's
+*whitelisting*, where the provider knows this machine by its address. Then
+the country goes in the host name (`country-us.gate.decodo.com`) and the
+sticky session is the port (10001+). That path needs a fixed address for
+this machine, and it is a deliberate choice, not the default.
+
 
 ---
 
@@ -274,7 +298,8 @@ not a botnet, four things have to hold true **for the whole flow**:
    the *exit* country, not the server's. A German IP with `en-US` +
    `America/New_York` is an impossible combination and a cheap catch.
    → the identity's device block is generated *from* the country.
-4. **The server's own IP must not leak.** → no DNS leak (SOCKS5, §3.3), no
+4. **The server's own IP must not leak.** → no DNS leak (the proxy resolves
+   the names, §3.3), no
    WebRTC leak (`--force-webrtc-ip-handling-policy=disable_non_proxied_udp`),
    no `X-Forwarded-For`-style leak from the proxy itself.
 
@@ -380,7 +405,7 @@ a secret that can be committed by accident*).
 ```
 ICLOUD_PROXY=decodo                  # none | decodo | generic
 ICLOUD_PROXY_SERVER=gate.decodo.com:7000
-ICLOUD_PROXY_SCHEME=socks5           # socks5 | http
+ICLOUD_PROXY_SCHEME=http             # http | socks5 (only without a password)
 ICLOUD_PROXY_USER=…                  # or user-<user> for Decodo
 ICLOUD_PROXY_PASSWORD=…
 ICLOUD_PROXY_COUNTRY=US              # fallback when the visitor's country is unknown
@@ -417,7 +442,7 @@ Same-IP-many-accounts is the goal; same-IP-*too*-many-accounts undoes it.
 | # | Decision | Recommendation |
 |---|---|---|
 | 1 | Platform honesty vs spoofed UA | Honest platform (Linux UA), vary screen/DPR/locale/TZ. Per-OS workers later if needed |
-| 2 | HTTP CONNECT vs SOCKS5 | SOCKS5 — remote DNS, no leak |
+| 2 | HTTP CONNECT vs SOCKS5 | HTTP — Chromium cannot use SOCKS5 with a password, and HTTP resolves at the proxy end anyway |
 | 3 | GeoIP source | Local GeoLite2 DB; HTTP only as fallback |
 | 4 | Sticky duration | 120–240 min, `session_iplock` on |
 | 5 | CDP / WebGL leaks | Phase 1: accept. Phase 3: evaluate patchright; Camoufox only if the project earns it |
@@ -435,7 +460,7 @@ WebGL renderer. Every session today will show the same list. Without this
 baseline, "it looks better now" is an opinion.
 
 **Phase 1 — the network.** `geo.py` + `proxy_pool.py` + the verification
-step. One session, one country, SOCKS5, no fingerprint changes yet.
+step. One session, one country, HTTP through the proxy, no fingerprint changes yet.
 Success: the panel shows the exit IP, the country matches the visitor, and
 the IP does not change across a full sign-in.
 
@@ -488,7 +513,8 @@ See the summary in the conversation, but in short:
 
 1. **Proxy account** — provider and credentials (`ICLOUD_PROXY_USER` /
    `ICLOUD_PROXY_PASSWORD`, set on the box, not pasted into chat), and
-   whether SOCKS5 on `gate.decodo.com:7000` is available on the plan.
+   whether `gate.decodo.com:7000` is available on the plan (it speaks both
+   HTTP and SOCKS5; HTTP is the one the browser can use with a password).
 2. **GeoIP** — a MaxMind licence key for GeoLite2, or a yes to the HTTP
    fallback.
 3. **The edge** — is the app behind Nginx/Cloudflare, and is the visitor's
@@ -538,7 +564,7 @@ ok   the name and the client hints do not contradict each other
 | # | Decision | Taken |
 |---|---|---|
 | 1 | Platform honesty | **Honest** — the browser says it is Chrome on Linux, and the client hints agree with it. Varying the screen, the ratio, the language and the clock is what varies. |
-| 2 | HTTP CONNECT vs SOCKS5 | **SOCKS5** — the proxy resolves the names, so this machine's resolver is not used |
+| 2 | HTTP CONNECT vs SOCKS5 | **HTTP** — Chromium cannot use a SOCKS5 proxy with a password; and with HTTP the *name* goes to the proxy, which resolves it, so this machine's resolver is not used either |
 | 3 | GeoIP source | **Both** — the local file when it is there, the web service otherwise |
 | 4 | Sticky duration | **120 minutes** by default, `ICLOUD_PROXY_SESSION_MINUTES` |
 | 5 | CDP / WebGL leaks | **Accepted for now** — the CDP leaks need a patched Chromium and the WebGL renderer needs a different engine; neither is in phase 1 |

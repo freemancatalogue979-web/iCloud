@@ -190,41 +190,36 @@ def free_port() -> int:
 
 
 def browser_path():
-    """A browser to test with, or None."""
-    try:
-        from playwright.async_api import async_playwright
-    except ImportError:
-        return None
+    """A browser to test with, or None.
 
-    candidates = []
-    try:
-        with async_playwright() as p:
-            candidates.append(p.chromium.executable_path)
-    except Exception:
-        pass
-
-    # Playwright's own download, when the headless shell is not there.
+    Found by looking at the disk, not by asking Playwright: Playwright's
+    own way of answering needs an event loop, and the test that asks for
+    this is often already inside one.
+    """
     roots = []
-    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-        roots.append(Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"]))
+    given = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if given:
+        roots.append(Path(given))
     roots.append(Path.home() / ".cache" / "ms-playwright")
-    roots.append(Path("/root/.cache/ms-playwright"))
-    for cache in roots:
-        if not cache.is_dir():
-            continue
-        for found in sorted(cache.glob("chromium-*/chrome-linux/chrome")):
-            candidates.append(str(found))
-        for found in sorted(cache.glob("chromium-*/chrome-linux/headless_shell")):
-            candidates.append(str(found))
 
+    names = ("chrome-linux64/chrome", "chrome-linux/chrome",
+             "chrome-headless-shell-linux64/chrome-headless-shell",
+             "chrome-linux/headless_shell", "chrome", "headless_shell")
+    # A Chrome of its own, if the machine has one.
     for system in ("/usr/bin/google-chrome", "/usr/bin/chromium",
-                   "/usr/bin/chromium-browser", "/Applications/Google Chrome.app/"
-                   "Contents/MacOS/Google Chrome"):
-        candidates.append(system)
+                   "/usr/bin/chromium-browser",
+                   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"):
+        if Path(system).exists():
+            roots.append(Path(system).parent)
 
-    for candidate in candidates:
-        if candidate and Path(candidate).exists():
-            return candidate
+    for root in roots:
+        if not root.exists():
+            continue
+        for folder in sorted(root.glob("chromium*"), reverse=True):
+            for name in names:
+                found = folder / name
+                if found.exists():
+                    return str(found)
     return None
 
 
@@ -252,7 +247,12 @@ async def main():
         print(f"\n{passed} passed, {failed} failed")
         return 0
 
-    import uvicorn
+    try:
+        import uvicorn
+    except ImportError:
+        print("SKIPPED: no uvicorn to serve the app with")
+        print(f"\n{passed} passed, {failed} failed")
+        return 0
     from playwright.async_api import async_playwright
 
     port = free_port()

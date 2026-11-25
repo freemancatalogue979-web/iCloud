@@ -90,7 +90,7 @@ async def main():
     check("the language is the machine's", "locale" in options, options)
     check("the clock is the machine's", "timezone_id" in options, options)
     check("the browser leaves from the group's address",
-          options.get("proxy", {}).get("server") == "socks5://gate.decodo.com:7000",
+          options.get("proxy", {}).get("server") == "http://gate.decodo.com:7000",
           options.get("proxy"))
     check("...with the country in the name",
           "-country-" in options["proxy"]["username"], options["proxy"]["username"])

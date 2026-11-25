@@ -169,7 +169,7 @@ async def main():
             "enabled": True,
             "kind": "decodo",
             "server": "gate.decodo.com:7000",
-            "scheme": "socks5",
+            "scheme": "http",
             "username": "user-alice-session-1-country-us",
             "password": "the-secret-password",
             "country": "US",
@@ -200,8 +200,8 @@ async def main():
           settings["username"] == "user-alice-session-us-0"
                                   "-sessionduration-180-country-us",
           settings["username"])
-    check("...through the SOCKS5 entrance",
-          settings["server"] == "socks5://gate.decodo.com:7000",
+    check("...through the entrance that is set",
+          settings["server"] == "http://gate.decodo.com:7000",
           settings["server"])
 
     # ---- an empty password keeps the one that is there --------------------
@@ -243,8 +243,8 @@ async def main():
     answer = await endpoint("/admin/api/proxy/test", "POST")(
         make_request("POST", "/admin/api/proxy/test", {
             "kind": "decodo", "server": "gate.decodo.com:7000",
-            "username": "alice", "password": "the-secret-password",
-            "country": "US",
+            "scheme": "http", "username": "alice",
+            "password": "the-secret-password", "country": "US",
         }, cookies=cookie))
     said = as_json(answer)
     check("a test answers while the proxy is still off",
@@ -263,7 +263,8 @@ async def main():
         answer = await endpoint("/admin/api/proxy/test", "POST")(
             make_request("POST", "/admin/api/proxy/test", {
                 "kind": "decodo", "server": "gate.decodo.com:7000",
-                "username": "alice", "password": "the-secret-password",
+                "scheme": "http", "username": "alice",
+                "password": "the-secret-password",
             }, cookies=cookie))
         said = as_json(answer)
         check("a machine with no curl is still answered",
@@ -303,6 +304,49 @@ async def main():
     check("the check goes out with a browser and reads the answer",
           said.get("ok") and said.get("ip") == "203.0.113.9", said)
     check("...and the country with it", said.get("country") == "US", said)
+
+    # ---- a SOCKS5 proxy with a password, which no browser can do -------
+    # Chromium says so before it opens, and Playwright refuses it. The
+    # panel has to say so too, rather than let it be found out at the
+    # wrong moment.
+    trial = proxy_pool.Pool({
+        "kind": "decodo", "server": "gate.decodo.com:7000", "scheme": "socks5",
+        "username": "alice", "password": "the-secret-password",
+    })
+    check("a browser cannot use a SOCKS5 proxy with a password",
+          not trial.browser_usable(), trial)
+    check("...and the panel is told why",
+          any("protocol" in said for said in proxy_pool.missing(trial)),
+          proxy_pool.missing(trial))
+
+    plain = proxy_pool.Pool({
+        "kind": "decodo", "server": "gate.decodo.com:7000", "scheme": "http",
+        "username": "alice", "password": "the-secret-password",
+    })
+    check("an HTTP proxy with a password is fine",
+          plain.browser_usable(), plain)
+
+    whitelisted = proxy_pool.Pool({
+        "kind": "decodo", "server": "gate.decodo.com:7000", "scheme": "socks5",
+        "whitelisted": True,
+    })
+    check("a SOCKS5 proxy with no password is fine too",
+          whitelisted.browser_usable(), whitelisted)
+    check("...and it asks for nothing",
+          proxy_pool.missing(whitelisted) == [], proxy_pool.missing(whitelisted))
+    where = whitelisted.settings("us-0", country="US")
+    check("...the country goes in the host name",
+          where["server"] == "socks5://country-us.gate.decodo.com:10001",
+          where["server"])
+    check("...and there is no password to give",
+          where["username"] == "" and where["password"] == "", where)
+
+    blank = proxy_pool.Pool({
+        "kind": "decodo", "server": "gate.decodo.com:7000", "scheme": "http",
+    })
+    check("a proxy with nothing in it asks for the user name",
+          "the user name" in proxy_pool.missing(blank),
+          proxy_pool.missing(blank))
 
     # ---- the standalone copy ----------------------------------------------
     answer = await endpoint("/admin/api/standalone")(make_request(cookies=cookie))
