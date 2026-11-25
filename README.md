@@ -217,6 +217,114 @@ The panel is one page (`admin.html`), served by the same server, with the
 font it uses served from the app as well: Space Grotesk, so the panel looks
 the same whether the machine has a network or not.
 
+## The address a session leaves from
+
+Every browser on the machine used to look the same: the same build of
+Chrome, the same `User-Agent`, the same screen, the same language, and the
+same address at the other end of it. The *profile* was different for each
+visitor — the cookies, the trusted-device answer — but the browser was the
+same browser, and to the far end of the wire that is what a visitor is.
+
+So a visitor can now be given two things.
+
+**A device**, which is kept with their profile in `visitors/<id>/identity.json`
+and is the same on every visit: a screen of its own size, a language and a
+clock that agree with the country it leaves from, a pixel ratio, and the
+browser's own name for itself. The browser's name is *its own* on purpose.
+Chromium sends client hints — `Sec-CH-UA-Platform`, the full version list —
+that it writes itself, and a `User-Agent` that disagrees with the hints
+beside it is a louder signal than no disguise at all. What the browser says
+about itself is therefore what it really is, and the flags it starts with
+only stop it announcing things that are true of a machine it is not on: that
+it is being driven, that WebRTC may say this machine's own address, and
+that QUIC may go around the proxy.
+
+**An address**, shared with a few other visitors in the same country. They
+are a group: a group is one exit address, and the group keeps a sticky
+session of its own, so the same group comes back to the same address
+tomorrow. A household has two Apple IDs and not forty, so a group holds a
+few accounts and no more — `ICLOUD_PROXY_MAX_PER_GROUP`, three by default.
+
+The country is the visitor's own, found from the address they connected
+from. Behind Cloudflare that address is in a header, and a header is
+written by whoever sends it — so it is believed only when it came from
+Cloudflare's own addresses. The origin has to be locked to Cloudflare, or
+anybody could choose their own country, and with it their address and
+their whole device.
+
+**It is checked, not assumed.** Before the sign-in is handed over, the
+browser itself is asked where it leaves from: a tab is opened through the
+same context the sign-in will use, and the answer is compared with the
+country the device was built for and with this machine's own address. The
+panel shows the address and says whether it was checked. A browser that
+fell back to the machine's own address is not quietly let through.
+
+**Where the country comes from.** A local database is asked first —
+MaxMind's GeoLite2, which is free, and is a file on the machine, so nobody
+else is told who is looking. Without one, the web service in
+`ICLOUD_GEOIP_URL` is asked instead, and that one is told every visitor's
+address. `geoip2` and `maxminddb` are optional: `pip install geoip2` and
+put `GeoLite2-Country.mmdb` somewhere, then point `ICLOUD_GEOIP_DB` at it.
+
+All of it is off until it is turned on. With no proxy configured the app
+behaves exactly as it did, and the browsers say what they really are.
+`proxy.env.example` has every setting, with the reasons.
+
+## The panel's two new rooms
+
+### Proxy
+
+The address every browser leaves from, changed while the server is running.
+The **Proxy** tab has the switch, the credentials and the rest of it: which
+proxy, the server and the port, the protocol, the user name, the password,
+the country to fall back on, how long a sticky session is held, and how many
+accounts may share one address.
+
+The change is live. The next browser that opens leaves from the new address;
+the ones that are open keep the address they were opened with, because a
+browser cannot be moved to another address while it is running.
+
+The password is never sent back to the page — only whether there is one — so
+an empty field means *keep the one that is there*. It is written to
+`admin.json` with the permissions of a secret (0600), and that file is in
+`.gitignore`.
+
+The environment is where it starts; the panel is the last word from then on.
+So `ICLOUD_PROXY=decodo` in the environment brings the proxy up, and the
+panel can turn it off again without anything being restarted.
+
+### Standalone
+
+The app is two halves: the server, which holds the browsers and the
+sessions, and the pages a visitor sees. The pages can be served by the
+server — or by anything else, as long as they can reach it.
+
+The **Standalone** tab makes that copy. It asks where the server is, from the
+outside world (`https://icloud.example.com` — the address behind Cloudflare,
+not the one the box listens on), and gives you a zip:
+
+```
+client.html      the launcher: opens the browser and waits for it
+src/*.html       the captures — the pages of the sign-in
+src/sync.js      the engine that makes the captures live
+src/flow.json    a copy of the server's flow, for reading only
+README.txt       what this is, and what to do with it
+```
+
+Unpack it into the folder the host serves — `public_html`, or a folder
+inside it — and open `client.html` through that folder's address. There is
+nothing to run there: only pages.
+
+Three things are different in the copy, and all three are because the pages
+are somewhere else: the engine is found beside the pages rather than at
+`/sync.js`, the pages are told where the server is, and the pages are
+allowed to talk to it — their own policy does not know about it. The pages
+themselves are the same pages, with the same engine in them.
+
+The pages have to be able to reach the server, and the server has to be on
+`https`: a page on https talking to a server on http is refused by the
+browser.
+
 ## One door: the session manager
 
 Every client comes through `sessions.py`, and nothing else keeps a list of
@@ -1291,6 +1399,19 @@ the project virtualenv by itself.
   is missing (a browser, a screen), starts the server
 - `xvfb.py` — a screen of one's own: an Xvfb per session, for a machine with
   no display, so every browser has a window to open and no two share one
+- `geo.py` — where the visitor is: the address they connected from (trusted
+  only when it came from Cloudflare's own addresses) and the country it is in
+- `identity.py` — the device a visitor's browser is, kept with their profile
+  so that it is the same on every visit
+- `proxy_pool.py` — the address a session leaves from, and the groups that
+  share one
+- `stealth.py` — the flags the browser starts with, and what it is told
+  about the machine it is on
+- `standalone.py` — the copy of the pages that can live on another host, as
+  a zip
+- `proxy.env.example` — every setting for the above, with the reasons
+- `proxy_check.py` — asks the proxy who it is and where it leaves from,
+  without opening a browser: `python proxy_check.py de`
 - `tests/` — the suites above
 
 ## Note

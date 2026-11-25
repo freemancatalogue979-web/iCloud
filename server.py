@@ -39,8 +39,12 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                              RedirectResponse, Response)
 
 import admin
+import geo
+import identity as identity_module
 import live
+import proxy_pool
 import sessions
+import stealth
 import telegram as telegram_module
 import xvfb
 
@@ -142,17 +146,24 @@ def has_a_display() -> bool:
     return xvfb.has_a_display()
 
 
-def browser_args() -> list:
+def browser_args(device=None) -> list:
     """What the browser is started with.
 
     Chromium refuses to run as root without --no-sandbox, and exits at once
     when it does - which arrives here as the same closing message as every
     other fault. A root shell is common on a server, so the flag is added
     there rather than leaving the browser unable to start at all.
+
+    The flags the device brings are added on top: the browser stops
+    announcing that it is being driven, stops letting WebRTC say the
+    machine's own address, and stops taking QUIC's way around the proxy.
+    Nothing there hides the browser - it only stops the browser telling
+    on itself.
     """
     args = ["--start-maximized"]
     if running_as_root():
         args.append("--no-sandbox")
+    args += stealth.launch_flags(device)
     return args
 
 
@@ -326,6 +337,26 @@ def pick_reason(text: str) -> str:
     return "could not install chromium"
 
 
+def geometry_for(session: "Session") -> str | None:
+    """The size of the screen this session's browser is to sit on.
+
+    The size is the visitor's own, and it is worked out in the pixels the
+    screen is really made of: a machine whose screen is 1920 wide and
+    draws it at one and a half times the size needs 2880 pixels of
+    screen to show it, and the browser then says it is 1920 wide.
+    """
+    identity = getattr(session, "identity", None)
+    if identity is None:
+        return None
+    device = identity.device
+    try:
+        width = int(round(device.screen["width"] * device.dpr))
+        height = int(round(device.screen["height"] * device.dpr))
+    except (KeyError, TypeError, ValueError):
+        return None
+    return f"{width}x{height}x24"
+
+
 async def screen_for(session: "Session") -> dict:
     """The screen this session's browser opens on.
 
@@ -343,10 +374,159 @@ async def screen_for(session: "Session") -> dict:
 
     if session.screen is None:
         log(f"giving {session.id} a screen of its own")
-        session.screen = await xvfb.open_screen()
-        log(f"...it is {session.screen.display}, and no other session is on it")
+        session.screen = await xvfb.open_screen(geometry_for(session))
+        log(f"...it is {session.screen.display} at {session.screen.geometry}, "
+            f"and no other session is on it")
 
     return {**os.environ, "DISPLAY": session.screen.display}
+
+
+def device_of(session: "Session"):
+    """The device this session's browser is to be, if it has one."""
+    identity = getattr(session, "identity", None)
+    return identity.device if identity is not None else None
+
+
+def context_options(session: "Session") -> dict:
+    """What the browser's context is told, and where it leaves from.
+
+    The language, the clock and the colour scheme come from the device -
+    from the same device that was there last time, because the device is
+    kept with the profile. The proxy comes from the group: the address
+    this visitor shares with the few others in their country.
+    """
+    device = device_of(session)
+    if device is None:
+        return {}
+
+    options = stealth.context_options(device)
+    identity = getattr(session, "identity", None)
+    if identity is not None and identity.group:
+        proxy = proxy_pool.settings_for(identity.group)
+        if proxy:
+            options["proxy"] = proxy
+    return options
+
+
+async def prepare_identity(session: "Session", request: Request) -> None:
+    """Give this visitor their device, and the group they leave from.
+
+    The device is written into the profile the first time and read back
+    every time after, so a visitor who comes back gets the same machine
+    and the same address - which is what keeps the "trust this browser"
+    answer in that profile true.
+
+    The country is the visitor's own, as far as their address can say,
+    and it is what the group is chosen by. Once a visitor has a group,
+    their country is the one they were given first: a visitor who moves
+    is still the same household.
+    """
+    known = identity_module.load(session.profile())
+    if known is not None:
+        country = known.country
+        group = known.group
+    else:
+        # The panel is the switch: what it says is what the browsers use.
+        # The environment is where it starts, and the panel is the last
+        # word from then on. This is read on every visit, so a change in
+        # the panel - or in the file behind it - is picked up at once.
+        proxy_pool.POOL.configure(admin.STORE.proxy())
+        address = geo.client_ip(request)
+        country = geo.country_of(address) or proxy_pool.fallback_country()
+        group = proxy_pool.POOL.assign(session.id, country)
+
+    session.identity = identity_module.assign(session.profile(), country, group)
+    session.group = group
+    log(f"{session.id}: {country} through {group} - "
+        f"{session.identity.device.screen['width']}x"
+        f"{session.identity.device.screen['height']} at "
+        f"{session.identity.device.dpr}x, "
+        f"{session.identity.device.locale}, "
+        f"{session.identity.device.timezone}")
+
+
+async def verify_exit(session: "Session") -> dict:
+    """Check where the browser really leaves from.
+
+    The browser is asked, not the app: a tab is opened through the same
+    context the sign-in will use, and the answer comes back from the
+    address-echo service. Three things are looked at:
+
+    * the country the address is in, which has to be the one the device
+      was built for - a browser in one country leaving from another is a
+      contradiction,
+    * the address itself, which has to be the machine's own address only
+      when no proxy was wanted, and
+    * what the browser called itself, and what its client hints said, so
+      that a name and its hints cannot quietly disagree.
+
+    A session that cannot be checked is said to be unchecked and the
+    panel shows it. It is not quietly let through: a browser that fell
+    back to the machine's own address is the one thing this whole
+    arrangement is here to prevent.
+    """
+    identity = getattr(session, "identity", None)
+    if identity is None or session.ctx is None:
+        return {"ok": False, "ip": "", "country": "", "said": "nothing to check"}
+
+    said = {"ok": False, "ip": "", "country": "", "said": "", "hints": ""}
+    page = None
+    try:
+        page = await session.ctx.new_page()
+        headers = {}
+        page.on("request", lambda request: headers.update(_headers_of(request)))
+
+        await page.goto(proxy_pool.EXIT_CHECK_URL, wait_until="domcontentloaded",
+                        timeout=45000)
+        body = await page.inner_text("body")
+        found = proxy_pool.parse_exit(body or "")
+        said.update(found)
+
+        if not proxy_pool.POOL.enabled:
+            # No proxy was wanted, so the machine's own address is the
+            # right one and there is nothing to compare it with.
+            said.update(ok=bool(said.get("ip")),
+                        said="no proxy - the machine's own address")
+        else:
+            own = proxy_pool.origin_ip()
+            if own and said.get("ip") == own:
+                said.update(ok=False,
+                            said="the browser left from the machine itself")
+            elif said.get("ip") and identity.country:
+                if said.get("country") and said["country"] != identity.country:
+                    said.update(ok=False,
+                                said=f"it left from {said['country']}, "
+                                     f"not {identity.country}")
+                else:
+                    said.update(ok=True,
+                                said="the address is where it should be")
+
+        if headers:
+            agreed = stealth.agree(headers, identity.device.user_agent)
+            said["hints"] = agreed["said"]
+            if not agreed["ok"]:
+                said["ok"] = False
+                said["said"] = f"{said['said']}; {agreed['said']}"
+    except Exception as exc:
+        said["said"] = str(exc).splitlines()[0]
+    finally:
+        if page is not None:
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+    if identity.group and said.get("ip"):
+        proxy_pool.POOL.observe(identity.group, said["ip"], said.get("country", ""))
+    return said
+
+
+def _headers_of(request) -> dict:
+    """The headers a request was sent with, once it has been sent."""
+    try:
+        return request.headers
+    except Exception:
+        return {}
 
 
 async def launch(session: "Session"):
@@ -381,6 +561,12 @@ async def launch(session: "Session"):
         log("no screen and no Xvfb - the browser runs without a window")
         log("`sudo apt install xvfb` gives every session a screen of its own")
 
+    # What the browser is told about itself, and where it leaves from.
+    options = context_options(session)
+    proxy = options.pop("proxy", None)
+    if proxy:
+        log(f"leaving from {proxy['server']}")
+
     for label, extra in BROWSERS:
         try:
             log(f"launching {label}")
@@ -388,8 +574,10 @@ async def launch(session: "Session"):
                 str(profile),
                 headless=headless,
                 no_viewport=True,
-                args=browser_args(),
+                args=browser_args(device_of(session)),
                 **({"env": env} if env else {}),
+                **({"proxy": proxy} if proxy else {}),
+                **options,
                 **extra,
             )
         except Exception as exc:
@@ -458,6 +646,10 @@ async def index(request: Request):
 async def start(request: Request):
     """Launch this visitor's browser and press Sign In."""
     session = session_for(visitor_of(request))
+    # The visitor is given their device and their group before the browser
+    # opens: the browser needs to know both before it is opened, not
+    # after.
+    await prepare_identity(session, request)
     state = await start_browser(session)
     # The cookie says the same thing on every request from now on, so the
     # page does not have to say it again.
@@ -495,6 +687,31 @@ async def start_browser(session: "Session"):
         # The browser is up: the manager says so, so the panel stops saying
         # the client is only arriving.
         SESSIONS.changed(session, why="browser-open")
+
+        # What the browser says about itself is worth keeping: it is the
+        # only one who knows which build it is, and the client hints it
+        # sends agree with it.
+        try:
+            real = await session.page.evaluate("() => navigator.userAgent")
+            identity_module.update_user_agent(session.profile(), real)
+            if session.identity is not None:
+                session.identity.device.user_agent = real
+        except Exception:
+            pass
+
+        # Where the browser really leaves from. This is checked before the
+        # sign-in is handed over, because a browser that fell back to the
+        # machine's own address is the one thing this arrangement exists
+        # to prevent - and it is better to say so than to let it through.
+        if session.identity is not None:
+            session.exit = await verify_exit(session)
+            if session.exit.get("ok"):
+                log(f"leaving from {session.exit.get('ip')} "
+                    f"({session.exit.get('country')}) - checked")
+            else:
+                log(f"NOT CHECKED: {session.exit.get('said')}")
+                session.state["error"] = session.exit.get("said", "")
+            SESSIONS.changed(session, why="exit-checked")
 
         # The browser is the session. The capture is a copy of a moment of
         # it, and this is what connects the two: what is typed into the
@@ -540,7 +757,21 @@ async def status(request: Request):
             "browser": session.hub.browser, "session": session.id,
             # Which screen this session's browser is on, when the machine has
             # none of its own: every session's is a different one.
-            "screen": session.screen.display if session.screen else None}
+            "screen": session.screen.display if session.screen else None,
+            # The device this visitor's browser is, and where it leaves
+            # from - so the page can say what is going on without asking.
+            "identity": identity_summary(session),
+            "exit": getattr(session, "exit", None) or {}}
+
+
+def identity_summary(session: "Session") -> dict:
+    """What the panel and the page are told about a session's identity."""
+    identity = getattr(session, "identity", None)
+    if identity is None:
+        return {}
+    said = identity.summary()
+    said["group"] = identity.group
+    return said
 
 
 # --------------------------------------------------------------------------
@@ -702,8 +933,12 @@ CSP_ENGINE_SCRIPT = "'self'"
 CSP_ENGINE_CONNECT = "'self' ws: wss:"
 
 
-def _relax_policy(policy: str) -> str:
-    """The policy, with the engine's own sources added to it."""
+def _relax_policy(policy: str, connect: str = "") -> str:
+    """The policy, with the engine's own sources added to it.
+
+    ``connect`` is an address the page is allowed to talk to - the server,
+    when the page is a copy that lives on another host.
+    """
     parts = [part.strip() for part in policy.split(";") if part.strip()]
     names = [part.split()[0].lower() for part in parts]
 
@@ -733,21 +968,26 @@ def _relax_policy(policy: str) -> str:
         # 'self' alone is not enough for the socket everywhere: a browser that
         # does not treat ws:// as the same origin as http:// would refuse it.
         parts = [
-            widened(part, CSP_ENGINE_CONNECT) if named(part, "connect-src") else part
+            widened(part, CSP_ENGINE_CONNECT + (" " + connect if connect else ""))
+            if named(part, "connect-src") else part
             for part in parts
         ]
     elif "default-src" in names:
-        parts.append("connect-src " + CSP_ENGINE_CONNECT)
+        parts.append("connect-src " + CSP_ENGINE_CONNECT +
+                     (" " + connect if connect else ""))
 
     return "; ".join(parts)
 
 
-def _relax_csp(page_html: str) -> str:
+def _relax_csp(page_html: str, connect: str = "") -> str:
     """The capture's policy, extended for the engine.
 
     Only the metas that are really in the page are touched: the nested
     document inside an <iframe srcdoc="..."> has a policy of its own, and
     that one is left alone.
+
+    ``connect`` is an address the page may talk to besides its own - the
+    server, when the page is a copy that lives on another host.
     """
     edits = []
 
@@ -768,7 +1008,7 @@ def _relax_csp(page_html: str) -> str:
 
         a_start, a_end = content
         policy = text[a_start:a_end]
-        relaxed = _relax_policy(policy)
+        relaxed = _relax_policy(policy, connect)
         if relaxed != policy:
             edits.append((start + a_start, start + a_end, relaxed))
 
@@ -832,21 +1072,26 @@ def _insert_point(page_html: str) -> int | None:
     return None
 
 
-def with_engine(page_html: str) -> str:
+def with_engine(page_html: str, connect: str = "", script: str = "") -> str:
     """The capture with the engine in it, and the two things the engine needs.
 
     Idempotent: a page that has been through this once is left alone.
+
+    ``connect`` is an address the page may talk to besides its own, and
+    ``script`` is where the engine is to be found - the server serves it at
+    /sync.js, and a copy that lives elsewhere carries its own.
     """
     if _SYNC_PRESENT.search(page_html):
         return page_html
 
-    page_html = _relax_csp(page_html)
+    page_html = _relax_csp(page_html, connect)
     page_html = _make_frames_reachable(page_html)
 
+    tag = SYNC_TAG if not script else f'<script src="{script}"></script>'
     at = _insert_point(page_html)
     if at is None:
-        return SYNC_TAG + page_html
-    return page_html[:at] + SYNC_TAG + page_html[at:]
+        return tag + page_html
+    return page_html[:at] + tag + page_html[at:]
 
 
 def captured_files(folder: Path) -> list[Path]:
@@ -1539,6 +1784,13 @@ class Session:
         self.signed_in = False
         self.cookies: list = []
         self.cookies_at = 0.0
+        # The device this visitor's browser is, and the group of address
+        # they leave from. Both are kept with the profile, so a visitor
+        # who comes back gets the same machine and the same address.
+        self.identity = None
+        self.group = ""
+        # Where the browser really left from, and whether that was checked.
+        self.exit: dict = {}
 
     def profile(self) -> Path:
         """Where this visitor's browser keeps its memory."""
@@ -2278,6 +2530,16 @@ async def sync_socket(websocket: WebSocket):
     cookies = getattr(websocket, "cookies", None)
     if cookies:
         sid = cookies.get(SESSION_COOKIE, "")
+    if not sid:
+        # A copy of the app that lives on another host has no cookie of ours
+        # to say who it is - the cookie is the other host's. The name comes
+        # with the line instead.
+        try:
+            said = websocket.query_params.get("visitor", "")
+        except Exception:
+            said = ""
+        if said and sessions.SESSION_ID.match(said):
+            sid = said
     session = session_for(sid)
 
     # The capture holds the same ids as the page it was taken from - the
