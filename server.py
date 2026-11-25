@@ -825,6 +825,7 @@ async def start(request: Request):
         log(f"not opening a browser: {said}")
         session.state.update(status="error", error=said)
         SESSIONS.failed(session, said)
+        session.hub.tell_state()
         return JSONResponse(session.state,
                             headers={"Set-Cookie": session_cookie(session.id)})
 
@@ -985,6 +986,7 @@ async def start_browser(session: "Session"):
                 session.page = None
                 session.state["browser_open"] = False
                 SESSIONS.failed(session, session.state["error"])
+                session.hub.tell_state()
                 return session.state
 
         # The browser is the session. The capture is a copy of a moment of
@@ -1005,12 +1007,14 @@ async def start_browser(session: "Session"):
 
         session.state["status"] = "done"
         log("done - sign in yourself in the browser window")
+        session.hub.tell_state()
 
     except Exception as exc:
         session.state["status"] = "error"
         session.state["error"] = str(exc).splitlines()[0]
         log(f"FAILED: {session.state['error']}")
         SESSIONS.failed(session, session.state["error"])
+        session.hub.tell_state()
 
     return session.state
 
@@ -1661,11 +1665,42 @@ class Hub:
         # Where the browser is, so a viewer that joins late is looking at the
         # same session the others are.
         viewer.send({"t": "browser", **self.browser})
+        # And what this session is doing, so a page that has just arrived
+        # knows where it stands without having to ask.
+        viewer.send(self.session_state())
         # Somebody is here now, and the manager says so. The panel is a
         # subscriber, so it hears it from the manager rather than being
         # poked from inside the hub.
         if self.session is not None:
             SESSIONS.changed(self.session, why="presence")
+
+    def session_state(self) -> dict:
+        """What this session is doing, in one message.
+
+        The launcher is one of the pages that waits: it stands on a black
+        screen until the browser is ready, and then goes to the capture.
+        It used to ask the server what was happening every quarter of a
+        second - four requests a second, for as long as the browser took
+        to open, through a tunnel that has to hold every one of them
+        open. Now it is told, over the line the captures already use.
+        """
+        state = {}
+        if self.session is not None:
+            state = self.session.state or {}
+        return {"t": "session",
+                "status": str(state.get("status") or "idle"),
+                "error": str(state.get("error") or ""),
+                "page": self.page}
+
+    def tell_state(self) -> None:
+        """Tell the pages watching what this session is doing.
+
+        The same message a page gets when it arrives, so a page that is
+        already here is told the same thing.
+        """
+        if self.session is None:
+            return
+        self.broadcast(self.session_state())
 
     def leave(self, viewer: Viewer) -> None:
         self.viewers.discard(viewer)

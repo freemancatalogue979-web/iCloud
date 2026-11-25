@@ -771,6 +771,7 @@ async def main():
     server.SRC = Path(tempfile.mkdtemp()).resolve()
     session = server.session_for('the-tests')
     session.hub = server.Hub()
+    session.hub.session = session
     form = FakeFrame(
         ids=["account_name_text_field", "sign-in"],
         fields={"account_name_text_field": ""},

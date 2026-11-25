@@ -499,12 +499,19 @@ carry. A static file cannot be addressed wrongly.
 There is no iframe. `/` is a splash screen and nothing else: a black screen
 with the Apple mark breathing on it. No caption, no spinner, no links, no
 "opening this / doing that". It opens the browser (`/start`) and, as soon as
-`/status` answers `done` — the moment Sign In has been clicked — it replaces
-itself with the captured page:
+the server says the browser is ready — the moment Sign In has been clicked —
+it replaces itself with the captured page:
 
 ```js
 location.replace("/src/1.html")
 ```
+
+**The splash is told, and it does not ask.** It used to ask `/status` four
+times a second, for as long as the browser took to open, through a tunnel
+that has to hold every one of those requests open — and tunnels drop. Now
+the splash takes the same line the captures take: one socket, kept open, and
+the server says what the session is doing. The old way is still there, for
+when the line cannot be opened at all, and then it asks once a second.
 
 After that the capture is the *top-level document*. It is laid out at the
 window's width, with its own scrollbars, fonts and title, instead of being a
@@ -1387,10 +1394,12 @@ npm test
 
 Nine suites:
 
-- `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status`. It
-  pins the splash: the screen is only the mark — no text, no buttons, nothing
-  that pops up — it navigates only once the run is over, it navigates on a
-  failed launch too, and it stops polling after it goes.
+- `test-launcher.js` runs `client.html` in jsdom with a stubbed `/status` and
+  a stubbed line. It pins the splash: the screen is only the mark — no text,
+  no buttons, nothing that pops up — it takes a line to the server rather
+  than asking over http, it goes when the server says the browser is ready,
+  it goes on a failed launch too, and it asks the old way only when the line
+  cannot be opened.
 - `test-sync.js` runs `sync.js` in jsdom with a stubbed WebSocket. It pins the
   protocol: typing is not sent mid-word, an unchanged field is not sent again,
   a checkbox carries its state, a click carries its position, a remote value

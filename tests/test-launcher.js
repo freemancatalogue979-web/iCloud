@@ -26,7 +26,33 @@ function check(name, cond, detail) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function launch(statuses, url, seed, answers) {
+/* A line to the server, in place of the real one.
+ *
+ * It says when it has opened, and it holds what the server says, so that
+ * a test can tell the launcher something.
+ */
+function fakeLine() {
+  const made = [];
+  function Fake(url) {
+    this.url = String(url);
+    this.readyState = 0;
+    this.sent = [];
+    made.push(this);
+    setTimeout(() => {
+      this.readyState = 1;
+      if (this.onopen) this.onopen({});
+    }, 10);
+  }
+  Fake.made = made;
+  Fake.tell = function (message) {
+    made.forEach((one) => {
+      if (one.onmessage) one.onmessage({ data: JSON.stringify(message) });
+    });
+  };
+  return Fake;
+}
+
+function launch(statuses, url, seed, answers, socket) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
@@ -39,6 +65,7 @@ function launch(statuses, url, seed, answers) {
     runScripts: "dangerously",
     virtualConsole,
     beforeParse(window) {
+      if (socket) window.WebSocket = socket;
       // Some of the tests need to say where the copy is, as a browser that
       // has been here before would have it remembered.
       if (seed) {
@@ -89,7 +116,8 @@ function visibleText(doc) {
   // ---- the splash is only the mark --------------------------------------
   const running = { status: "running", browser_open: false, page: "/src/1.html" };
   const done = { status: "done", browser_open: true, page: "/src/1.html" };
-  const ok = launch([running, running, done]);
+  const Line = fakeLine();
+  const ok = launch([running, running, done], undefined, undefined, undefined, Line);
 
   await sleep(100);
   const doc = ok.dom.window.document;
@@ -103,41 +131,68 @@ function visibleText(doc) {
   check("the page carries the standard web-app meta",
     !!doc.querySelector('meta[name="mobile-web-app-capable"]'));
 
-  // ---- and it says who the visitor is, every time ----------------------
+  // ---- and it says who the visitor is -----------------------------------
   // A copy of this page that lives on another host has no cookie of the
   // server's to say who it is, so the name goes in the address of every
   // request - not only the first one.
   const asked = ok.asked();
   check("the browser is asked to open, with the visitor's name",
     asked.some((url) => url.indexOf("/start?visitor=") === 0), asked);
-  check("and every request after that says who it is too",
-    asked.filter((url) => url.indexOf("/status") === 0)
-      .every((url) => /[?&]visitor=/.test(url)), asked);
   check("nothing has happened before Sign In is clicked",
     navigations(ok.errors).length === 0, ok.errors);
 
+  // ---- and it takes a line to the server, rather than asking ------------
+  // Four requests a second, for as long as the browser takes to open, is
+  // a lot to ask of a tunnel. So the launcher takes the line the captures
+  // take, and the server tells it what is happening.
+  check("the launcher takes a line to the server",
+    Line.made.length === 1 && Line.made[0].url.indexOf("/ws?visitor=") > 0,
+    Line.made.map((one) => one.url));
+  check("...and nothing is asked over http while the line is up",
+    asked.filter((url) => url.indexOf("/status") === 0).length === 0, asked);
+
   // ---- and then it goes -------------------------------------------------
-  await sleep(800);
-  check("it goes straight to the capture once Sign In has been clicked",
-    navigations(ok.errors).length === 1, ok.errors);
+  Line.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(100);
+  check("it goes straight to the capture when the server says the browser "
+    + "is ready", navigations(ok.errors).length === 1, ok.errors);
 
   const pollsWhenGone = ok.polls();
   await sleep(600);
-  check("it stops polling after it has gone",
+  check("it stops asking after it has gone",
     ok.polls() === pollsWhenGone, pollsWhenGone + " -> " + ok.polls());
 
+  // ---- and with no line, it asks the old way ----------------------------
+  // A server that cannot be reached over the line is still a server: the
+  // launcher asks it, once a second, rather than four times.
+  const noLine = launch([done]);
+  await sleep(1300);
+  check("with no line, the launcher asks the server the old way",
+    noLine.asked().some((url) => url.indexOf("/status?visitor=") === 0),
+    noLine.asked());
+  check("...and says who the visitor is with it",
+    noLine.asked().filter((url) => url.indexOf("/status") === 0)
+      .every((url) => /[?&]visitor=/.test(url)), noLine.asked());
+  check("...and goes when the server says the browser is ready",
+    navigations(noLine.errors).length === 1, noLine.errors);
+
   // ---- the browser will not open ---------------------------------------
+  const Broken = fakeLine();
   const broken = launch([
     { status: "error", error: "no display", browser_open: false, page: "/src/1.html" },
-  ]);
+  ], undefined, undefined, undefined, Broken);
 
-  await sleep(150);
+  await sleep(100);
+  Broken.tell({ t: "session", status: "error", error: "no display",
+                page: "/src/1.html" });
+  await sleep(100);
   check("a browser that will not open still opens the capture",
     navigations(broken.errors).length === 1, broken.errors);
   check("and still shows nothing on the way",
     visibleText(broken.dom.window.document) === "",
     JSON.stringify(visibleText(broken.dom.window.document)));
-  check("a failed launch stops polling", broken.polls() === 1, broken.polls());
+  check("a failed launch asks nothing over http", broken.polls() === 0,
+    broken.polls());
 
   // ---- and the question asked before the browser opens ------------------
   // The page asks the server what the question is when it loads - the
@@ -246,8 +301,12 @@ function visibleText(doc) {
   // A page that sends itself to itself goes for ever: the browser runs it
   // again, it asks again, and the visitor watches a page reload without
   // end. So the page this one is on is never asked for.
-  const onIt = launch([done], "http://localhost:9002/src/1.html", "/");
-  await sleep(400);
+  const OnIt = fakeLine();
+  const onIt = launch([done], "http://localhost:9002/src/1.html", "/",
+                      undefined, OnIt);
+  await sleep(100);
+  OnIt.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
   check("a page that is on the page it is asked for does not move",
     navigations(onIt.errors).length === 0, onIt.errors);
 
