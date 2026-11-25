@@ -133,7 +133,37 @@ class Pool:
     (a server, a user and a password, said as they are).
     """
 
-    def __init__(self):
+    def __init__(self, settings: dict | None = None):
+        """The pool the app uses, or a pool made of settings for a test.
+
+        With no settings it comes from the environment: that is where it
+        starts. With settings it is made of them, and nothing is kept -
+        which is how a proxy can be tried before it is turned on.
+        """
+        self.kind = "none"
+        self.server = ""
+        self.scheme = "socks5"
+        self.user = ""
+        self.trimmed = False
+        self.password = ""
+        self.country = "US"
+        self.session_minutes = 120
+        self.sticky = "session"
+        self.groups_per_country = 8
+        self.max_per_group = 3
+        self.enabled = False
+        self._state = None
+
+        if isinstance(settings, dict) and settings:
+            self.configure(settings)
+            # A pool made for a test is asked whether it can be used, not
+            # whether it has been switched on.
+            self.enabled = self.usable()
+        else:
+            self._from_environment()
+
+    def _from_environment(self) -> None:
+        """Take the proxy from the environment, where it starts."""
         self.kind = (_env("ICLOUD_PROXY", "none") or "none").lower()
         self.server = _env("ICLOUD_PROXY_SERVER") or (
             DECODO_SERVER if self.kind == "decodo" else "")
@@ -152,8 +182,25 @@ class Pool:
         self.max_per_group = _number("ICLOUD_PROXY_MAX_PER_GROUP", 3)
         # Whether the browsers leave through it at all. The environment says
         # where it starts; the panel is the switch from then on.
-        self.enabled = self.kind in ("decodo", "generic") and bool(self.server)
-        self._state = None
+        self.enabled = self.usable()
+
+    def usable(self) -> bool:
+        """Is there enough here to connect to?
+
+        A proxy with no address, or no name, or no password cannot be
+        connected to - and a panel that says "it is off" without saying
+        which of these is missing is a panel that makes the operator
+        guess.
+        """
+        if self.kind not in ("decodo", "generic"):
+            return False
+        if not self.server:
+            return False
+        if not self.user:
+            return False
+        if self.kind == "decodo" and not self.password:
+            return False
+        return True
 
     # -- what the app is allowed to do ---------------------------------
 
@@ -196,9 +243,7 @@ class Pool:
 
         wanted = settings.get("enabled")
         if wanted is not None:
-            self.enabled = (bool(wanted)
-                            and self.kind in ("decodo", "generic")
-                            and bool(self.server))
+            self.enabled = bool(wanted) and self.usable()
         # The groups are read again: a different country, or a different
         # number of accounts to an address, makes a different map.
         self._state = None
@@ -310,7 +355,8 @@ class Pool:
 
     # -- the connection -------------------------------------------------
 
-    def settings(self, group_id: str, country: str = "") -> dict | None:
+    def settings(self, group_id: str, country: str = "",
+                 force: bool = False) -> dict | None:
         """The proxy settings Playwright wants, for a group.
 
         ``None`` means no proxy: the app talks to the internet itself.
@@ -318,7 +364,7 @@ class Pool:
         ``country`` says which country the address is to be in. Left out,
         the country the group was made for is used.
         """
-        if not self.enabled:
+        if not self.enabled and not force:
             return None
         group = self.group(group_id)
         session = str(group.get("session") or group_id)
@@ -337,7 +383,8 @@ class Pool:
             server += f":{port}"
         return {"server": server, "username": user, "password": self.password}
 
-    def check(self, group_id: str, country: str = "") -> dict:
+    def check(self, group_id: str, country: str = "",
+              force: bool = False) -> dict:
         """Ask the provider what address this group is leaving from.
 
         This is a quick check made from the machine, before the browser is
@@ -345,7 +392,7 @@ class Pool:
         is here to say whether the address is there at all before a
         session is started on it.
         """
-        settings = self.settings(group_id, country=country)
+        settings = self.settings(group_id, country=country, force=force)
         if not settings or not shutil.which("curl"):
             return {"ok": False, "ip": "", "country": "", "said": "no way to ask"}
 
@@ -455,6 +502,24 @@ def origin_ip() -> str:
         return ""
     _own_address = parse_exit(body).get("ip", "")
     return _own_address
+
+
+def missing(pool) -> list:
+    """What a proxy needs and does not have.
+
+    Said as words the panel can put in a sentence, because "it is off" on
+    its own is the operator guessing.
+    """
+    said = []
+    if pool.kind not in ("decodo", "generic"):
+        said.append("which proxy it is")
+    if not pool.server:
+        said.append("the server and port")
+    if not pool.user:
+        said.append("the user name")
+    if pool.kind == "decodo" and not pool.password:
+        said.append("the password")
+    return said
 
 
 def settings_for(group_id: str) -> dict | None:

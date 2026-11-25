@@ -556,6 +556,12 @@
             <input type="checkbox" id="px-enabled">
             Send every browser out through the proxy
           </label>
+          <p class="note" style="margin-top:8px">
+            Fill the rest in, test it, and then turn this on. The browsers
+            that open after this are turned on will leave from the proxy;
+            the ones that are open now keep the address they were opened
+            with.
+          </p>
           <label class="field">
             <span>Which proxy</span>
             <select id="px-kind">
@@ -596,7 +602,8 @@
           </label>
           <div class="row" style="margin-top:18px">
             <button class="action shrink" id="px-save">Save</button>
-            <button class="action ghost shrink" id="px-test">Check the address</button>
+            <button class="action ghost shrink" id="px-test"
+                    title="Ask the proxy who it is, without turning it on and without changing anything">Test the proxy</button>
           </div>
           <div class="note" id="px-note"></div>
         </div>
@@ -1401,13 +1408,21 @@
       // page is never sent the password, so it cannot send one back.
       if ($("px-pass").value.trim()) body.password = $("px-pass").value.trim();
       var settings = await api("/proxy", { method: "POST", body: body });
-      $("px-pass").value = "";
-      said.className = "note good";
-      said.textContent = settings.enabled
-        ? "Saved. The next browser that opens leaves from the proxy."
-        : "Saved. The browsers are leaving from this machine\u2019s own address.";
       proxyLoaded = false;
       loadProxy();
+      if (settings.enabled) {
+        said.className = "note good";
+        said.textContent = "Saved. The next browser that opens leaves from the proxy.";
+      } else if (settings.missing && settings.missing.length) {
+        said.className = "note bad";
+        said.textContent = "Saved, but the browsers are still leaving from this " +
+          "machine\u2019s own address: it needs " +
+          settings.missing.join(", ") + ".";
+      } else {
+        said.className = "note";
+        said.textContent = "Saved. The switch is off, so the browsers are leaving " +
+          "from this machine\u2019s own address.";
+      }
     } catch (err) {
       said.className = "note bad";
       said.textContent = err.message;
@@ -1417,20 +1432,30 @@
   $("px-test").addEventListener("click", async function () {
     var said = $("px-note");
     said.className = "note";
-    said.textContent = "Asking\u2026";
+    said.textContent = "Asking the proxy\u2026";
     try {
-      var answer = await api("/proxy/test", {
-        method: "POST",
-        body: { country: $("px-country").value.trim().toUpperCase() || "US" },
-      });
+      // What is in the page is tried, not what is saved: a proxy is meant
+      // to be tried before it is turned on. Nothing is changed by a test.
+      var body = {
+        kind: $("px-kind").value,
+        server: $("px-server").value.trim(),
+        scheme: $("px-scheme").value,
+        username: $("px-user").value.trim(),
+        country: $("px-country").value.trim().toUpperCase() || "US",
+        session_minutes: parseInt($("px-minutes").value, 10) || 120,
+        max_per_group: parseInt($("px-max").value, 10) || 3,
+      };
+      if ($("px-pass").value.trim()) body.password = $("px-pass").value.trim();
+      var answer = await api("/proxy/test", { method: "POST", body: body });
       if (!answer.ok) {
         said.className = "note bad";
-        said.textContent = answer.said || "it did not answer";
+        said.textContent = answer.reason || answer.said || "it did not answer";
         return;
       }
       said.className = "note good";
       said.textContent = "It leaves from " + answer.ip +
-        (answer.country ? " (" + answer.country + ")" : "");
+        (answer.country ? " (" + answer.country + ")" : "") +
+        ". Now turn the switch on and save.";
     } catch (err) {
       said.className = "note bad";
       said.textContent = err.message;

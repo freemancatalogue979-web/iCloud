@@ -6,6 +6,11 @@ here is the panel's own rules:
   * the proxy can be changed and turned off while the server is running,
     and the change is live - the pool the browsers use is changed there
     and then, not at the next restart;
+  * a proxy that cannot be used is not switched on, and the panel is told
+    exactly which piece of it is missing, because "it is off" on its own
+    leaves the operator guessing;
+  * a test tries what is in the page - not what is saved, and not a proxy
+    that has already been turned on - and a test changes nothing;
   * the password is never sent back to the page, so an empty field means
     "keep the one that is there"; and
   * the standalone copy is a zip, and it has the server's address in it.
@@ -90,21 +95,26 @@ def as_json(answer):
 
 async def main():
     scratch = Path(tempfile.mkdtemp(prefix="icloud-panel-"))
-    admin.STORE = admin.Store(scratch / "panel.json")
-    admin.STORE.set_token("the-secret")
     cookie = {"icloud_admin": "the-secret"}
+
+    def fresh(name):
+        """A panel with nothing saved in it."""
+        admin.STORE = admin.Store(scratch / name)
+        admin.STORE.set_token("the-secret")
+        return admin.STORE
 
     # The pool starts with whatever the environment said. The panel is the
     # switch from then on.
     proxy_pool.POOL.configure({})
     proxy_pool.POOL.enabled = False
 
-    # -- without the secret, nothing is said ---------------------------
+    # ---- a proxy with nothing in it --------------------------------------
+    fresh("empty.json")
+
     answer = await endpoint("/admin/api/proxy")(make_request())
     check("the proxy is for the admin only",
           getattr(answer, "status_code", 200) == 403, answer)
 
-    # -- and what it is now --------------------------------------------
     answer = await endpoint("/admin/api/proxy")(make_request(cookies=cookie))
     said = as_json(answer)
     check("the panel is told whether the proxy is on",
@@ -119,7 +129,40 @@ async def main():
     check("...but the panel is told there is one",
           said.get("password_set") is False, said)
 
-    # -- turning it on, with a password --------------------------------
+    # Turning the switch on with nothing to turn it on to is not an error
+    # - it is a proxy that cannot be used, and the panel says which piece
+    # of it is missing.
+    answer = await endpoint("/admin/api/proxy", "POST")(
+        make_request("POST", "/admin/api/proxy", {
+            "enabled": True, "kind": "decodo",
+        }, cookies=cookie))
+    said = as_json(answer)
+    check("a proxy that cannot be used is not switched on",
+          said.get("enabled") is False, said)
+    check("...and the panel is told what it is missing",
+          "the server and port" in (said.get("missing") or []),
+          said.get("missing"))
+    check("...and the user name too",
+          "the user name" in (said.get("missing") or []), said.get("missing"))
+    check("...and the password",
+          "the password" in (said.get("missing") or []), said.get("missing"))
+
+    # ---- and a test says the same, before anything is saved --------------
+    answer = await endpoint("/admin/api/proxy/test", "POST")(
+        make_request("POST", "/admin/api/proxy/test", {"kind": "decodo"},
+                     cookies=cookie))
+    said = as_json(answer)
+    check("a test with nothing in it says what is missing",
+          not said.get("ok") and said.get("missing"), said)
+    check("...in words the operator can read",
+          "the server and port" in (said.get("reason") or ""),
+          said.get("reason"))
+    check("a test does not save anything",
+          admin.STORE.proxy().get("server") == "", admin.STORE.proxy())
+
+    # ---- and now the panel that has the proxy in it -----------------------
+    fresh("panel.json")
+
     answer = await endpoint("/admin/api/proxy", "POST")(
         make_request("POST", "/admin/api/proxy", {
             "enabled": True,
@@ -134,6 +177,7 @@ async def main():
         }, cookies=cookie))
     said = as_json(answer)
     check("the proxy is on", said.get("enabled") is True, said)
+    check("...and nothing is missing", said.get("missing") == [], said.get("missing"))
     check("...and the change is live, not at the next restart",
           proxy_pool.POOL.enabled is True)
     check("...the pool has the new address",
@@ -149,7 +193,7 @@ async def main():
     check("...and how many accounts to an address",
           proxy_pool.POOL.max_per_group == 2, proxy_pool.POOL.max_per_group)
 
-    # -- and the name it builds with it ---------------------------------
+    # ---- the name it builds -----------------------------------------------
     settings = proxy_pool.POOL.settings("us-0")
     check("the name it builds is the provider's own shape",
           settings["username"] == "user-alice-session-us-0"
@@ -159,7 +203,7 @@ async def main():
           settings["server"] == "socks5://gate.decodo.com:7000",
           settings["server"])
 
-    # -- an empty password keeps the one that is there ------------------
+    # ---- an empty password keeps the one that is there --------------------
     answer = await endpoint("/admin/api/proxy", "POST")(
         make_request("POST", "/admin/api/proxy", {
             "enabled": True, "password": "",
@@ -170,7 +214,7 @@ async def main():
     check("...and the panel is told there is one",
           as_json(answer).get("password_set") is True, as_json(answer))
 
-    # -- turning it off -------------------------------------------------
+    # ---- turning it off ----------------------------------------------------
     answer = await endpoint("/admin/api/proxy", "POST")(
         make_request("POST", "/admin/api/proxy", {"enabled": False},
                      cookies=cookie))
@@ -181,7 +225,7 @@ async def main():
     check("...so there is no address to give them",
           proxy_pool.POOL.settings("us-0") is None)
 
-    # -- and it is kept -------------------------------------------------
+    # ---- and it is kept ----------------------------------------------------
     check("it is kept in the file the panel keeps",
           admin.STORE.proxy().get("username") == "user-alice",
           admin.STORE.proxy())
@@ -191,7 +235,24 @@ async def main():
           oct((scratch / "panel.json").stat().st_mode)[-3:] == "600",
           oct((scratch / "panel.json").stat().st_mode))
 
-    # -- the standalone copy --------------------------------------------
+    # ---- a test does not need the proxy to be on ---------------------------
+    # The switch is off, and a test still goes out: a proxy is meant to be
+    # tried before it is turned on.
+    proxy_pool.POOL.enabled = False
+    answer = await endpoint("/admin/api/proxy/test", "POST")(
+        make_request("POST", "/admin/api/proxy/test", {
+            "kind": "decodo", "server": "gate.decodo.com:7000",
+            "username": "alice", "password": "the-secret-password",
+            "country": "US",
+        }, cookies=cookie))
+    said = as_json(answer)
+    check("a test answers while the proxy is still off",
+          "ok" in said and not said.get("missing"), said)
+    check("...and nothing was changed by it",
+          admin.STORE.proxy().get("enabled") is False, admin.STORE.proxy())
+    proxy_pool.POOL.enabled = True
+
+    # ---- the standalone copy ----------------------------------------------
     answer = await endpoint("/admin/api/standalone")(make_request(cookies=cookie))
     said = as_json(answer)
     check("the panel is told where the server is",

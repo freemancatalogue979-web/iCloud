@@ -944,6 +944,38 @@ def server_url(request) -> str:
         return ""
 
 
+def _proxy_preview(store: Store, body: dict) -> dict:
+    """The settings a test would use: what was given, over what is saved.
+
+    A field left empty keeps the value that is already there - the
+    password especially, which the page is never sent and so can never
+    send back.
+    """
+    current = store.proxy()
+    given = body if isinstance(body, dict) else {}
+    preview = dict(current)
+
+    for name in ("kind", "server", "scheme", "username", "country", "sticky"):
+        value = given.get(name)
+        if isinstance(value, str) and value.strip():
+            preview[name] = value.strip()
+
+    password = given.get("password")
+    if isinstance(password, str) and password:
+        preview["password"] = password
+
+    for name in ("session_minutes", "max_per_group"):
+        try:
+            preview[name] = int(given.get(name))
+        except (TypeError, ValueError):
+            pass
+
+    # The password that is saved is used when the page has none to give.
+    if not preview.get("password"):
+        preview["password"] = current.get("password", "")
+    return preview
+
+
 def proxy_view(pool, store: Store) -> dict:
     """What the panel is told about the proxy.
 
@@ -963,6 +995,9 @@ def proxy_view(pool, store: Store) -> dict:
         "sticky": pool.sticky,
         "max_per_group": pool.max_per_group,
         "from_store": bool(store.proxy()),
+        # What a proxy needs and does not have. Said out loud, because
+        # "it is off" on its own leaves the operator guessing.
+        "missing": proxy_pool.missing(pool),
     }
 
 
@@ -1173,14 +1208,28 @@ def build_router() -> APIRouter:
 
     @router.post("/api/proxy/test")
     async def proxy_test(request: Request):
-        """Ask the proxy who it is, from the machine."""
+        """Ask the proxy who it is, from the machine.
+
+        The values in the page are tried, not the ones that are saved: a
+        proxy is meant to be tried before it is turned on, and a test that
+        only worked with the proxy already on would be no use at all.
+        Nothing is kept - a test does not change anything.
+        """
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
         body = await _body(request)
-        country = str(body.get("country") or proxy_pool.POOL.country).upper()
-        group = str(body.get("group") or f"{country.lower()}-0")
-        said = proxy_pool.POOL.check(group, country=country)
+        trial = proxy_pool.Pool(_proxy_preview(store, body))
+
+        absent = proxy_pool.missing(trial)
+        if absent:
+            return {"ok": False, "ip": "", "country": "", "said": "",
+                    "missing": absent,
+                    "reason": "it needs " + ", ".join(absent)}
+
+        country = str(trial.country or "US").upper()
+        group = f"{country.lower()}-0"
+        said = trial.check(group, country=country, force=True)
         if said.get("ok"):
             note(f"the proxy answered: {said.get('ip')}")
         return said
