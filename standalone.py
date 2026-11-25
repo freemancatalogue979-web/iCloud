@@ -32,6 +32,13 @@ SRC = HERE / "src"
 CLIENT = HERE / "client.html"
 ENGINE = HERE / "sync.js"
 
+# The Worker that serves the copy on a Cloudflare Worker, and the settings
+# it is served with. They go into the zip so that the copy can be put on a
+# Worker without being written out by hand - and so that the one setting
+# that matters, the one that must not be a single-page fallback, is written
+# down rather than remembered.
+WORKER = HERE / "worker"
+
 # The name the page carries in the server's own naming. A copy that lives in
 # a folder is still this page, as far as the server is concerned.
 SERVER_TAG = '<meta name="icloud-server" content="{server}">'
@@ -55,18 +62,58 @@ What is in it
 -------------
 
   client.html      the launcher: opens the browser and waits for it
+  index.html       the same launcher, under the name most hosts serve a
+                   folder's root by
   src/*.html       the captures - the pages of the sign-in
   src/sync.js      the engine that makes the captures live
   src/flow.json    a copy of the server's flow, for reading only - the
                    pages do not use it
+  worker.js        a Cloudflare Worker that serves this copy
+  wrangler.toml    the settings that Worker is served with
 
 How to put it somewhere
 -----------------------
 
+Any static host - a cPanel, a bucket, a CDN:
+
 1. Unpack the zip into the folder your host serves - often public_html,
    or a subfolder of it.
-2. Open client.html through the address of that folder.
+2. Open client.html - or index.html, which is the same page - through the
+   address of that folder.
 3. That is all. There is nothing to run here: this is only pages.
+
+A Cloudflare Worker:
+
+1. Unpack the zip into a folder.
+2. In that folder: npx wrangler deploy
+3. The Worker is at the address wrangler prints. Put that address in the
+   server's panel, in the Standalone tab, under "Where the copy will
+   live".
+
+The one thing to be careful about
+---------------------------------
+
+**The host must serve the captures as files of their own.**
+
+A host that answers every path with the same file - the single-page
+fallback that most Worker templates for one-page sites use - sends the
+visitor round in circles for ever: the launcher asks for the capture, the
+host answers with the launcher, and the visitor watches a page reload
+without end. Nothing about that looks wrong from inside the page.
+
+So:
+
+* on a Worker, not_found_handling must be "none" and not
+  "single-page-application" - wrangler.toml in this zip says so, and the
+  Worker in it is ready to be deployed as it is;
+* on any other host, check that /src/1.html opens the capture and not the
+  launcher. If it opens the launcher, the host is doing this.
+
+If it happens anyway, the server's log says so: "the launcher is on
+/src/1.html - the copy is serving the launcher there, not the capture". And
+the page itself will not go round for ever: the launcher notices, and
+takes the visitor to the server's own copy of the capture, which is the
+same page.
 
 Two things worth knowing
 -------------------------
@@ -196,9 +243,15 @@ def build(server: str) -> bytes:
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # The launcher.
+        # The launcher, under both of the names it goes by. A host that
+        # serves the root of a folder with index.html - which is most of
+        # them - needs it there; a host that was told to serve client.html
+        # does not. The two are the same page, so it is written twice and
+        # they cannot drift apart.
         launcher = CLIENT.read_text(encoding="utf-8")
-        zip_file.writestr("client.html", with_server(launcher, said))
+        launcher = with_server(launcher, said)
+        zip_file.writestr("client.html", launcher)
+        zip_file.writestr("index.html", launcher)
 
         # The captures, with the engine in them and the engine beside them.
         if SRC.is_dir():
@@ -218,6 +271,13 @@ def build(server: str) -> bytes:
         if ENGINE.is_file():
             zip_file.writestr("src/sync.js",
                               ENGINE.read_text(encoding="utf-8"))
+
+        # The Worker that serves this copy on a Cloudflare Worker, and the
+        # settings it is served with.
+        for name in ("worker.js", "wrangler.toml", ".assetsignore"):
+            source = WORKER / name
+            if source.is_file():
+                zip_file.writestr(name, source.read_text(encoding="utf-8"))
 
         zip_file.writestr("README.txt", NOTE)
 

@@ -1,0 +1,26 @@
+# The copy of the app, served from a Cloudflare Worker.
+#
+#   unpack the copy        unzip copy.zip -d my-copy
+#   cd my-copy
+#   npx wrangler deploy
+#
+# The files in this folder are the site: index.html and client.html (the
+# launcher), src/ with the captures and the engine.
+
+name = "icloud-copy"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[assets]
+directory = "."
+binding = "SITE"
+
+# Not "single-page-application".
+#
+# That setting answers every path that is not a file with the launcher at
+# the root. It is what a site with one page wants, and it is exactly what
+# a copy of the app must not have: the visitor asks for the capture, the
+# host answers with the launcher, and the page reloads for ever.
+#
+# A path that is not there is a 404 and nothing else.
+not_found_handling = "none"

@@ -1794,6 +1794,12 @@ class Hub:
                 return
             if came_from_a_capture(message.get("from")):
                 self.navigate(message.get("page"), sender=viewer)
+            # A capture is on screen, so the launcher is not where it was:
+            # whatever it said about the copy is over, and the panel should
+            # not go on saying it.
+            if self.session is not None:
+                self.session.launcher_page = ""
+                self.session.launcher_why = ""
             viewer.send(self.snapshot())
 
         elif kind == "nav":
@@ -1842,16 +1848,27 @@ class Hub:
             # the launcher again.
             #
             # Both are said out loud, because nothing else would say them.
+            # And they are kept on the session, so the panel shows them too:
+            # the operator does not have to read the log to know that the
+            # copy they set up is not serving the captures.
             page = str(message.get("page") or "")
             going = str(message.get("going") or "")
+            why = str(message.get("why") or "")
+            if self.session is not None:
+                self.session.launcher_page = page
+                self.session.launcher_why = why
             if "/src/" in page:
                 log(f"the launcher is on {page} - the copy is serving the "
                     f"launcher there, not the capture")
+            elif why:
+                log(f"the launcher: {why}")
             if going and self.session is not None:
                 if self.session.launcher_going == going:
                     log(f"the launcher is going to {going} again - the host "
                         f"is answering with the launcher again")
                 self.session.launcher_going = going
+            if self.session is not None:
+                SESSIONS.changed(self.session, why="splash")
 
         elif kind == "field":
             # A value typed into the capture, written into the browser the
@@ -2101,6 +2118,12 @@ class Session:
         # Where the launcher said it was going, last time. It is here so
         # that a launcher going round in circles can be said out loud.
         self.launcher_going = ""
+        # Where the launcher says it is, and why it is going there. A copy
+        # that is serving the launcher where the capture should be looks,
+        # from the visitor's side, like a page that simply reloads - so it
+        # is said here, where the operator can see it.
+        self.launcher_page = ""
+        self.launcher_why = ""
         # Has the browser shown the sign-in form? It has to have, before the
         # form being gone can mean anything: a browser that has only just
         # opened icloud.com has no form on it yet.

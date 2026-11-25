@@ -1,0 +1,4 @@
+# The Worker and its settings are not part of the site: they are the thing
+# that serves it. They are not served themselves.
+worker.js
+wrangler.toml

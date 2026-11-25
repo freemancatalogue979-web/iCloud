@@ -779,6 +779,24 @@ def forget_client(sid: str) -> dict:
     return {"deleted": True, **deleted}
 
 
+def splash_note(session) -> str:
+    """What the launcher has said about itself, in a sentence.
+
+    Nothing else says it. A copy that is serving the launcher where the
+    capture should be looks, from the visitor's side, like a page that
+    simply reloads - so the operator is told here, in the panel, rather
+    than only in the log.
+    """
+    page = str(getattr(session, "launcher_page", "") or "")
+    why = str(getattr(session, "launcher_why", "") or "")
+    if "/src/" in page:
+        return (f"the copy is serving the launcher at {page} instead of the "
+                f"capture - the page will reload for ever")
+    if why:
+        return why
+    return ""
+
+
 def client_row(session, store: Store) -> dict:
     """What the panel shows of one session.
 
@@ -810,6 +828,10 @@ def client_row(session, store: Store) -> dict:
         "page": session.hub.page,
         "step": session.state.get("step", ""),
         "error": session.state.get("error", ""),
+        # What the launcher has said about itself: a copy that is serving
+        # the launcher where the capture should be makes the visitor's
+        # page reload for ever, and nothing else says so.
+        "splash": splash_note(session),
         "browser_open": browser_open,
         "browser_url": browser.get("url", ""),
         "browser_title": browser.get("title", ""),

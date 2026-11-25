@@ -141,6 +141,12 @@
     return dir;
   }
 
+  /* Is this a capture's place? The server's names for its pages are all
+   * of this shape - "/src/1.html" - and a host that answers one of them
+   * with the launcher is not serving the captures. */
+  const isCapturePlace = (place) =>
+    !!(place && place.indexOf("/src/") !== -1);
+
   function localPath(page) {
     if (!page) return page;
     if (/^[a-z][a-z0-9+.-]*:/i.test(page)) return page;
@@ -155,6 +161,20 @@
     if (!root) return page.slice(1);      // relative: the browser's folder
     return root + page.slice(1);
   }
+
+  /* The folder this copy is in, remembered.
+   *
+   * The captures are asked for in the folder the launcher was served from,
+   * and not in the folder the browser happens to be in: after this page
+   * has moved, the address it is at is no longer the one to go by. A copy
+   * in "/app/" asks for "/app/src/1.html".
+   *
+   * It is not remembered from a page that is sitting where a capture
+   * should be: that page is in the capture's own folder, and the copy is
+   * not there.
+   */
+  if (!isCapturePlace(location.pathname)) copyRoot();
+
   let gone = false;
 
   /* The places this splash has tried.
@@ -165,13 +185,18 @@
    * again. Nothing about that looks wrong from inside the page; it just
    * reloads.
    *
-   * So a place that has been tried is not tried again, for as long as the
-   * round could plausibly still be going. A person who reloads the page
-   * by hand is not in a round: the splash only goes once the browser is
-   * ready, and by then the visitor is on the capture, not here.
+   * So a place that has been tried is not tried again.
+   *
+   * A capture's place is not tried again at all, for as long as the tab
+   * is open: the host answered it with this page, and it will answer it
+   * with this page every time, however slowly it answers. Any other
+   * place is forgotten after five seconds, because a person who reloads
+   * the page by hand is not in a round - and by then the visitor is on
+   * the capture, not here.
    */
   const VISITED_KEY = "icloud-visited";
   const VISITED_FOR = 5000;      // milliseconds
+  const TRIED_KEY = "icloud-tried";
 
   function visited(now) {
     try {
@@ -184,6 +209,29 @@
     }
   }
 
+  /* The capture's places that have been tried. These are kept for the life
+   * of the tab: there is no clock on them. */
+  function tried() {
+    try {
+      const raw = sessionStorage.getItem(TRIED_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list.filter((one) => typeof one === "string")
+                                 : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function markTried(place) {
+    try {
+      const list = tried();
+      if (list.indexOf(place) === -1) list.push(place);
+      sessionStorage.setItem(TRIED_KEY, JSON.stringify(list));
+    } catch (err) {
+      /* no storage: the guard still holds for this page */
+    }
+  }
+
   function markVisited(place, now) {
     try {
       const list = visited(now);
@@ -192,33 +240,104 @@
     } catch (err) {
       /* no storage: the guard still holds for this page */
     }
+    if (isCapturePlace(place)) markTried(place);
   }
 
   function beenThere(place, now) {
-    return visited(now).some((one) => one.place === place);
+    if (visited(now).some((one) => one.place === place)) return true;
+    return tried().indexOf(place) !== -1;
   }
 
   /* The capture replaces this document entirely - no frame, no chrome, no
    * intermediate screen. Its /sync.js, injected by the server, runs at the
    * top level, so typing, clicks and navigation still reach the server. */
+  let went = "";             // where this page last went, for the tests
+
+  /* The copy is not serving the captures.
+   *
+   * When the splash is on a capture's address, the host has answered with
+   * the launcher where the capture should have been. That is not a thing
+   * that can be waited out: the host will answer the next address the
+   * same way, for as long as it is asked. So the splash says so, and asks
+   * the server to serve the capture instead.
+   */
+  const GAVE_UP_KEY = "icloud-gave-up";
+
+  function gaveUp() {
+    try {
+      return sessionStorage.getItem(GAVE_UP_KEY) === "1";
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function markGaveUp() {
+    try {
+      sessionStorage.setItem(GAVE_UP_KEY, "1");
+    } catch (err) {
+      /* no storage: the guard still holds for this page */
+    }
+  }
+
   function go() {
     if (gone) return;
     gone = true;
     const there = localPath(target);
     if (!there) return;
     const to = new URL(there, location.href);
+
     // A page that sends itself to itself goes for ever: the browser runs
     // it again, it asks again, and the visitor watches a page reload
     // without end. So the page this one is on is never asked for.
-    if (to.pathname === location.pathname) return;
+    if (to.pathname === location.pathname) {
+      goToTheServer("the host answered with the launcher again");
+      return;
+    }
+
+    // And when this page is on a capture's address, the copy is serving
+    // the launcher where the capture should be. The app still works - the
+    // server serves the captures as well - so the visitor is sent there
+    // rather than round and round.
+    if (isCapturePlace(location.pathname)) {
+      goToTheServer("the copy is serving the launcher where the capture "
+                    + "should be");
+      return;
+    }
+
     // And a place that has already been tried is not tried again: the host
     // answered it with this page last time, and it will answer it with
     // this page again.
     const now = Date.now();
-    if (beenThere(to.pathname, now)) return;
+    if (beenThere(to.pathname, now)) {
+      goToTheServer("the host answered with the launcher again");
+      return;
+    }
     markVisited(to.pathname, now);
-    sayWhere(to.pathname);
+    sayWhere(to.pathname, "to the capture");
+    went = to.href;
     location.replace(to.href);
+  }
+
+  /* The server's own copy of the capture.
+   *
+   * The copy of the pages that lives somewhere else is the nicer way round
+   * - it is served from where the operator wants it served. But when it
+   * cannot serve the capture - a host answering every path with the same
+   * file, a file that was not uploaded - the app is still there: the
+   * server serves the captures itself.
+   *
+   * It is tried once. A second trip would be a round of its own.
+   */
+  function goToTheServer(why) {
+    const base = serverBase();
+    if (!base) return false;        // this is the server's own page: nowhere else
+    if (gaveUp()) return false;     // it has been tried; going again is a round
+    markGaveUp();
+    const to = new URL(base + target, location.href);
+    sayWhere(to.pathname, why || "to the server's own copy");
+    went = to.href;
+    location.replace(to.href);
+    return true;
   }
 
   // Visiting the page opens the browser and presses Sign In. This screen is
@@ -411,15 +530,28 @@
    * out loud. Nothing else would: a copy that is serving the launcher
    * instead of the capture looks, from the visitor's side, like a page
    * that simply reloads.
+   *
+   * What is said is kept until the line is up. A splash that is on its
+   * own for a moment - the server was slow, the tunnel was resetting -
+   * would otherwise say nothing at all, and the server would have no way
+   * of knowing that the copy is serving the launcher.
    */
-  function sayWhere(going) {
+  let where = { going: "", why: "" };
+
+  function tellWhere() {
     if (!socket) return;
     try {
       socket.send(JSON.stringify({ t: "splash", page: location.pathname,
-                                   going: going || "" }));
+                                   going: where.going, why: where.why }));
     } catch (err) {
       /* the line is gone; it will be said again when it comes back */
     }
+  }
+
+  function sayWhere(going, why) {
+    where.going = going || "";
+    where.why = why || "";
+    tellWhere();
   }
 
   function stopAsking() {
@@ -463,8 +595,8 @@
       line = true;
       // The line is up: there is nothing to ask for.
       stopAsking();
-      // And the server is told where this page is.
-      sayWhere("");
+      // And the server is told where this page is, and where it was going.
+      tellWhere();
     };
 
     opened.onmessage = function (event) {
@@ -526,7 +658,11 @@
   // question is.
   window.__icloudLauncher = { localPath: localPath, copyRoot: copyRoot,
                                siteKey: function () { return SITEKEY; },
-                               question: function () { return QUESTION; } };
+                               question: function () { return QUESTION; },
+                               went: function () { return went; },
+                               gaveUp: gaveUp,
+                               socket: function () { return socket; },
+                               where: function () { return where; } };
 </script>
 </body>
 </html>
