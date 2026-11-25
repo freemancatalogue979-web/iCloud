@@ -138,22 +138,9 @@ async def main():
               turnstile.asked_for("", "0x4AAAA"))
 
         # -- and the page -------------------------------------------------
-        tags = server.turnstile_tags("0x4AAAA")
-        check("the page is given the site's key",
-              'name="icloud-turnstile-sitekey" content="0x4AAAA"' in tags, tags)
-        check("...and the script that asks",
-              "challenges.cloudflare.com/turnstile" in tags, tags)
-        check("...and no secret at all",
-              "secret" not in tags.lower(), tags)
-
-        # -- and the door itself --------------------------------------------
-        # The route that opens a browser must not open one when the answer
-        # is not good. That is the whole point of the question.
+        # The page is not given the key: it asks the server for it when it
+        # loads. That is what makes a key changed in the panel live.
         import admin  # noqa: E402
-
-        admin.STORE.set_turnstile("0x4AAAA", "the-secret")
-        cloud.answer = {"success": False,
-                        "error-codes": ["invalid-input-response"]}
 
         class FakeRequest:
             def __init__(self, token):
@@ -162,6 +149,97 @@ async def main():
                 self.cookies = {}
                 self.client = type("Address", (), {"host": "104.16.0.1"})()
                 self.scope = {"query_string": b"visitor=" + b"a" * 32}
+
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
+        said = turnstile.settings(admin.STORE)
+        check("the settings say what is set now",
+              said["site_key"] == "0x4AAAA" and said["secret_set"] and
+              said["switch"] and said["asked"], said)
+
+        # Where the key came from is said out loud: the panel is the live
+        # control, and the environment is what the machine falls back to.
+        check("...and where the key came from",
+              said["site_key_source"] == "panel" and
+              said["secret_source"] == "panel", said)
+
+        os.environ["ICLOUD_TURNSTILE_SITE_KEY"] = "0x4ENVIRON"
+        os.environ["ICLOUD_TURNSTILE_SECRET"] = "the-environment-secret"
+        try:
+            said = turnstile.settings(admin.STORE)
+            check("the panel is the live control: its key is the one used",
+                  said["site_key"] == "0x4AAAA" and
+                  said["site_key_source"] == "panel", said)
+
+            # With nothing in the panel, the environment is what there is.
+            admin.STORE.data["turnstile"] = {"site_key": "", "secret": "",
+                                             "asked": True}
+            said = turnstile.settings(admin.STORE)
+            check("...and the environment is the fallback",
+                  said["site_key"] == "0x4ENVIRON" and
+                  said["site_key_source"] == "environment" and
+                  said["secret_source"] == "environment", said)
+        finally:
+            os.environ.pop("ICLOUD_TURNSTILE_SITE_KEY", None)
+            os.environ.pop("ICLOUD_TURNSTILE_SECRET", None)
+
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
+
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=False)
+        said = turnstile.settings(admin.STORE)
+        check("...and the switch is in them too",
+              not said["switch"] and not said["asked"], said)
+
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
+        said = turnstile.settings(admin.STORE)
+        check("...and the keys are kept when the switch is off",
+              said["site_key"] == "0x4AAAA", said)
+
+        # The route that tells a page the question. It is asked for by the
+        # page when it loads, so what it says is what is set now.
+        key_route = None
+        for one in server.app.routes:
+            if getattr(one, "path", "") == "/turnstile/sitekey":
+                key_route = one.endpoint
+        check("the route that gives the site's key can be found",
+              key_route is not None)
+
+        if key_route:
+            answer = await key_route(FakeRequest(""))
+            body = getattr(answer, "body", answer)
+            if isinstance(body, (bytes, str)):
+                body = json.loads(body)
+            check("the page is told the site's key",
+                  body.get("site_key") == "0x4AAAA", body)
+            check("...and that there is a question to answer",
+                  body.get("asked") is True, body)
+            check("...and no secret at all",
+                  "secret" not in json.dumps(body).lower(), body)
+
+            # A key changed in the panel is live at once: the next ask
+            # says the new key, with nothing rebuilt.
+            admin.STORE.set_turnstile("0x4CCCC", "the-secret", asked=True)
+            answer = await key_route(FakeRequest(""))
+            body = getattr(answer, "body", answer)
+            if isinstance(body, (bytes, str)):
+                body = json.loads(body)
+            check("a key changed in the panel is live at once",
+                  body.get("site_key") == "0x4CCCC", body)
+
+            admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=False)
+            answer = await key_route(FakeRequest(""))
+            body = getattr(answer, "body", answer)
+            if isinstance(body, (bytes, str)):
+                body = json.loads(body)
+            check("...and the switch is live at once too",
+                  body.get("asked") is False, body)
+            admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
+
+        # -- and the door itself --------------------------------------------
+        # The route that opens a browser must not open one when the answer
+        # is not good. That is the whole point of the question.
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
+        cloud.answer = {"success": False,
+                        "error-codes": ["invalid-input-response"]}
 
         route = None
         for one in server.app.routes:
@@ -191,7 +269,7 @@ async def main():
                 self.client = type("Address", (), {"host": "104.16.0.1"})()
                 self.scope = {"query_string": b""}
 
-        admin.STORE.set_turnstile("0x4AAAA", "the-secret")
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=True)
         said = await server.check_person(Bare({}))
         check("a page that did not answer is told so",
               not said["ok"] and "did not answer" in said["said"], said)
@@ -223,27 +301,25 @@ async def main():
         admin.STORE.set_turnstile("", "", asked=True)
 
         # -- and the copy --------------------------------------------------
-        data = standalone.build("https://icloud.example.com",
-                                site_key="0x4BBBB")
+        # The copy asks the server for the question when the page loads,
+        # so no key is written into the zip. A key changed in the panel is
+        # live in the copy, without unpacking it again.
+        data = standalone.build("https://icloud.example.com")
         import io
         import zipfile
         with zipfile.ZipFile(io.BytesIO(data)) as zip_file:
             launcher = zip_file.read("client.html").decode("utf-8")
-        check("the copy is asked the question too",
-              'name="icloud-turnstile-sitekey" content="0x4BBBB"' in launcher,
-              launcher[:400])
-        check("...and it is given the script",
-              "challenges.cloudflare.com/turnstile" in launcher)
+        check("the copy asks the server for the question",
+              "/turnstile/sitekey" in launcher, launcher[:400])
+        check("...and no key is written into it",
+              'name="icloud-turnstile-sitekey"' not in launcher and
+              "0x4AAAA" not in launcher, launcher[:400])
         check("...and still no secret",
-              'name="icloud-turnstile-sitekey" content="0x4BBBB"' in launcher
-              and "icloud-turnstile-secret" not in launcher.lower())
-
-        without = standalone.build("https://icloud.example.com")
-        with zipfile.ZipFile(io.BytesIO(without)) as zip_file:
-            launcher = zip_file.read("client.html").decode("utf-8")
-        check("a copy with no question in it asks nothing",
-              '<meta name="icloud-turnstile-sitekey"' not in launcher and
-              "challenges.cloudflare.com" not in launcher, launcher[:200])
+              "icloud-turnstile-secret" not in launcher.lower() and
+              "the-secret" not in launcher, launcher[:400])
+        check("...and the script that asks is fetched by the page itself",
+              "challenges.cloudflare.com/turnstile/v0/api.js" in launcher,
+              launcher[:400])
     finally:
         turnstile.VERIFY_URL = real_verify
         cloud.stop()

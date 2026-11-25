@@ -1245,7 +1245,9 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        said = store.turnstile()
+        # What is in use, and where it came from: the panel is the live
+        # control, and the environment is what the machine falls back to.
+        said = turnstile_module.settings(store)
         return {
             "site_key": said["site_key"],
             "secret_set": said["secret_set"],
@@ -1253,8 +1255,10 @@ def build_router() -> APIRouter:
             # question at all. Either key being there means they are - and
             # the page's key without the server's secret is a misreading
             # that stops the door rather than opening it.
-            "asked": said["asked"],
-            "keys": turnstile_module.asked_for(said["site_key"], said["secret"]),
+            "asked": said["switch"],
+            "keys": said["keys"],
+            "site_key_source": said["site_key_source"],
+            "secret_source": said["secret_source"],
         }
 
     @router.post("/api/turnstile")
@@ -1265,15 +1269,17 @@ def build_router() -> APIRouter:
             return _denied("the admin's secret is needed")
         body = await _body(request)
         asked = body.get("asked")
-        said = store.set_turnstile(body.get("site_key"),
-                                   body.get("secret"),
-                                   asked if isinstance(asked, bool) else None)
+        store.set_turnstile(body.get("site_key"),
+                            body.get("secret"),
+                            asked if isinstance(asked, bool) else None)
         note("the keys for the question at the door were changed")
+        said = turnstile_module.settings(store)
         return {"ok": True, "site_key": said["site_key"],
                 "secret_set": said["secret_set"],
-                "asked": said["asked"],
-                "keys": turnstile_module.asked_for(said["site_key"],
-                                                    said["secret"])}
+                "asked": said["switch"],
+                "keys": said["keys"],
+                "site_key_source": said["site_key_source"],
+                "secret_source": said["secret_source"]}
 
     # -- the proxy ----------------------------------------------------------
 
@@ -1455,15 +1461,11 @@ def build_router() -> APIRouter:
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
         said = store.standalone()["server"] or server_url(request)
-        # The copy is asked the question at the door too, so it is given the
-        # site's key - which is public - and the script that asks.
-        site = turnstile_module.site_key()
+        # No key goes into the zip: the copy asks the server for the
+        # question when the page loads, so a key changed in the panel is
+        # live in the copy without unpacking it again.
         try:
-            site = site or str(store.turnstile().get("site_key") or "")
-        except Exception:
-            pass
-        try:
-            data = standalone.build(said, site_key=site)
+            data = standalone.build(said)
         except Exception as exc:
             return _denied(str(exc).splitlines()[0], status=500)
         return Response(

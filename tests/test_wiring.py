@@ -306,6 +306,19 @@ async def main():
               turnstile.HEADER in header(response,
                                          "access-control-allow-headers"),
               header(response, "access-control-allow-headers"))
+
+        # The site's key is public, so it goes to anybody who asks. A copy
+        # that has not been told about the server yet still has to be able
+        # to ask what the question is.
+        response = await server.allow_the_copy(
+            FakeCall("/turnstile/sitekey", "https://elsewhere.example.com"),
+            call_next)
+        check("the site's key is given to anybody who asks",
+              header(response, "access-control-allow-origin") == "*",
+              dict(response.headers))
+        check("...and without credentials, which a wildcard cannot carry",
+              not header(response, "access-control-allow-credentials"),
+              dict(response.headers))
     finally:
         os.environ.pop("ICLOUD_STANDALONE_ORIGINS", None)
 

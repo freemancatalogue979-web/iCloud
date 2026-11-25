@@ -69,7 +69,7 @@ How to put it somewhere
 3. That is all. There is nothing to run here: this is only pages.
 
 Two things worth knowing
-------------------------
+-------------------------
 
 * The pages have to be able to reach the server. The server has to be
   reachable from wherever the pages are served from - and from the
@@ -82,6 +82,20 @@ Two things worth knowing
   the browser sees it - in the server's panel, in the Standalone tab, under
   "Where the copy will live". Until that is done, the pages can be seen
   but the browser will not open.
+
+The question at the door
+------------------------
+
+The server asks visitors whether they are people before it opens a
+browser for them, and this copy is asked the same question. It asks the
+server for the question when the page loads, so:
+
+* nothing about the question is written into this zip - the key the
+  server uses is public, and the server is the one that has it;
+* a key changed in the server's panel is live in this copy at once, with
+  nothing to unpack again and nothing to upload again.
+
+If a visitor is turned away at the door, the server's log says why.
 
 If the pages do not come up
 ---------------------------
@@ -122,44 +136,23 @@ def with_server(page_html: str, server: str) -> str:
     return tag + page_html
 
 
-CHALLENGE_TAG = (
-    '<meta name="icloud-turnstile-sitekey" content="{key}">\n'
-    '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js'
-    '?render=explicit" async defer></script>\n'
-)
-
-
-def with_challenge(page_html: str, key: str) -> str:
-    """A page that is asked the question, with what it needs to ask it.
-
-    The site's key is public and no secret is here: the copy is sent to
-    strangers, and the answer is checked on the server.
-    """
-    tag = CHALLENGE_TAG.format(key=key)
-    if _HEAD.search(page_html):
-        return _HEAD.sub(lambda m: m.group(0) + tag, page_html, count=1)
-    if _NO_HEAD.search(page_html):
-        return _NO_HEAD.sub(lambda m: tag + m.group(0), page_html, count=1)
-    return tag + page_html
-
-
-def build(server: str, site_key: str = "") -> bytes:
+def build(server: str) -> bytes:
     """The zip, ready to be downloaded.
 
     ``server`` is the address the server is reached at, from the outside
     world: "https://icloud.example.com". It is put in every page, and the
     pages are allowed to talk to it.
+
+    No key is put in the zip. The copy asks the server for the question it
+    is to be asked when it loads - the site's key is public, and the
+    server is the one that has it - so a key changed in the panel is live
+    in the copy without the zip being unpacked again.
     """
     said = (server or "").strip().rstrip("/")
     if not said:
         raise ValueError("the server's address is not known")
     if not re.match(r"^https?://", said, re.IGNORECASE):
         said = "https://" + said
-
-    # The question asked at the door is asked of the copy too, so the copy
-    # is given the site's key and the script that asks. The key is public;
-    # no secret is in the zip.
-    key = (site_key or "").strip()
 
     # The server's own preparation is what a capture needs: the engine in
     # it, its frames reachable, its policy widened for the engine. It lives
@@ -172,8 +165,6 @@ def build(server: str, site_key: str = "") -> bytes:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         # The launcher.
         launcher = CLIENT.read_text(encoding="utf-8")
-        if key:
-            launcher = with_challenge(launcher, key)
         zip_file.writestr("client.html", with_server(launcher, said))
 
         # The captures, with the engine in them and the engine beside them.

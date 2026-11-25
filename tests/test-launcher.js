@@ -26,7 +26,7 @@ function check(name, cond, detail) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function launch(statuses, url, seed) {
+function launch(statuses, url, seed, answers) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
@@ -55,6 +55,12 @@ function launch(statuses, url, seed) {
         // what matters, not the whole address.
         if (String(url).split("?")[0] === "/start") {
           return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
+        }
+        // The question asked at the door: the page asks the server what the
+        // question is, when it loads.
+        if (String(url).split("?")[0] === "/turnstile/sitekey") {
+          const answer = (answers && answers.site_key) || {};
+          return Promise.resolve({ json: () => Promise.resolve(answer) });
         }
         // Stay on the last state: a splash that keeps polling after it has
         // gone, or after a failure, is a splash that never settles.
@@ -134,12 +140,11 @@ function visibleText(doc) {
   check("a failed launch stops polling", broken.polls() === 1, broken.polls());
 
   // ---- and the question asked before the browser opens ------------------
-  // The page is given the site's key, asks Cloudflare, and sends the
-  // answer with the request. A browser is not asked to open until the
-  // answer is there - and an answer that is not good stops it.
-  const WITH_KEY = CLIENT.replace("</head>",
-    '<meta name="icloud-turnstile-sitekey" content="0x4AAAA"></head>');
-
+  // The page asks the server what the question is when it loads - the
+  // site's key is public and the server is the one that has it - then asks
+  // Cloudflare, and sends the answer with the request. A browser is not
+  // asked to open until the answer is there - and an answer that is not
+  // good stops it.
   function launchAsking(statuses, turnstile) {
     const errors = [];
     const virtualConsole = new VirtualConsole();
@@ -147,7 +152,7 @@ function visibleText(doc) {
       errors.push(String((event && event.message) || event)));
     let polls = 0;
     const sent = [];
-    const dom = new JSDOM(WITH_KEY, {
+    const dom = new JSDOM(CLIENT, {
       url: "http://localhost:9002/",
       runScripts: "dangerously",
       virtualConsole,
@@ -158,6 +163,11 @@ function visibleText(doc) {
           if (String(where).split("?")[0] === "/start") {
             return Promise.resolve({
               json: () => Promise.resolve({ status: "idle" }) });
+          }
+          if (String(where).split("?")[0] === "/turnstile/sitekey") {
+            return Promise.resolve({
+              json: () => Promise.resolve({
+                site_key: "0x4AAAA", asked: true }) });
           }
           const body = statuses[Math.min(polls, statuses.length - 1)];
           polls++;
@@ -180,6 +190,9 @@ function visibleText(doc) {
   });
   await sleep(300);
 
+  check("the page asks the server what the question is",
+    good.sent().some((one) => one.url.indexOf("/turnstile/sitekey") === 0),
+    good.sent().map((one) => one.url));
   check("the widget is asked for, with the site's key",
     rendered && rendered.options.sitekey === "0x4AAAA", rendered);
   check("...and there is a way to say it could not answer",

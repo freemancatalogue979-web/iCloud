@@ -63,6 +63,72 @@ def asked_for(site: str = "", given: str = "") -> bool:
     return bool((site or site_key()).strip() or (given or secret()).strip())
 
 
+def settings(store=None) -> dict:
+    """What is set right now, and whether the question is being asked.
+
+    The keys live in the environment, or in the panel's store. The store
+    is what the panel writes to, and the panel writes to it while the
+    machine is running - so this is asked for at the moment it is wanted,
+    and never remembered anywhere else.
+
+    The panel comes first. The panel is the live control: what the
+    operator set there is what is used, and the environment is what the
+    machine falls back to until the panel says otherwise. It used to be
+    the other way round, and that made the panel's own field a dead thing
+    on a machine whose environment had a key in it - the operator would
+    see "saved" and the page would be asking a different question.
+
+    Three things are said here:
+
+    * ``site_key`` - the key the page is given. It is public.
+    * ``switch`` - the panel's switch: the question can be turned off
+      without losing the keys, which is the way out when a widget
+      misbehaves.
+    * ``asked`` - whether the question is really being asked: the switch
+      is on, and there is something to ask with. Either key counts,
+      because one key without the other is a misreading, and a misreading
+      must not open a door by accident.
+
+    Where each key came from is said as well, so that the panel can say
+    it out loud rather than the operator guessing.
+
+    The secret is in here too, but it is for this machine. It is never
+    sent to a page, and it is not in anything a page is given.
+    """
+    site = site_key()
+    given = secret()
+    site_source = "environment"
+    secret_source = "environment"
+    switch = True
+
+    if store is not None:
+        try:
+            stored = store.turnstile()
+        except Exception:
+            stored = {}
+        panel_site = str(stored.get("site_key") or "").strip()
+        panel_given = str(stored.get("secret") or "").strip()
+        if panel_site:
+            site = panel_site
+            site_source = "panel"
+        if panel_given:
+            given = panel_given
+            secret_source = "panel"
+        switch = stored.get("asked", True) is not False
+
+    keys = asked_for(site, given)
+    return {
+        "site_key": site,
+        "secret": given,
+        "secret_set": bool(given),
+        "site_key_source": site_source,
+        "secret_source": secret_source,
+        "switch": switch,
+        "keys": keys,
+        "asked": bool(switch and keys),
+    }
+
+
 async def verify(token: str, given_secret: str = "", ip: str = "",
                  action: str = ACTION) -> dict:
     """Ask Cloudflare whether the token is good.

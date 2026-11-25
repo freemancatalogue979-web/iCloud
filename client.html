@@ -184,20 +184,25 @@
   }
   /* The question asked before a browser is opened.
    *
-   * Cloudflare Turnstile. This page is given the site's key - it is
-   * public, and no secret is in this file - and Cloudflare gives back a
-   * token. The token is a claim, not a proof, so the server asks
-   * Cloudflare about it before it opens anything.
+   * Cloudflare Turnstile. This page asks the server for the site's key
+   * when it loads - the key is public, and no secret is in this file -
+   * and Cloudflare gives back a token. The token is a claim, not a
+   * proof, so the server asks Cloudflare about it before it opens
+   * anything.
+   *
+   * The key is asked for rather than written into the page, and that is
+   * what makes it live: a key changed in the panel is in this page load,
+   * and in the next one. The copy of this page that lives somewhere else
+   * asks the same server, so it is live there too - one copy of the
+   * pages, any key, for as long as they are there.
    *
    * The answer travels in a header. The address is not used for it: an
    * address is written down in logs, and there is no need for that.
    */
-  const SITEKEY = (() => {
-    const meta = document.querySelector('meta[name="icloud-turnstile-sitekey"]');
-    return meta ? (meta.getAttribute("content") || "").trim() : "";
-  })();
+  let SITEKEY = "";
+  let QUESTION = false;      // is there a question to ask at all?
 
-  let asked = false;
+  let asked = false;         // has the server been told, one way or another
 
   function challenge(token) {
     // Once. The server is told a second time that nothing is wrong.
@@ -232,6 +237,73 @@
     setTimeout(function () { waitForCloudflare(tries - 1); }, 250);
   }
 
+  /* The script that asks the question.
+   *
+   * It is fetched when there is a question to ask and not before, so a
+   * machine with the question turned off does not send its visitors to
+   * Cloudflare for nothing.
+   */
+  const WIDGET =
+    "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+
+  function loadWidget() {
+    if (document.querySelector("script[data-icloud-turnstile]")) return;
+    const tag = document.createElement("script");
+    tag.src = WIDGET;
+    tag.async = true;
+    tag.defer = true;
+    tag.setAttribute("data-icloud-turnstile", "1");
+    (document.head || document.documentElement).appendChild(tag);
+  }
+
+  /* What is the question? Asked of the server, now.
+   *
+   * The server's own pages ask it on their own address. A copy that
+   * lives somewhere else asks it on the server's address, which is in
+   * the page already - and the server answers anybody who asks, because
+   * the site's key is public.
+   *
+   * A server that cannot be asked is treated as a server with no
+   * question: the request to open a browser goes out without an answer,
+   * and the server decides what to do with it. That is the right way
+   * round - a page cannot decide who may through.
+   */
+  function askTheServer() {
+    const answer = fetch(serverUrl("/turnstile/sitekey"),
+                         { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (said) {
+        if (!said || typeof said !== "object") {
+          return { key: "", asked: false };
+        }
+        return { key: String(said.site_key || "").trim(),
+                 asked: !!said.asked };
+      })
+      .catch(function () { return { key: "", asked: false }; });
+
+    return Promise.race([
+      answer,
+      new Promise(function (resolve) {
+        setTimeout(function () { resolve({ key: "", asked: false }); }, 6000);
+      }),
+    ]);
+  }
+
+  function begin() {
+    askTheServer().then(function (answer) {
+      SITEKEY = answer.key;
+      QUESTION = answer.asked;
+      if (QUESTION && SITEKEY) {
+        // There is a question to ask, so the browser is not asked to open
+        // until it has been answered.
+        loadWidget();
+        waitForCloudflare(40);
+      } else {
+        fetch(named("/start")).catch(() => {});
+      }
+    });
+  }
+
   /* The name goes with every request.
    *
    * A copy of this page that lives on another host has no cookie of the
@@ -241,13 +313,7 @@
   const named = (path) => serverUrl(path) +
       (who ? "?visitor=" + encodeURIComponent(who) : "");
 
-  if (SITEKEY) {
-    // There is a question to ask, so the browser is not asked to open
-    // until it has been answered.
-    waitForCloudflare(40);
-  } else {
-    fetch(named("/start")).catch(() => {});
-  }
+  begin();
 
   function poll() {
     fetch(named("/status"))
@@ -272,8 +338,11 @@
   setTimeout(go, 30000);
 
   // A small door, for the tests to look through: where a capture is in this
-  // copy's own folder, and the folder itself.
-  window.__icloudLauncher = { localPath: localPath, copyRoot: copyRoot };
+  // copy's own folder, and the folder itself - and what the server said the
+  // question is.
+  window.__icloudLauncher = { localPath: localPath, copyRoot: copyRoot,
+                               siteKey: function () { return SITEKEY; },
+                               question: function () { return QUESTION; } };
 </script>
 </body>
 </html>

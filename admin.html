@@ -588,11 +588,19 @@
           <div class="note" id="ts-note"></div>
           <p class="note" id="ts-state"></p>
           <p class="note" style="margin-top:18px">
-            The page is given the site&rsquo;s key &mdash; it is public, and
-            no secret is in it &mdash; and Cloudflare gives back a token.
-            The token is a claim, not a proof, so the server asks
-            Cloudflare about it before anything is opened. The secret never
-            leaves this machine and is never sent back to the page.
+            The page asks the server for the site&rsquo;s key when it loads
+            &mdash; it is public, and no secret is in it &mdash; and
+            Cloudflare gives back a token. The token is a claim, not a
+            proof, so the server asks Cloudflare about it before anything
+            is opened. The secret never leaves this machine and is never
+            sent back to the page.
+          </p>
+          <p class="note">
+            <b>Saving takes effect at once.</b> The next page load on the
+            server&rsquo;s own pages uses the keys as they are now &mdash; and
+            so does the copy of the pages that lives somewhere else, because
+            that copy asks this server for the question too. There is
+            nothing to download again and nothing to upload again.
           </p>
           <p class="note">
             <b>An answer that is not good stops it.</b> If Cloudflare
@@ -608,6 +616,11 @@
             being there means the question is asked &mdash; a page with the
             key and a server with no secret is a misreading, and it stops
             the door rather than opening it.
+          </p>
+          <p class="note">
+            What is set in this panel is what is used; the environment is
+            what the machine falls back to until then. The panel says
+            which one is in use.
           </p>
         </div>
       </div>
@@ -790,6 +803,12 @@
             in <span class="mono">src/</span>, the engine beside them, and a
             note. The captures are the same pages, with the same engine in
             them: what the visitor sees is what they would have seen here.
+          </p>
+          <p class="note">
+            <b>The zip carries no keys.</b> The copy asks this server for the
+            question it is to be asked, when the page loads, so the keys in
+            the Turnstile tab are live in the copy too &mdash; there is
+            nothing to unpack again and nothing to upload again.
           </p>
         </div>
       </div>
@@ -1615,15 +1634,26 @@
       $("ts-secret").placeholder = settings.secret_set
         ? "saved \u2014 type to replace"
         : "the secret";
+      // Where each key is coming from. The panel is the live control and
+      // the environment is what the machine falls back to, so it is worth
+      // saying out loud when the environment is the one in use: the
+      // operator would otherwise see "saved" and a page asking a
+      // different question.
+      var elsewhere = [];
+      if (settings.site_key_source === "environment") elsewhere.push("the site's key");
+      if (settings.secret_source === "environment") elsewhere.push("the secret");
+      var note = elsewhere.length
+        ? " The " + elsewhere.join(" and ") + " in the environment is the one in use \u2014 what is in this panel is not."
+        : "";
       if (!settings.asked) {
         $("ts-state").textContent =
-          "The question is switched off: everybody may through. The keys are kept.";
+          "The question is switched off: everybody may through. The keys are kept." + note;
       } else if (!settings.keys) {
         $("ts-state").textContent =
-          "The question is being asked, but there are no keys yet - put the site's key in, and the secret with it, or a visitor will be turned away at the door.";
+          "The question is being asked, but there are no keys yet - put the site's key in, and the secret with it, or a visitor will be turned away at the door." + note;
       } else {
         $("ts-state").textContent =
-          "The question is being asked. A visitor is let through only with a good answer.";
+          "The question is being asked. A visitor is let through only with a good answer." + note;
       }
       turnstileLoaded = true;
     } catch (err) {

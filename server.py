@@ -639,6 +639,17 @@ def bring_new_tab_to_front(session: "Session", new_page):
 # there.
 CLIENT_ROUTES = ("/start", "/status", "/nav")
 
+# The one thing anybody may ask for: the site's key for the question asked
+# at the door. It is public - Cloudflare puts it in every page that uses
+# the widget - so it is given to whoever asks. No secret is here, and
+# never is.
+#
+# It is on its own list because a copy of the pages that lives somewhere
+# else asks for it before the server has been told where that copy is:
+# the key is public, and a copy that cannot have it cannot ask the
+# question at all.
+PUBLIC_ROUTES = ("/turnstile/sitekey",)
+
 
 def allowed_origins() -> list:
     """The origins the pages are allowed to come from."""
@@ -677,7 +688,14 @@ async def allow_the_copy(request: Request, call_next):
     else:
         response = await call_next(request)
 
-    if allowed and request.url.path in CLIENT_ROUTES:
+    if request.url.path in PUBLIC_ROUTES:
+        # The site's key is public, so it goes to anybody who asks. The
+        # page needs it to ask the question, and a page that cannot have
+        # it cannot ask.
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response.headers["Vary"] = "Origin"
+    elif allowed and request.url.path in CLIENT_ROUTES:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
@@ -711,22 +729,32 @@ async def index(request: Request):
     if session is not None and session.state["status"] == "done":
         return RedirectResponse(session.hub.page, status_code=307,
                                 headers=cookie)
-    # The page is given the site's key for the question it is asked - it is
-    # public, and no secret is in it.
-    page = (HERE / "client.html").read_text(encoding="utf-8")
-    site = turnstile.site_key()
-    try:
-        site = site or str(admin.STORE.turnstile().get("site_key") or "")
-    except Exception:
-        pass
-    if not site:
-        # Nothing to add: the file is served as a file.
-        # no-store, so an edit to client.html shows up on refresh instead of
-        # serving the browser's cached copy.
-        return FileResponse(HERE / "client.html",
-                            headers={**NO_STORE, **cookie})
-    page = page.replace("</head>", turnstile_tags(site), 1)
-    return HTMLResponse(page, headers={**NO_STORE, **cookie})
+    # The page is not given the question here: it asks the server for it
+    # when it loads. That is what makes a key changed in the panel live -
+    # here, and in the copy of these pages that lives somewhere else.
+    # no-store, so an edit to client.html shows up on refresh instead of
+    # serving the browser's cached copy.
+    return FileResponse(HERE / "client.html", headers={**NO_STORE, **cookie})
+
+
+@app.get("/turnstile/sitekey")
+async def turnstile_sitekey(request: Request):
+    """The site's key for the question asked at the door.
+
+    The key is public - Cloudflare puts it in every page that uses the
+    widget - so it is given to anybody who asks for it. The secret is not
+    here, and is never sent anywhere near a page.
+
+    The page asks for this when it loads, rather than carrying the key
+    written into it. That is the whole of "live": a key changed in the
+    panel is in the next page load, on the server's own pages and in the
+    copy that lives somewhere else, with nothing to rebuild and nothing
+    to upload again.
+    """
+    said = turnstile.settings(admin.STORE)
+    return JSONResponse({"site_key": said["site_key"],
+                         "asked": said["asked"]},
+                        headers=NO_STORE)
 
 
 @app.get("/start")
@@ -761,21 +789,6 @@ async def start(request: Request):
                         headers={"Set-Cookie": session_cookie(session.id)})
 
 
-def turnstile_tags(site: str) -> str:
-    """What a page needs to ask the question: the site's key, and the script.
-
-    The key is public - it is in every copy of the page, and the page is
-    sent to strangers - and no secret is here. The script is asked for
-    only when there is a question to ask, so a machine with the question
-    turned off does not send its visitors to Cloudflare for nothing.
-    """
-    return (
-        f'<meta name="icloud-turnstile-sitekey" '
-        f'content="{html_module.escape(site)}">\n'
-        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js'
-        '?render=explicit" async defer></script>\n</head>')
-
-
 async def check_person(request: Request) -> dict:
     """Is this a person? Turnstile's answer, checked.
 
@@ -783,31 +796,25 @@ async def check_person(request: Request) -> dict:
     page, the secret here. Both being absent means the question is not
     being asked and everybody may through.
 
-    The secret is read from the panel's store when it is there, and from
-    the environment otherwise. A page with the site's key and a server
-    with no secret is a misreading, and it stops the door rather than
-    opening it.
+    The keys are read at the moment they are wanted, from the panel's
+    store when it is there and from the environment otherwise: the panel
+    changes them while the machine is running, and the change is meant to
+    be live.
+
+    A page with the site's key and a server with no secret is a
+    misreading, and it stops the door rather than opening it.
     """
-    site = turnstile.site_key()
-    given = turnstile.secret()
-    try:
-        stored = admin.STORE.turnstile()
-        site = site or str(stored.get("site_key") or "")
-        given = given or str(stored.get("secret") or "")
-    except Exception:
-        pass
+    said = turnstile.settings(admin.STORE)
+    site = said["site_key"]
+    given = said["secret"]
 
     # The switch in the panel: the question can be turned off without
     # losing the keys, which is the way out when a widget misbehaves and
     # the door has to be opened again.
-    try:
-        asked = admin.STORE.turnstile().get("asked", True)
-    except Exception:
-        asked = True
-    if not asked:
+    if not said["switch"]:
         return {"ok": True, "said": "the question is not being asked"}
 
-    if not turnstile.asked_for(site, given):
+    if not said["keys"]:
         return {"ok": True, "said": "no question is being asked"}
 
     token = ""
