@@ -103,6 +103,7 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] &&
         say "no screen here - every session gets one of its own from Xvfb"
     else
         warn "no screen here, and no Xvfb - the browser would have no window to open"
+        warn "a browser with no window calls itself Headless Chrome, and every site can read that"
         warn "install it and every session gets a screen of its own:  sudo apt install xvfb"
     fi
 fi
@@ -122,6 +123,7 @@ case "${ICLOUD_PROXY:-none}" in
             say "every browser leaves through ${ICLOUD_PROXY} at ${ICLOUD_PROXY_SERVER:-gate.decodo.com:7000}"
             say "the country is the visitor's own, and a few accounts share one address"
             say "check it says the right thing with: $VENV/bin/python proxy_check.py"
+            say "the check is made with the browser that will do the sign-in"
         fi
         ;;
     *)

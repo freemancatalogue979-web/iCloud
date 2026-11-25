@@ -790,6 +790,11 @@ def client_row(session, store: Store) -> dict:
         "exit_ip": exit_check.get("ip", "") if exit_check else "",
         "exit_ok": bool(exit_check.get("ok")) if exit_check else False,
         "exit_said": exit_check.get("said", "") if exit_check else "",
+        # Which browser did the sign-in, and whether it had a window. A
+        # browser with no window says "Headless Chrome" for itself, and
+        # every site can read that without asking.
+        "browser_used": str(session.state.get("browser_used") or ""),
+        "headless": bool(session.state.get("headless")),
         "known": True,
     }
 
@@ -1267,6 +1272,10 @@ def build_router() -> APIRouter:
 
         if said.get("ok"):
             note(f"the proxy answered: {said.get('ip')}")
+            if said.get("browser"):
+                # Which browser answered. The sign-in is done with that one,
+                # so it is the one worth knowing about.
+                note(f"...with {said['browser']}")
             if said.get("country") and said["country"] != country:
                 said["ok"] = False
                 said["reason"] = (f"it left from {said['country']}, not "

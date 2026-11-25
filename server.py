@@ -39,6 +39,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                              RedirectResponse, Response)
 
 import admin
+import browsers
 import geo
 import identity as identity_module
 import live
@@ -105,14 +106,8 @@ TRUST_WAIT_SECONDS = 30
 
 # Tried in order. Bundled Chromium needs a download; Chrome and Edge are
 # usually already on the machine, so if either is there we skip it entirely.
-BROWSERS = [
-    # System Chrome first: it is the browser the machine already has, it is
-    # the one the person is used to, and it is there without a download. The
-    # bundled Chromium is the fallback for a machine with no Chrome.
-    ("system chrome", {"channel": "chrome"}),
-    ("bundled chromium", {}),
-    ("system edge", {"channel": "msedge"}),
-]
+# The list is in browsers.py, because the proxy check uses the same one.
+BROWSERS = browsers.candidates()
 
 
 # --------------------------------------------------------------------------
@@ -469,7 +464,8 @@ async def verify_exit(session: "Session") -> dict:
     if identity is None or session.ctx is None:
         return {"ok": False, "ip": "", "country": "", "said": "nothing to check"}
 
-    said = {"ok": False, "ip": "", "country": "", "said": "", "hints": ""}
+    said = {"ok": False, "ip": "", "country": "", "said": "",
+            "hints": "", "wrong": False}
     page = None
     try:
         page = await session.ctx.new_page()
@@ -490,11 +486,11 @@ async def verify_exit(session: "Session") -> dict:
         else:
             own = proxy_pool.origin_ip()
             if own and said.get("ip") == own:
-                said.update(ok=False,
+                said.update(ok=False, wrong=True,
                             said="the browser left from the machine itself")
             elif said.get("ip") and identity.country:
                 if said.get("country") and said["country"] != identity.country:
-                    said.update(ok=False,
+                    said.update(ok=False, wrong=True,
                                 said=f"it left from {said['country']}, "
                                      f"not {identity.country}")
                 else:
@@ -567,7 +563,7 @@ async def launch(session: "Session"):
     if proxy:
         log(f"leaving from {proxy['server']}")
 
-    for label, extra in BROWSERS:
+    for label, extra in browsers.candidates():
         try:
             log(f"launching {label}")
             browser_ctx = await session.pw.chromium.launch_persistent_context(
@@ -587,6 +583,11 @@ async def launch(session: "Session"):
             continue
 
         browser_page = browser_ctx.pages[0] if browser_ctx.pages else await browser_ctx.new_page()
+        # Which browser, and whether it has a window. A browser with no
+        # window says "Headless Chrome" for itself, and that is a thing
+        # every site can read without asking.
+        session.state["browser_used"] = label
+        session.state["headless"] = headless
         log(f"browser open ({label})")
         return browser_ctx, browser_page
 
@@ -712,6 +713,36 @@ async def start_browser(session: "Session"):
                 log(f"NOT CHECKED: {session.exit.get('said')}")
                 session.state["error"] = session.exit.get("said", "")
             SESSIONS.changed(session, why="exit-checked")
+
+            # A browser that left from the machine's own address, or from
+            # a country that is not the one the device was built for, is
+            # the one thing this whole arrangement is here to prevent. It
+            # is not handed over: the sign-in is not started at all, and
+            # the browser is closed.
+            #
+            # A check that could not be made is another matter - the
+            # service may be down, and the proxy may be working perfectly
+            # well. That is noted and shown in the panel, and the sign-in
+            # goes on, unless the operator asks for it to be strict
+            # (ICLOUD_EXIT_STRICT=1).
+            strict = os.environ.get("ICLOUD_EXIT_STRICT", "").strip() in \
+                ("1", "true", "yes", "on")
+            if session.exit.get("wrong") or (strict and not session.exit.get("ok")):
+                log("the sign-in is not started - the browser is not leaving "
+                    "from where it should")
+                session.state["status"] = "error"
+                session.state["error"] = (
+                    session.exit.get("said") or
+                    "the browser is not leaving from where it should")
+                try:
+                    await session.ctx.close()
+                except Exception:
+                    pass
+                session.ctx = None
+                session.page = None
+                session.state["browser_open"] = False
+                SESSIONS.failed(session, session.state["error"])
+                return session.state
 
         # The browser is the session. The capture is a copy of a moment of
         # it, and this is what connects the two: what is typed into the

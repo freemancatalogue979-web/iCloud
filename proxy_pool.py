@@ -27,10 +27,16 @@ import os
 import secrets
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 HERE = Path(__file__).parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import browsers  # noqa: E402
+import stealth  # noqa: E402
 
 # Where the groups are remembered. The file holds which visitor is in
 # which group and the address each group was last seen leaving from - not
@@ -568,36 +574,53 @@ async def check_in_browser(proxy: dict, url: str = "") -> dict:
     thing on the machine that can speak to a SOCKS5 entrance without
     anything else being installed: curl may not be there, and Python's
     own libraries cannot speak SOCKS5 at all. So the check is made with a
-    browser - the same kind of browser that will do the sign-in - and it
-    says what the address is and where it is.
+    browser.
+
+    **With the same browser the sign-in will use**, tried in the same
+    order: a check made with one browser proves something about that
+    browser, and the sign-in is not done with it. A machine whose Chrome
+    is somewhere Playwright does not look is a machine whose Chrome is
+    never used, and a check that quietly used a different one would say
+    the proxy works when the browser that matters has never been asked.
+
+    So each browser is tried in turn, and the answer says which one gave
+    it.
     """
     if proxy is None:
-        return {"ok": False, "ip": "", "country": "", "said": "no proxy"}
+        return {"ok": False, "ip": "", "country": "", "said": "no proxy",
+                "browser": ""}
 
     from playwright.async_api import async_playwright  # noqa: PLC0415
 
-    said = {"ok": False, "ip": "", "country": "", "said": ""}
+    said = {"ok": False, "ip": "", "country": "", "said": "", "browser": ""}
     playwright = await async_playwright().start()
-    browser = None
     try:
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=["--no-sandbox"],
-            **({"proxy": proxy} if proxy.get("server") else {}),
-        )
-        page = await browser.new_page()
-        await page.goto(url or EXIT_CHECK_URL, wait_until="domcontentloaded",
-                        timeout=45000)
-        body = await page.inner_text("body")
-        said.update(parse_exit(body or ""))
-    except Exception as exc:
-        said["said"] = str(exc).splitlines()[0]
-    finally:
-        if browser is not None:
+        for label, extra in browsers.candidates():
+            browser = None
             try:
-                await browser.close()
-            except Exception:
-                pass
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=stealth.launch_flags(),
+                    **({"proxy": proxy} if proxy.get("server") else {}),
+                    **extra,
+                )
+                page = await browser.new_page()
+                await page.goto(url or EXIT_CHECK_URL, wait_until="domcontentloaded",
+                                timeout=45000)
+                body = await page.inner_text("body")
+                said.update(parse_exit(body or ""))
+                said["browser"] = label
+                said["said"] = ""
+                break
+            except Exception as exc:
+                said["said"] = str(exc).splitlines()[0]
+            finally:
+                if browser is not None:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+    finally:
         await playwright.stop()
     return said
 

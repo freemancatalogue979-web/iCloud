@@ -969,6 +969,17 @@
       out += '<div class="sub">' + escape(row.device) +
         (row.locale ? " · " + escape(row.locale) : "") + "</div>";
     }
+    if (row.browser_used) {
+      out += '<div class="sub">' + escape(row.browser_used) + "</div>";
+    }
+    if (row.headless) {
+      // A browser with no window calls itself "Headless Chrome", and that
+      // is a thing every site can read without asking. A screen of its own
+      // is the answer, and the app knows how to make one.
+      out += '<span class="pill warn">Headless</span>';
+      out += '<div class="err-line">it calls itself Headless Chrome - ' +
+        'xvfb gives every session a screen of its own</div>';
+    }
     return out;
   }
 
