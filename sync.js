@@ -116,14 +116,58 @@
     return at >= 0 ? path.slice(at) : path;
   }
 
+  /* Where a capture is, in this copy's own folder.
+   *
+   * The server knows its pages by their own names - "/src/1.html" - and
+   * this copy may live in a folder of its own. The folder is put in front
+   * of the server's name, so a copy in "/app/" asks for "/app/src/1.html"
+   * and not for a page that is not there.
+   *
+   * The folder is remembered, because after this page has moved the
+   * address it is at is no longer the one to go by: a host that answers
+   * every path with the same file would take the visitor to
+   * "/src/1.html", and the folder would be lost with it. The launcher and
+   * the captures share the one key - they are one copy.
+   */
+  var ROOT_KEY = "icloud-root";
+
   function localPath(page) {
     if (!page) return page;
     if (/^[a-z][a-z0-9+.-]*:/i.test(page)) return page;   // an address of its own
     if (page.indexOf("/src/") !== 0) return page;          // not a capture
-    var path = location.pathname;
-    var at = path.lastIndexOf("/src/");
-    var prefix = at > 0 ? path.slice(0, at) : "";
-    return prefix + page;
+
+    var root = "";
+    try {
+      var kept = localStorage.getItem(ROOT_KEY);
+      if (kept && kept.charAt(0) === "/") root = kept;
+    } catch (err) {
+      /* no storage */
+    }
+    if (!root) {
+      // Nothing remembered: the folder this page is in will have to do.
+      var path = location.pathname;
+      var at = path.lastIndexOf("/src/");
+      root = at > 0 ? path.slice(0, at) + "/" : "/";
+      try {
+        localStorage.setItem(ROOT_KEY, root);
+      } catch (err) {
+        /* no storage */
+      }
+    }
+    return root + page.slice(1);
+  }
+
+  /* Is this the page we are already on?
+   *
+   * A page that is sent to itself goes for ever: the browser runs it
+   * again, it asks again, and the visitor watches a page reload without
+   * end. The names are not enough to tell - the server's name for a page
+   * and the path it is at can be different words for the same place - so
+   * the place itself is compared.
+   */
+  function samePlace(page) {
+    var there = localPath(page);
+    return !!there && there === location.pathname;
   }
 
   function socketUrl() {
@@ -1102,7 +1146,7 @@
     if (!message || typeof message.t !== "string") return;
 
     if (message.t === "state") {
-      if (message.page && message.page !== pageName()) {
+      if (message.page && message.page !== pageName() && !samePlace(message.page)) {
         // The server is the truth about which page is on screen.
         leaving = true;
         location.replace(localPath(message.page));
@@ -1129,7 +1173,8 @@
     }
 
     if (message.t === "nav") {
-      if (leaving || !message.page || message.page === pageName()) return;
+      if (leaving || !message.page || message.page === pageName() ||
+          samePlace(message.page)) return;
       leaving = true;
       location.replace(localPath(message.page));
       return;

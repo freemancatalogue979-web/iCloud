@@ -105,13 +105,52 @@
   // back.
   let target = "/src/1.html";
 
+  /* Where a capture is, in this copy's own folder.
+   *
+   * The server knows its pages by their own names - "/src/1.html" - and
+   * this copy may live in a folder of its own: a cPanel's public_html, a
+   * worker's sub-path. So the folder is put back, and a copy in "/app/"
+   * asks for "/app/src/1.html" and not for a page that is not there.
+   *
+   * The folder is remembered, because after this page has moved the
+   * address it is at is no longer the one to go by: a host that answers
+   * every path with the same file would take the visitor to
+   * "/src/1.html", and the folder would be lost with it. And when there
+   * is nothing remembered the name is given *relative* to this page, so
+   * the browser puts the folder it is in in front of it.
+   */
+  const ROOT_KEY = "icloud-root";
+
+  function copyRoot() {
+    try {
+      const kept = localStorage.getItem(ROOT_KEY);
+      if (kept && kept.charAt(0) === "/") return kept;
+    } catch (e) {
+      /* no storage: the address it is at will have to do */
+    }
+    const here = location.pathname;
+    const dir = here.slice(0, here.lastIndexOf("/") + 1) || "/";
+    try {
+      localStorage.setItem(ROOT_KEY, dir);
+    } catch (e) {
+      /* no storage: the address it is at will have to do */
+    }
+    return dir;
+  }
+
   function localPath(page) {
     if (!page) return page;
     if (/^[a-z][a-z0-9+.-]*:/i.test(page)) return page;
     if (page.indexOf("/src/") !== 0) return page;
-    const here = location.pathname;
-    const at = here.lastIndexOf("/src/");
-    return (at > 0 ? here.slice(0, at) : "") + page;
+    let root = "";
+    try {
+      const kept = localStorage.getItem(ROOT_KEY);
+      if (kept && kept.charAt(0) === "/") root = kept;
+    } catch (e) {
+      /* no storage */
+    }
+    if (!root) return page.slice(1);      // relative: the browser's folder
+    return root + page.slice(1);
   }
   let gone = false;
 
@@ -121,7 +160,14 @@
   function go() {
     if (gone) return;
     gone = true;
-    location.replace(localPath(target));
+    const there = localPath(target);
+    if (!there) return;
+    const to = new URL(there, location.href);
+    // A page that sends itself to itself goes for ever: the browser runs
+    // it again, it asks again, and the visitor watches a page reload
+    // without end. So the page this one is on is never asked for.
+    if (to.pathname === location.pathname) return;
+    location.replace(to.href);
   }
 
   // Visiting the page opens the browser and presses Sign In. This screen is
@@ -165,6 +211,10 @@
   // No screen should be permanent. If the browser is still not up after half
   // a minute, open the capture anyway.
   setTimeout(go, 30000);
+
+  // A small door, for the tests to look through: where a capture is in this
+  // copy's own folder, and the folder itself.
+  window.__icloudLauncher = { localPath: localPath, copyRoot: copyRoot };
 </script>
 </body>
 </html>

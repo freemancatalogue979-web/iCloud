@@ -850,6 +850,32 @@ class FakeSocket {
   check("a page on http still reaches a server on http",
     plain.indexOf("ws://server.example.com/ws") === 0, plain);
 
+  // ---- and the page it is on, in this copy's own folder ----------------
+  // The engine is told the server's name for a page - "/src/1.html" -
+  // whatever folder the copy happens to be in, and the folder is put back
+  // when a page is asked for.
+  const inFolder = new JSDOM(PAGE, {
+    url: "http://localhost:9002/app/src/1.html",
+    runScripts: "outside-only",
+  });
+  const inFolderWin = inFolder.window;
+  inFolderWin.WebSocket = FakeSocket;
+  inFolderWin.eval(SYNC);
+  const inFolderSock = FakeSocket.last;
+  inFolderSock.onopen();
+  const inFolderHello = inFolderSock.sent[0] || {};
+  check("the engine says the server's name for the page it is on",
+    inFolderHello.page === "/src/1.html", inFolderHello);
+
+  // And a page that is on the page it is asked for does not move.
+  inFolderSock.onmessage({
+    data: JSON.stringify({ t: "nav", page: "/src/1.html" }),
+  });
+  await sleep(200);
+  check("the page it is on is not asked for again",
+    inFolder.window.location.pathname === "/app/src/1.html",
+    inFolder.window.location.pathname);
+
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })().catch((err) => {
