@@ -797,6 +797,16 @@ async def check_person(request: Request) -> dict:
     except Exception:
         pass
 
+    # The switch in the panel: the question can be turned off without
+    # losing the keys, which is the way out when a widget misbehaves and
+    # the door has to be opened again.
+    try:
+        asked = admin.STORE.turnstile().get("asked", True)
+    except Exception:
+        asked = True
+    if not asked:
+        return {"ok": True, "said": "the question is not being asked"}
+
     if not turnstile.asked_for(site, given):
         return {"ok": True, "said": "no question is being asked"}
 
@@ -805,6 +815,22 @@ async def check_person(request: Request) -> dict:
         token = str(request.headers.get(turnstile.HEADER, "") or "")
     except Exception:
         token = ""
+
+    if not token:
+        # Say which thing is missing, because "no answer was given" leaves
+        # the operator guessing and the door shut.
+        if not site:
+            return {"ok": False,
+                    "said": "the site's key is not set, so the page has no "
+                            "question to answer - put it in the Turnstile tab"}
+        if not given:
+            return {"ok": False,
+                    "said": "the secret is not set, so the answer cannot be "
+                            "checked - put it in the Turnstile tab"}
+        return {"ok": False,
+                "said": "the page did not answer the question - the widget "
+                        "may have been refused, or the hostname may not be "
+                        "allowed by the widget"}
 
     said = await turnstile.verify(token, given_secret=given,
                                   ip=geo.client_ip(request))

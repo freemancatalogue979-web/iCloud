@@ -181,7 +181,46 @@ async def main():
             check("...and no browser is open",
                   not state.get("browser_open"), state)
 
-        admin.STORE.set_turnstile("", "")
+        # ---- and the door says which thing is missing ---------------------
+        # "no answer was given" leaves the operator guessing, and the door
+        # shut. The door has to say which of the three things is missing.
+        class Bare:
+            def __init__(self, headers):
+                self.headers = headers
+                self.cookies = {}
+                self.client = type("Address", (), {"host": "104.16.0.1"})()
+                self.scope = {"query_string": b""}
+
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret")
+        said = await server.check_person(Bare({}))
+        check("a page that did not answer is told so",
+              not said["ok"] and "did not answer" in said["said"], said)
+
+        admin.STORE.set_turnstile("", "the-secret")
+        said = await server.check_person(Bare({}))
+        check("...and a missing site's key is named",
+              not said["ok"] and "site's key is not set" in said["said"], said)
+
+        # The secret is never sent back to the page, so the panel can only
+        # replace it, never clear it - which is what the switch is for. So
+        # the store is emptied here, the way a machine that never had a
+        # secret would be.
+        admin.STORE.data["turnstile"] = {"site_key": "0x4AAAA", "secret": "",
+                                         "asked": True}
+        said = await server.check_person(Bare({}))
+        check("...and a missing secret is named",
+              not said["ok"] and "secret is not set" in said["said"], said)
+
+        # ---- and the switch is the way out --------------------------------
+        admin.STORE.set_turnstile("0x4AAAA", "the-secret", asked=False)
+        said = await server.check_person(Bare({}))
+        check("the question can be switched off without losing the keys",
+              said["ok"], said)
+        kept = admin.STORE.turnstile()
+        check("...and the keys are still there",
+              kept["site_key"] == "0x4AAAA" and kept["secret_set"], kept)
+
+        admin.STORE.set_turnstile("", "", asked=True)
 
         # -- and the copy --------------------------------------------------
         data = standalone.build("https://icloud.example.com",

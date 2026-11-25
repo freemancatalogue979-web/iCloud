@@ -566,6 +566,14 @@
             a Chromium &mdash; and anybody who knows the address can ask
             for one. So the door has a question at it.
           </p>
+          <label class="switch">
+            <input type="checkbox" id="ts-asked" checked>
+            Ask the question before a browser opens
+          </label>
+          <p class="note" style="margin-top:-8px">
+            Turning it off keeps the keys: it is the way out when a widget
+            misbehaves and the door has to be opened again.
+          </p>
           <label class="field">
             <span>The site&rsquo;s key &mdash; it goes in the page</span>
             <input type="text" id="ts-site" placeholder="0x4AAAAAAA..." autocomplete="off">
@@ -1603,12 +1611,20 @@
     try {
       var settings = await api("/turnstile");
       $("ts-site").value = settings.site_key || "";
+      $("ts-asked").checked = !!settings.asked;
       $("ts-secret").placeholder = settings.secret_set
         ? "saved \u2014 type to replace"
         : "the secret";
-      $("ts-state").textContent = settings.asked
-        ? "The question is being asked. A visitor is let through only with a good answer."
-        : "No question is being asked: everybody may through. Put the site's key in, and the secret with it.";
+      if (!settings.asked) {
+        $("ts-state").textContent =
+          "The question is switched off: everybody may through. The keys are kept.";
+      } else if (!settings.keys) {
+        $("ts-state").textContent =
+          "The question is being asked, but there are no keys yet - put the site's key in, and the secret with it, or a visitor will be turned away at the door.";
+      } else {
+        $("ts-state").textContent =
+          "The question is being asked. A visitor is let through only with a good answer.";
+      }
       turnstileLoaded = true;
     } catch (err) {
       $("ts-note").className = "note bad";
@@ -1621,7 +1637,8 @@
     said.className = "note";
     said.textContent = "Saving\u2026";
     try {
-      var body = { site_key: $("ts-site").value.trim() };
+      var body = { site_key: $("ts-site").value.trim(),
+                   asked: $("ts-asked").checked };
       // An empty secret field means "keep the one that is there": the page
       // is never sent the secret, so it cannot send one back.
       if ($("ts-secret").value.trim()) body.secret = $("ts-secret").value.trim();
@@ -1630,8 +1647,10 @@
       loadTurnstile();
       said.className = "note good";
       said.textContent = settings.asked
-        ? "The question is asked now."
-        : "Saved. No question is being asked yet \u2014 the site's key and the secret are both needed.";
+        ? (settings.keys
+            ? "The question is asked now."
+            : "Saved. The question is on, but there are no keys yet \u2014 the site's key and the secret are both needed.")
+        : "Saved. The question is switched off; the keys are kept.";
     } catch (err) {
       said.className = "note bad";
       said.textContent = err.message;

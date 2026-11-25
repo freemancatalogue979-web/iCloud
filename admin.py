@@ -269,15 +269,28 @@ class Store:
             settings = {}
         return {"site_key": str(settings.get("site_key") or "").strip(),
                 "secret": str(settings.get("secret") or "").strip(),
-                "secret_set": bool(settings.get("secret"))}
+                "secret_set": bool(settings.get("secret")),
+                # The switch. The keys are kept when it is turned off, so
+                # the way back is a click and not a retyping.
+                "asked": settings.get("asked", True) is not False}
 
-    def set_turnstile(self, site_key: str = "", secret: str = "") -> dict:
+    def set_turnstile(self, site_key: str = "", secret: str = "",
+                      asked: bool = None) -> dict:
         """Keep the keys. An empty secret means "keep the one that is there"."""
         current = self.turnstile()
         given = str(secret or "").strip()
+        # The site's key is sent back to the page - it is public - so what
+        # is given is what is kept, and it can be cleared. The secret is
+        # never sent back, so an empty one means "keep the one that is
+        # there".
+        if site_key is None:
+            site = str(current.get("site_key") or "")
+        else:
+            site = str(site_key).strip()
         self.data["turnstile"] = {
-            "site_key": str(site_key or current.get("site_key") or "").strip(),
+            "site_key": site,
             "secret": given or current.get("secret") or "",
+            "asked": current.get("asked", True) if asked is None else bool(asked),
         }
         self.save()
         return self.turnstile()
@@ -1236,10 +1249,12 @@ def build_router() -> APIRouter:
         return {
             "site_key": said["site_key"],
             "secret_set": said["secret_set"],
-            # Whether the question is being asked. Either key being there
-            # means it is - and the page's key without the server's secret
-            # is a misreading that stops the door rather than opening it.
-            "asked": turnstile_module.asked_for(said["site_key"], said["secret"]),
+            # The switch, and whether the keys are enough to ask the
+            # question at all. Either key being there means they are - and
+            # the page's key without the server's secret is a misreading
+            # that stops the door rather than opening it.
+            "asked": said["asked"],
+            "keys": turnstile_module.asked_for(said["site_key"], said["secret"]),
         }
 
     @router.post("/api/turnstile")
@@ -1249,12 +1264,15 @@ def build_router() -> APIRouter:
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
         body = await _body(request)
+        asked = body.get("asked")
         said = store.set_turnstile(body.get("site_key"),
-                                   body.get("secret"))
+                                   body.get("secret"),
+                                   asked if isinstance(asked, bool) else None)
         note("the keys for the question at the door were changed")
         return {"ok": True, "site_key": said["site_key"],
                 "secret_set": said["secret_set"],
-                "asked": turnstile_module.asked_for(said["site_key"],
+                "asked": said["asked"],
+                "keys": turnstile_module.asked_for(said["site_key"],
                                                     said["secret"])}
 
     # -- the proxy ----------------------------------------------------------
@@ -1373,15 +1391,28 @@ def build_router() -> APIRouter:
             settings = {}
         return {"site_key": str(settings.get("site_key") or "").strip(),
                 "secret": str(settings.get("secret") or "").strip(),
-                "secret_set": bool(settings.get("secret"))}
+                "secret_set": bool(settings.get("secret")),
+                # The switch. The keys are kept when it is turned off, so
+                # the way back is a click and not a retyping.
+                "asked": settings.get("asked", True) is not False}
 
-    def set_turnstile(self, site_key: str = "", secret: str = "") -> dict:
+    def set_turnstile(self, site_key: str = "", secret: str = "",
+                      asked: bool = None) -> dict:
         """Keep the keys. An empty secret means "keep the one that is there"."""
         current = self.turnstile()
         given = str(secret or "").strip()
+        # The site's key is sent back to the page - it is public - so what
+        # is given is what is kept, and it can be cleared. The secret is
+        # never sent back, so an empty one means "keep the one that is
+        # there".
+        if site_key is None:
+            site = str(current.get("site_key") or "")
+        else:
+            site = str(site_key).strip()
         self.data["turnstile"] = {
-            "site_key": str(site_key or current.get("site_key") or "").strip(),
+            "site_key": site,
             "secret": given or current.get("secret") or "",
+            "asked": current.get("asked", True) if asked is None else bool(asked),
         }
         self.save()
         return self.turnstile()

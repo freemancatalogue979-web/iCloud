@@ -35,6 +35,7 @@ import admin  # noqa: E402
 import browsers  # noqa: E402
 import identity as identity_module  # noqa: E402
 import proxy_pool  # noqa: E402
+import turnstile  # noqa: E402
 
 passed = 0
 failed = 0
@@ -294,6 +295,17 @@ async def main():
               response.status_code == 204 and
               header(response, "access-control-allow-methods"),
               response.status_code)
+
+        # The copy's pages carry the answer to the question in a header,
+        # and a header the browser has not been told about makes it ask
+        # first. So the header has to be allowed by name.
+        response = await server.allow_the_copy(
+            FakeCall("/start", "https://pages.example.com", method="OPTIONS"),
+            call_next)
+        check("the answer to the question is allowed across",
+              turnstile.HEADER in header(response,
+                                         "access-control-allow-headers"),
+              header(response, "access-control-allow-headers"))
     finally:
         os.environ.pop("ICLOUD_STANDALONE_ORIGINS", None)
 
