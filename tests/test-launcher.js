@@ -33,6 +33,7 @@ function launch(statuses, url, seed) {
 
   let polls = 0;
   const asked = [];
+  const sent = [];
   const dom = new JSDOM(CLIENT, {
     url: url || "http://localhost:9002/",
     runScripts: "dangerously",
@@ -47,8 +48,9 @@ function launch(statuses, url, seed) {
           /* no storage in this one */
         }
       }
-      window.fetch = (url) => {
+      window.fetch = (url, options) => {
         asked.push(String(url));
+        sent.push({ url: String(url), options: options || {} });
         // The page says who the visitor is with the request, so the path is
         // what matters, not the whole address.
         if (String(url).split("?")[0] === "/start") {
@@ -63,7 +65,8 @@ function launch(statuses, url, seed) {
     },
   });
 
-  return { dom, errors, polls: () => polls, asked: () => asked };
+  return { dom, errors, polls: () => polls, asked: () => asked,
+           sent: () => sent };
 }
 
 const navigations = (errors) => errors.filter((message) => /navigation/i.test(message));
@@ -129,6 +132,83 @@ function visibleText(doc) {
     visibleText(broken.dom.window.document) === "",
     JSON.stringify(visibleText(broken.dom.window.document)));
   check("a failed launch stops polling", broken.polls() === 1, broken.polls());
+
+  // ---- and the question asked before the browser opens ------------------
+  // The page is given the site's key, asks Cloudflare, and sends the
+  // answer with the request. A browser is not asked to open until the
+  // answer is there - and an answer that is not good stops it.
+  const WITH_KEY = CLIENT.replace("</head>",
+    '<meta name="icloud-turnstile-sitekey" content="0x4AAAA"></head>');
+
+  function launchAsking(statuses, turnstile) {
+    const errors = [];
+    const virtualConsole = new VirtualConsole();
+    virtualConsole.on("jsdomError", (event) =>
+      errors.push(String((event && event.message) || event)));
+    let polls = 0;
+    const sent = [];
+    const dom = new JSDOM(WITH_KEY, {
+      url: "http://localhost:9002/",
+      runScripts: "dangerously",
+      virtualConsole,
+      beforeParse(window) {
+        window.turnstile = turnstile;
+        window.fetch = (where, options) => {
+          sent.push({ url: String(where), options: options || {} });
+          if (String(where).split("?")[0] === "/start") {
+            return Promise.resolve({
+              json: () => Promise.resolve({ status: "idle" }) });
+          }
+          const body = statuses[Math.min(polls, statuses.length - 1)];
+          polls++;
+          return Promise.resolve({
+            json: () => Promise.resolve(body) });
+        };
+      },
+    });
+    return { dom, errors, sent: () => sent };
+  }
+
+  // Cloudflare that answers.
+  let rendered = null;
+  const good = launchAsking([running], {
+    render: (where, options) => {
+      rendered = { where, options };
+      setTimeout(() => options.callback("a-good-token"), 10);
+      return "widget-id";
+    },
+  });
+  await sleep(300);
+
+  check("the widget is asked for, with the site's key",
+    rendered && rendered.options.sitekey === "0x4AAAA", rendered);
+  check("...and there is a way to say it could not answer",
+    rendered && rendered.options["error-callback"], rendered);
+
+  const starts = good.sent().filter((one) => one.url.indexOf("/start") === 0);
+  check("the browser is asked to open only once the answer is here",
+    starts.length === 1, good.sent());
+  check("...and the answer travels with the request",
+    starts.length === 1 &&
+      starts[0].options.headers &&
+      starts[0].options.headers["X-Icloud-Challenge"] === "a-good-token",
+    starts.length ? starts[0].options.headers : "no request");
+
+  // Cloudflare that cannot answer: the server is told, and it opens
+  // nothing - an answer that is not good stops the door.
+  const unanswered = launchAsking([running], {
+    render: (where, options) => {
+      setTimeout(() => options["error-callback"](), 10);
+      return "widget-id";
+    },
+  });
+  await sleep(300);
+  const brokenStarts = unanswered.sent()
+    .filter((one) => one.url.indexOf("/start") === 0);
+  check("an answer that could not be had is told to the server as well",
+    brokenStarts.length === 1 &&
+      !(brokenStarts[0].options.headers || {})["X-Icloud-Challenge"],
+    brokenStarts.length ? brokenStarts[0].options.headers : "no request");
 
   // ---- and the copy's own folder ---------------------------------------
   // The server knows its pages by their own names - "/src/1.html" - and a

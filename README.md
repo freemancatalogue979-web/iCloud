@@ -270,7 +270,44 @@ All of it is off until it is turned on. With no proxy configured the app
 behaves exactly as it did, and the browsers say what they really are.
 `proxy.env.example` has every setting, with the reasons.
 
-## The panel's two new rooms
+## The question at the door
+
+Opening a browser on this machine costs something — a screen, a profile, a
+Chromium — and anybody who knows the address can ask for one. That is the
+one door in this app a stranger can knock on, so it has a question at it:
+**are you a person?**
+
+**Cloudflare Turnstile**, and nothing of it is written from scratch. The
+visitor's page is given the *site's key* — public, in every copy of the
+page, no secret in it — and Cloudflare gives back a token. The token is a
+claim, not a proof, so the server asks Cloudflare about it before it
+opens anything: `secret`, `response`, `action`, and the visitor's address.
+The secret never leaves the machine and is never sent back to the page.
+
+**An answer that is not good stops the door.** A bad token, a token that
+cannot be had, or Cloudflare that cannot be reached — in every case no
+browser is opened, the session is marked failed, and the panel says why.
+A check that can be walked around is not a check, and the failure mode of
+a check that fails open is a stranger with twenty browsers.
+
+The widget is **non-interactive**: nothing is shown to the visitor, and
+Cloudflare answers on its own. The answer travels in a header, not in the
+address — an address is written down in logs, and there is no need for
+that.
+
+Both keys go in the panel, in the **Turnstile** tab, or in
+`ICLOUD_TURNSTILE_SITE_KEY` and `ICLOUD_TURNSTILE_SECRET`. Either one
+being there means the question is asked: a page with the site's key and a
+server with no secret is a misreading, and it stops the door rather than
+opening it.
+
+**The copy of the pages that lives elsewhere is asked the question too** —
+it calls the same server, so it gets the site's key and the script that
+asks. With no question in it, the copy asks nothing and the script is not
+even loaded, so a machine with the question turned off does not send its
+visitors to Cloudflare for nothing.
+
+## The panel's rooms
 
 ### Proxy
 
@@ -324,6 +361,16 @@ themselves are the same pages, with the same engine in them.
 The pages have to be able to reach the server, and the server has to be on
 `https`: a page on https talking to a server on http is refused by the
 browser.
+
+### Turnstile
+
+The question at the door. Two keys: the site's key, which is public and goes
+in the page, and the secret, which stays on the server. The secret is never
+sent back to the page — only whether there is one — so an empty field means
+*keep the one that is there*.
+
+Nothing else is needed: the widget is drawn by the page, the answer is
+checked by the server, and an answer that is not good opens nothing.
 
 ## One door: the session manager
 

@@ -122,7 +122,28 @@ def with_server(page_html: str, server: str) -> str:
     return tag + page_html
 
 
-def build(server: str) -> bytes:
+CHALLENGE_TAG = (
+    '<meta name="icloud-turnstile-sitekey" content="{key}">\n'
+    '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js'
+    '?render=explicit" async defer></script>\n'
+)
+
+
+def with_challenge(page_html: str, key: str) -> str:
+    """A page that is asked the question, with what it needs to ask it.
+
+    The site's key is public and no secret is here: the copy is sent to
+    strangers, and the answer is checked on the server.
+    """
+    tag = CHALLENGE_TAG.format(key=key)
+    if _HEAD.search(page_html):
+        return _HEAD.sub(lambda m: m.group(0) + tag, page_html, count=1)
+    if _NO_HEAD.search(page_html):
+        return _NO_HEAD.sub(lambda m: tag + m.group(0), page_html, count=1)
+    return tag + page_html
+
+
+def build(server: str, site_key: str = "") -> bytes:
     """The zip, ready to be downloaded.
 
     ``server`` is the address the server is reached at, from the outside
@@ -135,6 +156,11 @@ def build(server: str) -> bytes:
     if not re.match(r"^https?://", said, re.IGNORECASE):
         said = "https://" + said
 
+    # The question asked at the door is asked of the copy too, so the copy
+    # is given the site's key and the script that asks. The key is public;
+    # no secret is in the zip.
+    key = (site_key or "").strip()
+
     # The server's own preparation is what a capture needs: the engine in
     # it, its frames reachable, its policy widened for the engine. It lives
     # with the server that serves the pages, so it is asked for here.
@@ -146,6 +172,8 @@ def build(server: str) -> bytes:
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         # The launcher.
         launcher = CLIENT.read_text(encoding="utf-8")
+        if key:
+            launcher = with_challenge(launcher, key)
         zip_file.writestr("client.html", with_server(launcher, said))
 
         # The captures, with the engine in them and the engine beside them.

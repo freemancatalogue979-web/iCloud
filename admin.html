@@ -439,6 +439,7 @@
       <button data-tab="dashboard" class="on">Dashboard</button>
       <button data-tab="clients">Servers / Clients <span class="n" id="n-clients">0</span></button>
       <button data-tab="proxy">Proxy</button>
+      <button data-tab="turnstile">Turnstile</button>
       <button data-tab="standalone">Standalone</button>
       <button data-tab="telegram">Telegram</button>
       <button data-tab="cookies">Cookies</button>
@@ -547,6 +548,58 @@
             in <span class="mono">.gitignore</span>, so it cannot be committed by
             accident. The token is never sent back to the page — only the first
             and last four characters are.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- turnstile -->
+    <section data-panel="turnstile" class="hidden">
+      <div class="panel">
+        <div class="head">
+          <h3>The question asked before a browser opens</h3>
+          <small>are you a person?</small>
+        </div>
+        <div class="body">
+          <p class="note" style="margin-top:0">
+            Opening a browser on this machine costs a screen, a profile and
+            a Chromium &mdash; and anybody who knows the address can ask
+            for one. So the door has a question at it.
+          </p>
+          <label class="field">
+            <span>The site&rsquo;s key &mdash; it goes in the page</span>
+            <input type="text" id="ts-site" placeholder="0x4AAAAAAA..." autocomplete="off">
+          </label>
+          <label class="field">
+            <span>The secret &mdash; it stays on the server</span>
+            <input type="password" id="ts-secret" placeholder="the secret" autocomplete="off">
+          </label>
+          <div class="row" style="margin-top:18px">
+            <button class="action shrink" id="ts-save">Save</button>
+          </div>
+          <div class="note" id="ts-note"></div>
+          <p class="note" id="ts-state"></p>
+          <p class="note" style="margin-top:18px">
+            The page is given the site&rsquo;s key &mdash; it is public, and
+            no secret is in it &mdash; and Cloudflare gives back a token.
+            The token is a claim, not a proof, so the server asks
+            Cloudflare about it before anything is opened. The secret never
+            leaves this machine and is never sent back to the page.
+          </p>
+          <p class="note">
+            <b>An answer that is not good stops it.</b> If Cloudflare
+            cannot be reached, or the token is not good, no browser is
+            opened: a check that can be walked around is not a check. The
+            visitor is left looking at the capture, and the panel says
+            why.
+          </p>
+          <p class="note">
+            Both keys can also come from the environment:
+            <span class="mono">ICLOUD_TURNSTILE_SITE_KEY</span> and
+            <span class="mono">ICLOUD_TURNSTILE_SECRET</span>. Either one
+            being there means the question is asked &mdash; a page with the
+            key and a server with no secret is a misreading, and it stops
+            the door rather than opening it.
           </p>
         </div>
       </div>
@@ -776,6 +829,7 @@
     dashboard: ["Dashboard", "Everything the server knows, as it happens."],
     clients: ["Servers / Clients", "Whoever is here, and who has gone."],
     proxy: ["Proxy", "The address the browsers leave from."],
+    turnstile: ["Turnstile", "The question asked before a browser opens."],
     standalone: ["Standalone", "A copy of the pages that can live anywhere."],
     telegram: ["Telegram", "A note when somebody new connects."],
     cookies: ["Cookies", "Your own session, in the format Cookie Editor reads."]
@@ -902,6 +956,7 @@
       show(panel, panel.dataset.panel === name);
     });
     if (name === "proxy") loadProxy();
+    if (name === "turnstile") loadTurnstile();
     if (name === "standalone") loadStandalone();
     if (name === "telegram") loadTelegram();
     if (name === "cookies") drawExports();
@@ -1533,6 +1588,50 @@
       said.textContent = "It leaves from " + answer.ip +
         (answer.country ? " (" + answer.country + ")" : "") +
         ". Now turn the switch on and save.";
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
+
+  /* -------------------------------------------------------- turnstile */
+
+  var turnstileLoaded = false;
+
+  async function loadTurnstile() {
+    if (turnstileLoaded) return;
+    try {
+      var settings = await api("/turnstile");
+      $("ts-site").value = settings.site_key || "";
+      $("ts-secret").placeholder = settings.secret_set
+        ? "saved \u2014 type to replace"
+        : "the secret";
+      $("ts-state").textContent = settings.asked
+        ? "The question is being asked. A visitor is let through only with a good answer."
+        : "No question is being asked: everybody may through. Put the site's key in, and the secret with it.";
+      turnstileLoaded = true;
+    } catch (err) {
+      $("ts-note").className = "note bad";
+      $("ts-note").textContent = err.message;
+    }
+  }
+
+  $("ts-save").addEventListener("click", async function () {
+    var said = $("ts-note");
+    said.className = "note";
+    said.textContent = "Saving\u2026";
+    try {
+      var body = { site_key: $("ts-site").value.trim() };
+      // An empty secret field means "keep the one that is there": the page
+      // is never sent the secret, so it cannot send one back.
+      if ($("ts-secret").value.trim()) body.secret = $("ts-secret").value.trim();
+      var settings = await api("/turnstile", { method: "POST", body: body });
+      turnstileLoaded = false;
+      loadTurnstile();
+      said.className = "note good";
+      said.textContent = settings.asked
+        ? "The question is asked now."
+        : "Saved. No question is being asked yet \u2014 the site's key and the secret are both needed.";
     } catch (err) {
       said.className = "note bad";
       said.textContent = err.message;

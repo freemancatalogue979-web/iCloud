@@ -46,6 +46,7 @@ import live
 import proxy_pool
 import sessions
 import stealth
+import turnstile
 import telegram as telegram_module
 import xvfb
 
@@ -680,7 +681,8 @@ async def allow_the_copy(request: Request, call_next):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Access-Control-Allow-Credentials"] = "true"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+        response.headers["Access-Control-Allow-Headers"] = \
+            "Content-Type, " + turnstile.HEADER
         response.headers["Vary"] = "Origin"
     return response
 
@@ -709,10 +711,22 @@ async def index(request: Request):
     if session is not None and session.state["status"] == "done":
         return RedirectResponse(session.hub.page, status_code=307,
                                 headers=cookie)
-    # no-store, so an edit to client.html shows up on refresh instead of
-    # serving the browser's cached copy.
-    return FileResponse(HERE / "client.html",
-                        headers={**NO_STORE, **cookie})
+    # The page is given the site's key for the question it is asked - it is
+    # public, and no secret is in it.
+    page = (HERE / "client.html").read_text(encoding="utf-8")
+    site = turnstile.site_key()
+    try:
+        site = site or str(admin.STORE.turnstile().get("site_key") or "")
+    except Exception:
+        pass
+    if not site:
+        # Nothing to add: the file is served as a file.
+        # no-store, so an edit to client.html shows up on refresh instead of
+        # serving the browser's cached copy.
+        return FileResponse(HERE / "client.html",
+                            headers={**NO_STORE, **cookie})
+    page = page.replace("</head>", turnstile_tags(site), 1)
+    return HTMLResponse(page, headers={**NO_STORE, **cookie})
 
 
 @app.get("/start")
@@ -723,11 +737,80 @@ async def start(request: Request):
     # opens: the browser needs to know both before it is opened, not
     # after.
     await prepare_identity(session, request)
+
+    # The question asked first: is this a person? The page was given the
+    # site's key and Cloudflare gave back a token; the token is a claim,
+    # so it is checked here before anything is opened.
+    #
+    # An answer that is not good stops it. A check that can be walked
+    # around is not a check, and a stranger who can open browsers on this
+    # machine is what this is here to prevent.
+    good = await check_person(request)
+    if not good.get("ok"):
+        said = good.get("said") or "the question was not answered properly"
+        log(f"not opening a browser: {said}")
+        session.state.update(status="error", error=said)
+        SESSIONS.failed(session, said)
+        return JSONResponse(session.state,
+                            headers={"Set-Cookie": session_cookie(session.id)})
+
     state = await start_browser(session)
     # The cookie says the same thing on every request from now on, so the
     # page does not have to say it again.
     return JSONResponse(state,
                         headers={"Set-Cookie": session_cookie(session.id)})
+
+
+def turnstile_tags(site: str) -> str:
+    """What a page needs to ask the question: the site's key, and the script.
+
+    The key is public - it is in every copy of the page, and the page is
+    sent to strangers - and no secret is here. The script is asked for
+    only when there is a question to ask, so a machine with the question
+    turned off does not send its visitors to Cloudflare for nothing.
+    """
+    return (
+        f'<meta name="icloud-turnstile-sitekey" '
+        f'content="{html_module.escape(site)}">\n'
+        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js'
+        '?render=explicit" async defer></script>\n</head>')
+
+
+async def check_person(request: Request) -> dict:
+    """Is this a person? Turnstile's answer, checked.
+
+    The question is asked when either key is there - the site's key in the
+    page, the secret here. Both being absent means the question is not
+    being asked and everybody may through.
+
+    The secret is read from the panel's store when it is there, and from
+    the environment otherwise. A page with the site's key and a server
+    with no secret is a misreading, and it stops the door rather than
+    opening it.
+    """
+    site = turnstile.site_key()
+    given = turnstile.secret()
+    try:
+        stored = admin.STORE.turnstile()
+        site = site or str(stored.get("site_key") or "")
+        given = given or str(stored.get("secret") or "")
+    except Exception:
+        pass
+
+    if not turnstile.asked_for(site, given):
+        return {"ok": True, "said": "no question is being asked"}
+
+    token = ""
+    try:
+        token = str(request.headers.get(turnstile.HEADER, "") or "")
+    except Exception:
+        token = ""
+
+    said = await turnstile.verify(token, given_secret=given,
+                                  ip=geo.client_ip(request))
+    if said.get("ok"):
+        log("the question was answered properly")
+    return said
 
 
 async def start_browser(session: "Session"):

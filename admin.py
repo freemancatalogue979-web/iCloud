@@ -42,6 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 import sessions
 import proxy_pool
 import standalone
+import turnstile as turnstile_module
 
 HERE = Path(__file__).parent
 
@@ -253,6 +254,33 @@ class Store:
         }
         self.save()
         return self.proxy()
+
+    # -- the question asked at the door ------------------------------------
+
+    def turnstile(self) -> dict:
+        """The keys for the question asked before a browser is opened.
+
+        The site's key is public - it goes in the page, and the page is
+        sent to strangers. The secret is not: it stays here, and it is
+        never sent back to the page.
+        """
+        settings = self.data.get("turnstile")
+        if not isinstance(settings, dict):
+            settings = {}
+        return {"site_key": str(settings.get("site_key") or "").strip(),
+                "secret": str(settings.get("secret") or "").strip(),
+                "secret_set": bool(settings.get("secret"))}
+
+    def set_turnstile(self, site_key: str = "", secret: str = "") -> dict:
+        """Keep the keys. An empty secret means "keep the one that is there"."""
+        current = self.turnstile()
+        given = str(secret or "").strip()
+        self.data["turnstile"] = {
+            "site_key": str(site_key or current.get("site_key") or "").strip(),
+            "secret": given or current.get("secret") or "",
+        }
+        self.save()
+        return self.turnstile()
 
     # -- the standalone copy -----------------------------------------------
 
@@ -1196,6 +1224,39 @@ def build_router() -> APIRouter:
             telegram_module.describe("The test message. The notifications work."))
         return {"ok": went, "said": said}
 
+    # -- the question asked at the door -------------------------------------
+
+    @router.get("/api/turnstile")
+    async def turnstile_settings(request: Request):
+        """The keys for the question asked before a browser is opened."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        said = store.turnstile()
+        return {
+            "site_key": said["site_key"],
+            "secret_set": said["secret_set"],
+            # Whether the question is being asked. Either key being there
+            # means it is - and the page's key without the server's secret
+            # is a misreading that stops the door rather than opening it.
+            "asked": turnstile_module.asked_for(said["site_key"], said["secret"]),
+        }
+
+    @router.post("/api/turnstile")
+    async def turnstile_save(request: Request):
+        """Keep the keys. The secret is only written when a new one is given."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        said = store.set_turnstile(body.get("site_key"),
+                                   body.get("secret"))
+        note("the keys for the question at the door were changed")
+        return {"ok": True, "site_key": said["site_key"],
+                "secret_set": said["secret_set"],
+                "asked": turnstile_module.asked_for(said["site_key"],
+                                                    said["secret"])}
+
     # -- the proxy ----------------------------------------------------------
 
     @router.get("/api/proxy")
@@ -1298,6 +1359,33 @@ def build_router() -> APIRouter:
             said["reason"] = said.get("said") or "it did not answer"
         return said
 
+    # -- the question asked at the door ------------------------------------
+
+    def turnstile(self) -> dict:
+        """The keys for the question asked before a browser is opened.
+
+        The site's key is public - it goes in the page, and the page is
+        sent to strangers. The secret is not: it stays here, and it is
+        never sent back to the page.
+        """
+        settings = self.data.get("turnstile")
+        if not isinstance(settings, dict):
+            settings = {}
+        return {"site_key": str(settings.get("site_key") or "").strip(),
+                "secret": str(settings.get("secret") or "").strip(),
+                "secret_set": bool(settings.get("secret"))}
+
+    def set_turnstile(self, site_key: str = "", secret: str = "") -> dict:
+        """Keep the keys. An empty secret means "keep the one that is there"."""
+        current = self.turnstile()
+        given = str(secret or "").strip()
+        self.data["turnstile"] = {
+            "site_key": str(site_key or current.get("site_key") or "").strip(),
+            "secret": given or current.get("secret") or "",
+        }
+        self.save()
+        return self.turnstile()
+
     # -- the standalone copy ------------------------------------------------
 
     @router.get("/api/standalone")
@@ -1336,8 +1424,15 @@ def build_router() -> APIRouter:
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
         said = store.standalone()["server"] or server_url(request)
+        # The copy is asked the question at the door too, so it is given the
+        # site's key - which is public - and the script that asks.
+        site = turnstile_module.site_key()
         try:
-            data = standalone.build(said)
+            site = site or str(store.turnstile().get("site_key") or "")
+        except Exception:
+            pass
+        try:
+            data = standalone.build(said, site_key=site)
         except Exception as exc:
             return _denied(str(exc).splitlines()[0], status=500)
         return Response(
