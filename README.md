@@ -513,6 +513,15 @@ the splash takes the same line the captures take: one socket, kept open, and
 the server says what the session is doing. The old way is still there, for
 when the line cannot be opened at all, and then it asks once a second.
 
+**The splash does not go to the same place twice.** A host that answers
+every path with the same file — a worker's single-page fallback, say —
+sends the splash round and round for ever: it goes to the capture, the
+host brings it back, and it goes again. Nothing about that looks wrong
+from inside the page; it just reloads. So a place that has been tried is
+not tried again, and the splash says where it is and where it is going,
+so the server can say it out loud when the copy is serving the launcher
+where the capture should be.
+
 After that the capture is the *top-level document*. It is laid out at the
 window's width, with its own scrollbars, fonts and title, instead of being a
 page inside a frame inside a page. That was the thing an iframe got wrong: a

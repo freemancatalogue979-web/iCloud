@@ -52,7 +52,7 @@ function fakeLine() {
   return Fake;
 }
 
-function launch(statuses, url, seed, answers, socket) {
+function launch(statuses, url, seed, answers, socket, tried) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
@@ -66,6 +66,16 @@ function launch(statuses, url, seed, answers, socket) {
     virtualConsole,
     beforeParse(window) {
       if (socket) window.WebSocket = socket;
+      // The places a previous visit tried: a page that has been there
+      // before is not tried again.
+      if (tried) {
+        try {
+          window.sessionStorage.setItem("icloud-visited",
+                                        JSON.stringify(tried));
+        } catch (err) {
+          /* no storage in this one */
+        }
+      }
       // Some of the tests need to say where the copy is, as a browser that
       // has been here before would have it remembered.
       if (seed) {
@@ -175,6 +185,19 @@ function visibleText(doc) {
       .every((url) => /[?&]visitor=/.test(url)), noLine.asked());
   check("...and goes when the server says the browser is ready",
     navigations(noLine.errors).length === 1, noLine.errors);
+
+  // ---- and a place that has been tried is not tried again ---------------
+  // A host that answers every path with the same file - a worker's
+  // single-page fallback, say - sends the splash round and round for ever:
+  // it goes to the capture, the host brings it back, and it goes again.
+  const Round = fakeLine();
+  const round = launch([done], undefined, undefined, undefined, Round,
+                       [{ place: "/src/1.html", at: Date.now() }]);
+  await sleep(100);
+  Round.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+  check("a place that has been tried is not tried again",
+    navigations(round.errors).length === 0, round.errors);
 
   // ---- the browser will not open ---------------------------------------
   const Broken = fakeLine();

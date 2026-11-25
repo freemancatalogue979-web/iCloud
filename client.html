@@ -157,6 +157,47 @@
   }
   let gone = false;
 
+  /* The places this splash has tried.
+   *
+   * A host that answers every path with the same file - a worker's
+   * single-page fallback, say - sends the splash round and round for
+   * ever: it goes to the capture, the host brings it back, and it goes
+   * again. Nothing about that looks wrong from inside the page; it just
+   * reloads.
+   *
+   * So a place that has been tried is not tried again, for as long as the
+   * round could plausibly still be going. A person who reloads the page
+   * by hand is not in a round: the splash only goes once the browser is
+   * ready, and by then the visitor is on the capture, not here.
+   */
+  const VISITED_KEY = "icloud-visited";
+  const VISITED_FOR = 5000;      // milliseconds
+
+  function visited(now) {
+    try {
+      const raw = sessionStorage.getItem(VISITED_KEY);
+      const list = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(list)) return [];
+      return list.filter((one) => one && now - one.at < VISITED_FOR);
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function markVisited(place, now) {
+    try {
+      const list = visited(now);
+      list.push({ place: place, at: now });
+      sessionStorage.setItem(VISITED_KEY, JSON.stringify(list));
+    } catch (err) {
+      /* no storage: the guard still holds for this page */
+    }
+  }
+
+  function beenThere(place, now) {
+    return visited(now).some((one) => one.place === place);
+  }
+
   /* The capture replaces this document entirely - no frame, no chrome, no
    * intermediate screen. Its /sync.js, injected by the server, runs at the
    * top level, so typing, clicks and navigation still reach the server. */
@@ -170,6 +211,13 @@
     // it again, it asks again, and the visitor watches a page reload
     // without end. So the page this one is on is never asked for.
     if (to.pathname === location.pathname) return;
+    // And a place that has already been tried is not tried again: the host
+    // answered it with this page last time, and it will answer it with
+    // this page again.
+    const now = Date.now();
+    if (beenThere(to.pathname, now)) return;
+    markVisited(to.pathname, now);
+    sayWhere(to.pathname);
     location.replace(to.href);
   }
 
@@ -353,6 +401,26 @@
 
   let line = false;          // the line to the server is up
   let asking = 0;            // the timer of the old way of asking
+  let socket = null;         // the line itself
+
+  /* Saying where this page is.
+   *
+   * The server keeps the pages of a session and it knows which one the
+   * visitor should be on. So the launcher says where it is and where it
+   * is going - and when the two do not make sense, the server says it
+   * out loud. Nothing else would: a copy that is serving the launcher
+   * instead of the capture looks, from the visitor's side, like a page
+   * that simply reloads.
+   */
+  function sayWhere(going) {
+    if (!socket) return;
+    try {
+      socket.send(JSON.stringify({ t: "splash", page: location.pathname,
+                                   going: going || "" }));
+    } catch (err) {
+      /* the line is gone; it will be said again when it comes back */
+    }
+  }
 
   function stopAsking() {
     if (!asking) return;
@@ -382,21 +450,24 @@
 
   function listen() {
     if (gone) return;
-    let socket;
     try {
       socket = new WebSocket(lineUrl());
     } catch (err) {
+      socket = null;
       setTimeout(listen, 1000);
       return;
     }
+    const opened = socket;
 
-    socket.onopen = function () {
+    opened.onopen = function () {
       line = true;
       // The line is up: there is nothing to ask for.
       stopAsking();
+      // And the server is told where this page is.
+      sayWhere("");
     };
 
-    socket.onmessage = function (event) {
+    opened.onmessage = function (event) {
       let message;
       try {
         message = JSON.parse(event.data);
@@ -426,16 +497,17 @@
       }
     };
 
-    socket.onclose = function () {
+    opened.onclose = function () {
       line = false;
+      if (socket === opened) socket = null;
       // The line is gone: ask the old way until it is back.
       startAsking();
       setTimeout(listen, 1000);
     };
 
-    socket.onerror = function () {
+    opened.onerror = function () {
       try {
-        socket.close();
+        opened.close();
       } catch (err) {
         /* already closing */
       }

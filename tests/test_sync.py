@@ -520,6 +520,24 @@ async def main():
     check("the viewer that arrived is told where it is",
           bob.sent[-1] == {"t": "state", "page": "/src/3.html", "values": {}}, bob.sent[-1])
 
+    # ---- the launcher says where it is -----------------------------------
+    # A copy that is serving the launcher instead of the capture looks, from
+    # the visitor's side, like a page that simply reloads. So the launcher
+    # says where it is, and the server says it out loud.
+    bob.feed({"t": "splash", "page": "/src/1.html", "going": "/src/1.html"})
+    await settle()
+    check("the launcher says where it is going",
+          session.launcher_going == "/src/1.html", session.launcher_going)
+    check("...and a launcher sitting on a capture's page is said out loud",
+          "the copy is serving the launcher there"
+          in server.state.get("step", ""), server.state.get("step"))
+
+    bob.feed({"t": "splash", "page": "/client.html", "going": "/src/1.html"})
+    await settle()
+    check("...and going to the same place twice is said out loud",
+          "is answering with the launcher again"
+          in server.state.get("step", ""), server.state.get("step"))
+
     # ---- the client's own state ------------------------------------------
     # How far this person has got is kept in their own browser, and the
     # server is told about it when the engine says hello. Somebody who has
