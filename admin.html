@@ -278,6 +278,14 @@
   /* ---------------------------------------------------------------- forms */
   label.field { display: block; margin-bottom: 16px; }
   label.field span { display: block; font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+  /* A field that is not being used because another box was ticked. */
+  label.field.off { opacity: .45; }
+  label.field.off input { pointer-events: none; }
+  /* A tick with a sentence beside it. */
+  label.check { display: flex; gap: 10px; align-items: flex-start;
+    margin: 0 0 12px; font-size: 13.5px; line-height: 1.45; cursor: pointer; }
+  label.check input { margin-top: 2px; accent-color: var(--blue); }
+  label.check code { font-size: 12.5px; }
   input[type=text], input[type=password], input[type=number], select {
     width: 100%;
     background: var(--bg);
@@ -576,15 +584,35 @@
           <label class="field">
             <span>Protocol</span>
             <select id="px-scheme">
-              <option value="socks5">SOCKS5 &mdash; the proxy resolves the names</option>
-              <option value="http">HTTP</option>
+              <option value="http">HTTP &mdash; works with a user name and a password</option>
+              <option value="socks5">SOCKS5 &mdash; only without a password</option>
             </select>
           </label>
-          <label class="field">
+          <p class="note" style="margin-top:-8px">
+            Chromium cannot use a SOCKS5 proxy with a password &mdash; the
+            browser says so before it opens. So: use HTTP, or whitelist this
+            machine&rsquo;s address in Decodo and use SOCKS5 with no password.
+            HTTP loses nothing: the proxy is given the names and resolves
+            them, so nothing is looked up here and nothing is said here
+            about who is going where.
+          </p>
+          <label class="check">
+            <input type="checkbox" id="px-whitelisted">
+            <span>The provider knows this machine by its address
+              (whitelisting)</span>
+          </label>
+          <p class="note" id="px-white-note" style="margin-top:-8px; display:none">
+            Then there is no user name and no password: the country is
+            chosen by the address (<code>country-us.gate.decodo.com</code>)
+            and the session is held by the port. This is the only way to
+            keep SOCKS5, and it means this machine needs an address that
+            does not change.
+          </p>
+          <label class="field" id="px-user-field">
             <span>User name</span>
             <input type="text" id="px-user" placeholder="alice" autocomplete="off">
           </label>
-          <label class="field">
+          <label class="field" id="px-pass-field">
             <span>Password</span>
             <input type="password" id="px-pass" placeholder="the password" autocomplete="off">
           </label>
@@ -1374,7 +1402,8 @@
       $("px-enabled").checked = !!settings.enabled;
       $("px-kind").value = settings.kind || "decodo";
       $("px-server").value = settings.server || "";
-      $("px-scheme").value = settings.scheme || "socks5";
+      $("px-scheme").value = settings.scheme || "http";
+      $("px-whitelisted").checked = !!settings.whitelisted;
       $("px-user").value = settings.username || "";
       $("px-pass").placeholder = settings.password_set
         ? "saved \u2014 type to replace"
@@ -1382,12 +1411,24 @@
       $("px-country").value = settings.country || "US";
       $("px-minutes").value = settings.session_minutes || 120;
       $("px-max").value = settings.max_per_group || 3;
+      applyWhitelist();
       proxyLoaded = true;
     } catch (err) {
       $("px-note").className = "note bad";
       $("px-note").textContent = err.message;
     }
   }
+
+  // Whitelisting means the provider knows this machine by its address, so
+  // there is no user name and no password to give. The fields are greyed
+  // so that it is clear they are not being forgotten.
+  function applyWhitelist() {
+    var on = $("px-whitelisted").checked;
+    $("px-user-field").className = on ? "field off" : "field";
+    $("px-pass-field").className = on ? "field off" : "field";
+    $("px-white-note").style.display = on ? "" : "none";
+  }
+  $("px-whitelisted").addEventListener("change", applyWhitelist);
 
   $("px-save").addEventListener("click", async function () {
     var said = $("px-note");
@@ -1399,6 +1440,7 @@
         kind: $("px-kind").value,
         server: $("px-server").value.trim(),
         scheme: $("px-scheme").value,
+        whitelisted: $("px-whitelisted").checked,
         username: $("px-user").value.trim(),
         country: $("px-country").value.trim().toUpperCase(),
         session_minutes: parseInt($("px-minutes").value, 10) || 120,
@@ -1440,6 +1482,7 @@
         kind: $("px-kind").value,
         server: $("px-server").value.trim(),
         scheme: $("px-scheme").value,
+        whitelisted: $("px-whitelisted").checked,
         username: $("px-user").value.trim(),
         country: $("px-country").value.trim().toUpperCase() || "US",
         session_minutes: parseInt($("px-minutes").value, 10) || 120,

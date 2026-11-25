@@ -142,7 +142,7 @@ class Pool:
         """
         self.kind = "none"
         self.server = ""
-        self.scheme = "socks5"
+        self.scheme = "http"
         self.user = ""
         self.trimmed = False
         self.password = ""
@@ -151,6 +151,7 @@ class Pool:
         self.sticky = "session"
         self.groups_per_country = 8
         self.max_per_group = 3
+        self.whitelisted = False
         self.enabled = False
         self._state = None
 
@@ -167,7 +168,7 @@ class Pool:
         self.kind = (_env("ICLOUD_PROXY", "none") or "none").lower()
         self.server = _env("ICLOUD_PROXY_SERVER") or (
             DECODO_SERVER if self.kind == "decodo" else "")
-        self.scheme = (_env("ICLOUD_PROXY_SCHEME", "socks5") or "socks5").lower()
+        self.scheme = (_env("ICLOUD_PROXY_SCHEME", "http") or "http").lower()
         given = _env("ICLOUD_PROXY_USER")
         self.user = base_user(given)
         # Whether the name that was given had parameters in it, and they
@@ -184,6 +185,25 @@ class Pool:
         # where it starts; the panel is the switch from then on.
         self.enabled = self.usable()
 
+    def browser_usable(self) -> bool:
+        """Can the browser use this proxy?
+
+        Chromium cannot use a SOCKS5 proxy with a password: Playwright
+        refuses it before the browser is even opened. An HTTP proxy has
+        no such trouble, and SOCKS5 with no password is fine too - which
+        is what whitelisting this machine's address gives.
+
+        An HTTP proxy is the better of the two anyway: Chromium sends the
+        *name* to it and lets the proxy resolve it, so nothing is looked
+        up on this machine and nothing is said here about who is going
+        where.
+        """
+        if not self.usable():
+            return False
+        if self.scheme == "socks5" and (self.user or self.password):
+            return False
+        return True
+
     def usable(self) -> bool:
         """Is there enough here to connect to?
 
@@ -195,6 +215,12 @@ class Pool:
         if self.kind not in ("decodo", "generic"):
             return False
         if not self.server:
+            return False
+        if self.whitelisted:
+            # The provider knows this machine by its address, and there is
+            # nothing else to say.
+            return True
+        if not self.user and not self.password:
             return False
         if not self.user:
             return False
@@ -224,6 +250,7 @@ class Pool:
         self.kind = text("kind", self.kind)
         self.server = text("server", self.server)
         self.scheme = text("scheme", self.scheme)
+        self.whitelisted = bool(settings.get("whitelisted"))
         given = text("username", "")
         if given:
             self.user = base_user(given)
@@ -370,14 +397,28 @@ class Pool:
         session = str(group.get("session") or group_id)
         where = country or str(group.get("country") or self.country)
 
-        if self.kind == "decodo":
-            user = decodo_username(self.user, country=where, session=session,
-                                   minutes=self.session_minutes,
-                                   sticky=self.sticky)
-        else:
-            user = self.user
-
         host, _, port = self.server.partition(":")
+        user = self.user
+
+        if self.kind == "decodo":
+            if self.user and not self.whitelisted:
+                user = decodo_username(self.user, country=where,
+                                       session=session,
+                                       minutes=self.session_minutes,
+                                       sticky=self.sticky)
+            else:
+                # Whitelisting: there is no user name to say the country
+                # in, so the country is said in the host name instead -
+                # "country-us.gate.decodo.com" - and the sticky session
+                # is the port.
+                user = ""
+                host = f"country-{where.lower()}.{host}"
+                index = 0
+                tail = str(group_id).rsplit("-", 1)[-1]
+                if tail.isdigit():
+                    index = int(tail)
+                port = str(10001 + (index % 50))
+
         server = f"{self.scheme}://{host}"
         if port:
             server += f":{port}"
@@ -570,8 +611,15 @@ def missing(pool) -> list:
     said = []
     if pool.kind not in ("decodo", "generic"):
         said.append("which proxy it is")
+    if pool.scheme == "socks5" and (pool.user or pool.password):
+        said.append("a protocol the browser can use (Chromium cannot use "
+                    "SOCKS5 with a password)")
     if not pool.server:
         said.append("the server and port")
+    if pool.whitelisted:
+        # The provider knows this machine by its address: nothing else is
+        # needed.
+        return said
     if not pool.user:
         said.append("the user name")
     if pool.kind == "decodo" and not pool.password:

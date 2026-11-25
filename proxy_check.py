@@ -54,17 +54,26 @@ def main(argv):
     print(f"username    {settings['username']}")
     print(f"password    {'*' * len(settings['password'])}")
 
-    said = asyncio.run(proxy_pool.check_in_browser(
-        pool.playwright_proxy(group, country=country)))
-    if not said.get("ok"):
-        # The browser could not do it. If curl is there, it may say more.
-        quick = pool.check(group, country=country, force=True)
-        if quick.get("ok"):
-            said = quick
-        elif quick.get("reason") and not said.get("said"):
-            said["said"] = quick["reason"]
-        elif quick.get("said") and not said.get("said"):
-            said["said"] = quick["said"]
+    if pool.browser_usable():
+        said = asyncio.run(proxy_pool.check_in_browser(
+            pool.playwright_proxy(group, country=country)))
+        if not said.get("ok"):
+            # The browser could not do it. If curl is there, it may say more.
+            quick = pool.check(group, country=country, force=True)
+            if quick.get("ok"):
+                said = quick
+            elif quick.get("reason") and not said.get("said"):
+                said["said"] = quick["reason"]
+            elif quick.get("said") and not said.get("said"):
+                said["said"] = quick["said"]
+    else:
+        # A browser cannot use a SOCKS5 proxy with a password. curl can.
+        said = pool.check(group, country=country, force=True)
+        if not said.get("ok"):
+            said["said"] = said.get("said") or (
+                "the browser cannot use a SOCKS5 proxy with a password - use "
+                "HTTP, or whitelist this machine's address and use SOCKS5 "
+                "with no password")
 
     print("")
     if not said.get("ok"):

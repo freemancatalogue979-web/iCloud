@@ -205,7 +205,7 @@ class Store:
             "enabled": bool(settings.get("enabled", False)),
             "kind": str(settings.get("kind") or "decodo"),
             "server": str(settings.get("server") or ""),
-            "scheme": str(settings.get("scheme") or "socks5"),
+            "scheme": str(settings.get("scheme") or "http"),
             "username": str(settings.get("username") or ""),
             "password": str(settings.get("password") or ""),
             "country": str(settings.get("country") or "US"),
@@ -241,7 +241,9 @@ class Store:
             "enabled": bool(given.get("enabled", current.get("enabled", False))),
             "kind": text("kind", "decodo"),
             "server": text("server"),
-            "scheme": text("scheme", "socks5"),
+            "scheme": text("scheme", "http"),
+            "whitelisted": bool(given.get("whitelisted",
+                                          current.get("whitelisted", False))),
             "username": proxy_pool.base_user(text("username")),
             "password": text("password"),
             "country": text("country", "US").upper(),
@@ -988,6 +990,7 @@ def proxy_view(pool, store: Store) -> dict:
         "kind": pool.kind,
         "server": pool.server,
         "scheme": pool.scheme,
+        "whitelisted": bool(pool.whitelisted),
         "username": pool.user,
         "password_set": bool(pool.password),
         "country": pool.country,
@@ -1231,23 +1234,36 @@ def build_router() -> APIRouter:
         group = f"{country.lower()}-0"
         proxy = trial.playwright_proxy(group, country=country)
 
-        # The check is made with a browser, because a browser is what will
-        # use the proxy - and because a browser is the only thing on the
-        # machine that can speak to a SOCKS5 entrance on its own. curl may
-        # not be installed, and Python's own libraries cannot speak SOCKS5
-        # at all.
-        said = await proxy_pool.check_in_browser(proxy)
+        if trial.browser_usable():
+            # The check is made with a browser, because a browser is what
+            # will use the proxy - and because a browser is the only thing
+            # on the machine that can speak to a SOCKS5 entrance on its
+            # own. curl may not be installed, and Python's own libraries
+            # cannot speak SOCKS5 at all.
+            said = await proxy_pool.check_in_browser(proxy)
 
-        if not said.get("ok") and not said.get("ip"):
-            # The browser could not do it. If curl is there, it may say
-            # more about why.
-            quick = trial.check(group, country=country, force=True)
-            if quick.get("ok"):
-                said = quick
-            elif quick.get("reason") and not said.get("said"):
-                said["said"] = quick["reason"]
-            elif quick.get("said") and not said.get("said"):
-                said["said"] = quick["said"]
+            if not said.get("ok") and not said.get("ip"):
+                # The browser could not do it. If curl is there, it may
+                # say more about why.
+                quick = trial.check(group, country=country, force=True)
+                if quick.get("ok"):
+                    said = quick
+                elif quick.get("reason") and not said.get("said"):
+                    said["said"] = quick["reason"]
+                elif quick.get("said") and not said.get("said"):
+                    said["said"] = quick["said"]
+        else:
+            # A browser cannot use a SOCKS5 proxy with a password.
+            # Chromium does not, and Playwright refuses before the
+            # browser is opened. curl can, so the question is asked of
+            # curl - and if there is no curl, the operator is told
+            # exactly that, and why it matters.
+            said = trial.check(group, country=country, force=True)
+            if not said.get("ok"):
+                said["reason"] = said.get("reason") or said.get("said") or (
+                    "the browser cannot use a SOCKS5 proxy with a password - "
+                    "use HTTP, or whitelist this machine's address and use "
+                    "SOCKS5 with no password")
 
         if said.get("ok"):
             note(f"the proxy answered: {said.get('ip')}")
