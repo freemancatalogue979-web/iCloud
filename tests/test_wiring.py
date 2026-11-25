@@ -358,6 +358,45 @@ async def main():
     check("...and no screen of its own size",
           server.geometry_for(plain) is None)
 
+    # -- and the splash cannot go round in circles ------------------------
+    # A host that answers every path with the same file - the single-page
+    # fallback that most Worker templates for one page use - sends the
+    # visitor round and round for ever: the launcher asks for the capture,
+    # the host brings it back, and the visitor watches a page reload
+    # without end. Nothing about that looks wrong from inside the page.
+    #
+    # So the splash notices, says so, and takes the visitor to the server's
+    # own copy of the capture - once.
+    launcher = (Path(server.HERE) / "client.html").read_text(encoding="utf-8")
+    check("the splash keeps the capture's places that it has tried",
+          'TRIED_KEY = "icloud-tried"' in launcher, "")
+    check("...and it does not forget them after five seconds",
+          "VISITED_FOR = 5000" in launcher and
+          "if (isCapturePlace(place)) markTried(place);" in launcher, "")
+    check("...and it takes the visitor to the server's own copy",
+          "goToTheServer(" in launcher and
+          'GAVE_UP_KEY = "icloud-gave-up"' in launcher, "")
+    check("...and it says where it is, and why",
+          't: "splash"' in launcher and "going: where.going" in launcher and
+          "why: where.why" in launcher, "")
+
+    # -- and the panel shows what the launcher said -----------------------
+    panel = (Path(server.HERE) / "admin.py").read_text(encoding="utf-8")
+    page = (Path(server.HERE) / "admin.html").read_text(encoding="utf-8")
+    check("the panel is told what the launcher said",
+          '"splash": splash_note(session)' in panel, "")
+    check("...and it shows it",
+          "row.splash" in page, "")
+
+    # -- and the Worker that serves the copy is not a fallback -----------
+    worker = (Path(server.HERE) / "worker" / "wrangler.toml").read_text(
+        encoding="utf-8")
+    check("the Worker serves the files as they are",
+          'not_found_handling = "none"' in worker, worker)
+    check("...and not with a single-page fallback",
+          'not_found_handling = "single-page-application"' not in worker
+          or "must not" in worker, worker)
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

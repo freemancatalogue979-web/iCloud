@@ -49,6 +49,30 @@ def main():
     check("a note is in it", "README.txt" in names, names)
     check("the zip is not empty", len(data) > 1000, len(data))
 
+    # -- the launcher under both of its names -----------------------------
+    # A host that serves the root of a folder with index.html - which is
+    # most of them - needs the launcher there. The two are the same page,
+    # so they cannot drift apart.
+    check("the launcher is in it under both of its names",
+          "index.html" in names, names)
+    check("...and the two are the same page",
+          zip_file.read("index.html") == zip_file.read("client.html"))
+
+    # -- and the Worker that serves it -----------------------------------
+    # A host that answers every path with the same file sends the visitor
+    # round in circles for ever. The Worker in the zip is ready to be
+    # deployed as it is, and it does not do that.
+    check("the Worker that serves the copy is in it",
+          "worker.js" in names and "wrangler.toml" in names, names)
+    worker_settings = zip_file.read("wrangler.toml").decode("utf-8")
+    check("...and it is not a single-page fallback",
+          'not_found_handling = "none"' in worker_settings
+          and "single-page-application" in worker_settings,
+          worker_settings)
+    check("...and it serves the files as they are",
+          "env.SITE.fetch(request)" in
+          zip_file.read("worker.js").decode("utf-8"))
+
     # -- the pages are told where the server is --------------------------
     capture = zip_file.read("src/1.html").decode("utf-8")
     launcher = zip_file.read("client.html").decode("utf-8")

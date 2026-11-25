@@ -373,15 +373,38 @@ not the one the box listens on), and gives you a zip:
 
 ```
 client.html      the launcher: opens the browser and waits for it
+index.html       the same launcher, under the name most hosts serve a
+                 folder's root by
 src/*.html       the captures — the pages of the sign-in
 src/sync.js      the engine that makes the captures live
 src/flow.json    a copy of the server's flow, for reading only
+worker.js        a Cloudflare Worker that serves this copy
+wrangler.toml    the settings that Worker is served with
 README.txt       what this is, and what to do with it
 ```
 
 Unpack it into the folder the host serves — `public_html`, or a folder
 inside it — and open `client.html` through that folder's address. There is
 nothing to run there: only pages.
+
+**The host must serve the captures as files of their own.** A host that
+answers every path with the same file — the single-page fallback that most
+Worker templates for one-page sites use — sends the visitor round in
+circles for ever: the launcher asks for the capture, the host answers with
+the launcher, and the visitor watches a page reload without end. Nothing
+about that looks wrong from inside the page.
+
+On a Worker, `not_found_handling` has to be `none` and not
+`single-page-application`; `wrangler.toml` in the zip says so, and the
+Worker in it is ready to be deployed as it is (`npx wrangler deploy` in the
+unpacked folder). On any other host, check that `/src/1.html` opens the
+capture and not the launcher.
+
+And if it happens anyway, the page does not go round for ever: the
+launcher notices that it is sitting where a capture should be, says so to
+the server, and takes the visitor to the server's own copy of the capture —
+which is the same page. The server's log says what happened, and the panel
+shows it on the session's row.
 
 Three things are different in the copy, and all three are because the pages
 are somewhere else: the engine is found beside the pages rather than at
@@ -1519,6 +1542,8 @@ the project virtualenv by itself.
   about the machine it is on
 - `standalone.py` — the copy of the pages that can live on another host, as
   a zip
+- `worker/` — the Cloudflare Worker that serves that copy, and the settings
+  it is served with: the files as they are, and no single-page fallback
 - `proxy.env.example` — every setting for the above, with the reasons
 - `proxy_check.py` — asks the proxy who it is and where it leaves from,
   without opening a browser: `python proxy_check.py de`

@@ -37,6 +37,9 @@ function fakeLine() {
     this.url = String(url);
     this.readyState = 0;
     this.sent = [];
+    // What the page says over the line is kept, so that a test can look
+    // at it.
+    this.send = function (message) { this.sent.push(String(message)); };
     made.push(this);
     setTimeout(() => {
       this.readyState = 1;
@@ -44,6 +47,9 @@ function fakeLine() {
     }, 10);
   }
   Fake.made = made;
+  Fake.send = function (message) {
+    made.forEach((one) => { one.sent.push(String(message)); });
+  };
   Fake.tell = function (message) {
     made.forEach((one) => {
       if (one.onmessage) one.onmessage({ data: JSON.stringify(message) });
@@ -52,7 +58,8 @@ function fakeLine() {
   return Fake;
 }
 
-function launch(statuses, url, seed, answers, socket, tried) {
+function launch(statuses, url, seed, answers, socket, visited, options) {
+  const opt = options || {};
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (event) => errors.push(String((event && event.message) || event)));
@@ -60,7 +67,13 @@ function launch(statuses, url, seed, answers, socket, tried) {
   let polls = 0;
   const asked = [];
   const sent = [];
-  const dom = new JSDOM(CLIENT, {
+  // A copy of the pages has the server's address in it. The launcher reads
+  // it from a meta tag, so the tests that are about a copy need one.
+  const page = opt.server
+    ? CLIENT.replace("<head>",
+        '<head><meta name="icloud-server" content="' + opt.server + '">')
+    : CLIENT;
+  const dom = new JSDOM(page, {
     url: url || "http://localhost:9002/",
     runScripts: "dangerously",
     virtualConsole,
@@ -68,10 +81,29 @@ function launch(statuses, url, seed, answers, socket, tried) {
       if (socket) window.WebSocket = socket;
       // The places a previous visit tried: a page that has been there
       // before is not tried again.
-      if (tried) {
+      if (visited) {
         try {
           window.sessionStorage.setItem("icloud-visited",
-                                        JSON.stringify(tried));
+                                        JSON.stringify(visited));
+        } catch (err) {
+          /* no storage in this one */
+        }
+      }
+      // The capture's places that have been tried. These are kept for the
+      // life of the tab: there is no clock on them.
+      if (opt.triedPlaces) {
+        try {
+          window.sessionStorage.setItem("icloud-tried",
+                                        JSON.stringify(opt.triedPlaces));
+        } catch (err) {
+          /* no storage in this one */
+        }
+      }
+      // The copy is not serving the captures, and the server's own copy
+      // has already been tried.
+      if (opt.gaveUp) {
+        try {
+          window.sessionStorage.setItem("icloud-gave-up", "1");
         } catch (err) {
           /* no storage in this one */
         }
@@ -111,6 +143,22 @@ function launch(statuses, url, seed, answers, socket, tried) {
   return { dom, errors, polls: () => polls, asked: () => asked,
            sent: () => sent };
 }
+
+/* Where the launcher went, as it said it was going. */
+const wentTo = (launched) => {
+  const hook = launched.dom.window.__icloudLauncher;
+  return hook ? hook.went() : "";
+};
+
+/* What the launcher said about itself, last of all. */
+const saidAboutItself = (launched) => {
+  const hook = launched.dom.window.__icloudLauncher;
+  const socket = hook && hook.socket();
+  const messages = (socket && socket.sent ? socket.sent : []).map((one) => {
+    try { return JSON.parse(one); } catch (err) { return {}; }
+  });
+  return messages.filter((one) => one.t === "splash").pop() || {};
+};
 
 const navigations = (errors) => errors.filter((message) => /navigation/i.test(message));
 
@@ -332,6 +380,83 @@ function visibleText(doc) {
   await sleep(200);
   check("a page that is on the page it is asked for does not move",
     navigations(onIt.errors).length === 0, onIt.errors);
+
+  // ---- and a copy that is not serving the captures --------------------
+  // A host that answers every path with the same file - the single-page
+  // fallback that most Worker templates for one page use - sends the
+  // visitor round and round for ever: the launcher asks for the capture,
+  // the host brings it back, and the visitor watches a page reload
+  // without end. Nothing about that looks wrong from inside the page.
+  //
+  // So the launcher notices. It is on a capture's address, so the host
+  // answered with the launcher where the capture should have been - and
+  // the server serves the captures as well. The visitor is taken there,
+  // once, and the page stops going round.
+  const COPY = "https://copy.example.com";
+  const SERVER = "https://server.example.com";
+
+  const Caught = fakeLine();
+  const caught = launch([done], COPY + "/src/1.html", undefined, undefined,
+                        Caught, undefined, { server: SERVER });
+  await sleep(100);
+  Caught.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+
+  check("a copy serving the launcher where the capture should be takes the "
+    + "visitor to the server's own copy",
+    wentTo(caught) === SERVER + "/src/1.html", wentTo(caught));
+  check("...and it goes once, and not round and round",
+    navigations(caught.errors).length === 1, caught.errors);
+
+  const said = saidAboutItself(caught);
+  check("...and it says where it is, and why",
+    said.page === "/src/1.html" &&
+      /serving the launcher/.test(said.why || ""), said);
+
+  // The server's own copy is tried once. A second trip would be a round
+  // of its own.
+  const Again = fakeLine();
+  const again = launch([done], COPY + "/src/1.html", undefined, undefined,
+                       Again, undefined, { server: SERVER, gaveUp: true });
+  await sleep(100);
+  Again.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+  check("the server's own copy is tried once, and not again",
+    navigations(again.errors).length === 0, again.errors);
+
+  // A capture's place that has been tried is not tried again - not in five
+  // seconds, and not in five minutes. The host answered it with the
+  // launcher, and it will answer it with the launcher.
+  const Tried = fakeLine();
+  const tried = launch([done], COPY + "/", undefined, undefined, Tried,
+                       undefined, { server: SERVER,
+                                    triedPlaces: ["/src/1.html"] });
+  await sleep(100);
+  Tried.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+  check("a capture's place that has been tried is not tried again",
+    wentTo(tried) === SERVER + "/src/1.html", wentTo(tried));
+
+  // And a copy that is working is left alone: the launcher goes to the
+  // capture in the copy, and not to the server.
+  const Fine = fakeLine();
+  const fine = launch([done], COPY + "/", undefined, undefined, Fine,
+                      undefined, { server: SERVER });
+  await sleep(100);
+  Fine.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+  check("a copy that is serving the captures is left alone",
+    wentTo(fine) === COPY + "/src/1.html", wentTo(fine));
+
+  // A copy in a folder of its own asks for the capture in that folder.
+  const InFolderCopy = fakeLine();
+  const inFolderCopy = launch([done], COPY + "/app/", undefined, undefined,
+                              InFolderCopy, undefined, { server: SERVER });
+  await sleep(100);
+  InFolderCopy.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(200);
+  check("a copy in a folder of its own asks for the capture in that folder",
+    wentTo(inFolderCopy) === COPY + "/app/src/1.html", wentTo(inFolderCopy));
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
