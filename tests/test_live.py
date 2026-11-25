@@ -312,7 +312,10 @@ async def main():
               "install chrome" not in dark[0].lower(), dark)
 
         check("a browser started as a normal user gets no --no-sandbox",
-              server.browser_args() == ["--start-maximized"],
+              "--no-sandbox" not in server.browser_args(),
+              server.browser_args())
+        check("...and is started maximised",
+              "--start-maximized" in server.browser_args(),
               server.browser_args())
 
         server.running_as_root = lambda: True
@@ -322,6 +325,18 @@ async def main():
               any("--no-sandbox" in line and "normal user" in line
                   for line in server.browser_advice(["has been closed"])),
               server.browser_advice(["has been closed"]))
+
+        # The flags that keep the browser from telling on itself. They do
+        # not hide the browser - they stop it announcing things that are
+        # true of a machine it is not on.
+        flags = server.browser_args()
+        check("the browser is not to say it is being driven",
+              "--disable-blink-features=AutomationControlled" in flags, flags)
+        check("...nor to let WebRTC say the machine's own address",
+              "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+              in flags, flags)
+        check("...nor to go around the proxy over QUIC",
+              "--disable-quic" in flags, flags)
     finally:
         server.has_a_display = real_display
         server.running_as_root = real_root

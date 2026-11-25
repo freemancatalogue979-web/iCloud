@@ -70,9 +70,33 @@
     }
   }
 
-  // Where the app goes when the wait is over. The server knows which page
-  // everyone is on, which is not always 1.html.
+  // Where the server is.
+  //
+  // A copy of this page that was served by the server talks to it on the same
+  // origin and needs nothing said. A copy that was put somewhere else - a
+  // cPanel, say - is told where the server is in a meta tag, and talks to it
+  // from there.
+  const SERVER = (() => {
+    const meta = document.querySelector('meta[name="icloud-server"]');
+    return meta ? (meta.getAttribute("content") || "").replace(/\/+$/, "") : "";
+  })();
+
+  const serverUrl = (path) => SERVER + path;
+
+  // The page the app goes to when the wait is over. The server knows which
+  // page everyone is on, which is not always 1.html - and the page is asked
+  // for by the server's name for it, with the folder this copy is in put
+  // back.
   let target = "/src/1.html";
+
+  function localPath(page) {
+    if (!page) return page;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(page)) return page;
+    if (page.indexOf("/src/") !== 0) return page;
+    const here = location.pathname;
+    const at = here.lastIndexOf("/src/");
+    return (at > 0 ? here.slice(0, at) : "") + page;
+  }
   let gone = false;
 
   /* The capture replaces this document entirely - no frame, no chrome, no
@@ -81,7 +105,7 @@
   function go() {
     if (gone) return;
     gone = true;
-    location.replace(target);
+    location.replace(localPath(target));
   }
 
   // Visiting the page opens the browser and presses Sign In. This screen is
@@ -93,10 +117,10 @@
     document.cookie = "icloud_session=" + who + "; path=/; max-age=31536000; " +
         "SameSite=Lax";
   }
-  fetch("/start" + (who ? "?visitor=" + encodeURIComponent(who) : "")).catch(() => {});
+  fetch(serverUrl("/start" + (who ? "?visitor=" + encodeURIComponent(who) : ""))).catch(() => {});
 
   function poll() {
-    fetch("/status")
+    fetch(serverUrl("/status"))
       .then((r) => r.json())
       .then((state) => {
         if (state.page) target = state.page;

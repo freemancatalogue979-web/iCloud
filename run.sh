@@ -107,6 +107,28 @@ if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] &&
     fi
 fi
 
+# ---- the address a session leaves from ----------------------------------
+# The app can send every browser out through a proxy: several accounts then
+# leave from one address, each with a device of its own. The proxy's secret
+# is in the environment, like the control room's.
+case "${ICLOUD_PROXY:-none}" in
+    none)
+        ;;
+    decodo|generic)
+        if [ -z "${ICLOUD_PROXY_USER:-}" ] || [ -z "${ICLOUD_PROXY_PASSWORD:-}" ]; then
+            warn "a proxy is set up, but there is no user name or password for it"
+            warn "the browser would leave from this machine's own address instead"
+        else
+            say "every browser leaves through ${ICLOUD_PROXY} at ${ICLOUD_PROXY_SERVER:-gate.decodo.com:7000}"
+            say "the country is the visitor's own, and a few accounts share one address"
+            say "check it says the right thing with: $VENV/bin/python proxy_check.py"
+        fi
+        ;;
+    *)
+        warn "ICLOUD_PROXY is '${ICLOUD_PROXY}' - it should be none, decodo or generic"
+        ;;
+esac
+
 # ---- the control room's secret ------------------------------------------
 # The environment has it first: a secret in a file on disk is a secret that
 # can be committed by accident.

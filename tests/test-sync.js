@@ -87,8 +87,13 @@ class FakeSocket {
   win.eval(SYNC);
 
   const sock = FakeSocket.last;
-  check("connects to the sync socket", !!sock && sock.url === "ws://localhost:9002/ws",
+  // The visitor's name goes with the line: a copy of the app on another
+  // host has no cookie of the server's to say who it is.
+  check("connects to the sync socket",
+    !!sock && sock.url.indexOf("ws://localhost:9002/ws") === 0,
     sock && sock.url);
+  check("...and says who the visitor is",
+    !!sock && /[?&]visitor=/.test(sock.url), sock && sock.url);
   check("says nothing before the socket opens", sock && sock.sent.length === 0,
     sock && JSON.stringify(sock.sent));
 

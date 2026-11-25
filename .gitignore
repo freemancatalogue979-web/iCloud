@@ -2,6 +2,10 @@
 visitors/
 profiles/
 
+# The groups: which visitor shares which address, and the address each
+# group was last seen leaving from.
+state/
+
 # The control room's settings: the admin secret, the Telegram token and the
 # chat id, and the sessions whose cookies may be exported. It is a secret
 # file, and it is never in the repository.
