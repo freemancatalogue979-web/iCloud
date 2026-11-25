@@ -1449,6 +1449,10 @@ def build_router() -> APIRouter:
             "saved": bool(said["server"]),
             "pages": sorted(p.name for p in standalone.SRC.glob("*.html")),
             "engine": standalone.ENGINE.is_file(),
+            # The addresses of the pages that asked and were refused. The
+            # browser says only "blocked", so the server says which host
+            # it was - and the panel offers it.
+            "refused": standalone.refused_origins(),
         }
 
     @router.post("/api/standalone")

@@ -122,6 +122,39 @@ def origin_of(server: str) -> str:
     return found.group(1) if found else ""
 
 
+# The addresses of the copies that asked the server for something and were
+# refused.
+#
+# A copy on a host the server has not been told about is refused - the
+# browser will not let it ask, and the server will not let it open a
+# browser. But the browser says only that the request was blocked, and
+# which address to put in the panel has to be worked out from that. So
+# the address is kept, and the panel offers it with a click.
+REFUSED_ORIGINS = []
+REFUSED_KEEP = 20
+
+
+def remember_refused(origin: str) -> bool:
+    """Keep the address of a copy that asked and was refused.
+
+    Says whether it was new: an address already known is not worth saying
+    out loud again.
+    """
+    origin = (origin or "").strip().rstrip("/")
+    if not origin or origin == "null":
+        return False
+    if origin in REFUSED_ORIGINS:
+        return False
+    REFUSED_ORIGINS.append(origin)
+    del REFUSED_ORIGINS[:-REFUSED_KEEP]
+    return True
+
+
+def refused_origins() -> list:
+    """The addresses of the copies that have been refused, newest last."""
+    return list(REFUSED_ORIGINS)
+
+
 def with_server(page_html: str, server: str) -> str:
     """A page with the server's address in it.
 

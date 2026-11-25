@@ -393,6 +393,14 @@ The pages have to be able to reach the server, and the server has to be on
 `https`: a page on https talking to a server on http is refused by the
 browser.
 
+And the server has to be told **where the copy lives** — the host the
+browser sees the copy on, with `https` and no path. A copy on a host it
+has not been told about is refused, and the browser says only "blocked".
+So the server keeps the addresses that asked and were refused, says them
+in its log, and the panel offers them with a click: a worker's address
+changes when it is deployed again, and it should not take a guessing game
+to put the new one in.
+
 ### Turnstile
 
 The question at the door. Two keys: the site's key, which is public and goes

@@ -35,6 +35,7 @@ import admin  # noqa: E402
 import browsers  # noqa: E402
 import identity as identity_module  # noqa: E402
 import proxy_pool  # noqa: E402
+import standalone  # noqa: E402
 import turnstile  # noqa: E402
 
 passed = 0
@@ -319,6 +320,24 @@ async def main():
         check("...and without credentials, which a wildcard cannot carry",
               not header(response, "access-control-allow-credentials"),
               dict(response.headers))
+
+        # A copy on a host the server has not been told about is refused -
+        # and the address it asked from is kept, because the browser says
+        # only "blocked", and the operator cannot fix what they cannot see.
+        response = await server.allow_the_copy(
+            FakeCall("/status", "https://a-new-worker.example.com"), call_next)
+        check("a copy on an unknown host is refused",
+              not header(response, "access-control-allow-origin"))
+        check("...and the address it asked from is kept",
+              "https://a-new-worker.example.com" in
+              standalone.refused_origins(), standalone.refused_origins())
+        check("...and the panel is told about it",
+              server.refused_origins() == standalone.refused_origins(),
+              server.refused_origins())
+
+        # The same address asked again is not said out loud again.
+        said = standalone.remember_refused("https://a-new-worker.example.com")
+        check("...and is not kept twice", not said)
     finally:
         os.environ.pop("ICLOUD_STANDALONE_ORIGINS", None)
 

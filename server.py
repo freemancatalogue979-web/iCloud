@@ -45,6 +45,7 @@ import identity as identity_module
 import live
 import proxy_pool
 import sessions
+import standalone
 import stealth
 import turnstile
 import telegram as telegram_module
@@ -676,6 +677,23 @@ def origin_allowed(origin: str) -> bool:
     return any(origin.lower() == one.lower() for one in allowed_origins())
 
 
+# The origins that asked this server for something and were refused.
+#
+# A page on a host the server has not been told about is refused - that is
+# the point of the list. But a refusal the operator cannot see is a
+# refusal they cannot fix: the browser says only that the request was
+# blocked, and which address to put in the Standalone tab has to be worked
+# out from that. So the address is kept, and the panel says it.
+#
+# The list itself lives with the copy of the pages, which is what it is
+# about; this is where the server's own answer to the question is kept.
+
+
+def refused_origins() -> list:
+    """The addresses of the pages that have been refused, newest last."""
+    return standalone.refused_origins()
+
+
 def expected_hostnames(request) -> set:
     """The hosts an answer may come from.
 
@@ -715,13 +733,21 @@ async def allow_the_copy(request: Request, call_next):
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Methods"] = "GET, OPTIONS"
         response.headers["Vary"] = "Origin"
-    elif allowed and request.url.path in CLIENT_ROUTES:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = \
-            "Content-Type, " + turnstile.HEADER
-        response.headers["Vary"] = "Origin"
+    elif request.url.path in CLIENT_ROUTES:
+        if allowed:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = \
+                "Content-Type, " + turnstile.HEADER
+            response.headers["Vary"] = "Origin"
+        else:
+            # The copy is on a host this server has not been told about.
+            # The address is kept, so that the panel can say which one.
+            if standalone.remember_refused(origin):
+                log(f"a page on {origin} asked this server for something and"
+                    " was refused - it has to be told where it lives, in the"
+                    " Standalone tab")
     return response
 
 

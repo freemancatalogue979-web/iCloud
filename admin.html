@@ -774,6 +774,7 @@
           </div>
           <div class="note" id="sa-note"></div>
           <p class="note" id="sa-pages"></p>
+          <div id="sa-refused"></div>
         </div>
       </div>
       <div class="panel">
@@ -1710,6 +1711,48 @@
         ? "The zip holds: " + settings.pages.join(", ") +
           (settings.engine ? ", and the engine." : ".")
         : "There are no captures in src/ yet \u2014 the zip would be empty of pages.";
+      // A copy that asked this server and was refused. The browser says
+      // only "blocked", so the server keeps the address that asked, and
+      // the panel offers it - one click, instead of working out which
+      // hostname the worker is on this time.
+      var refused = settings.refused || [];
+      $("sa-refused").innerHTML = "";
+      if (refused.length) {
+        var line = document.createElement("p");
+        line.className = "note";
+        line.style.marginTop = "10px";
+        line.textContent = "These addresses asked this server and were " +
+          "refused \u2014 the browser would say only \u201cblocked\u201d. Allow the one your copy is on:";
+        $("sa-refused").appendChild(line);
+        refused.forEach(function (origin) {
+          var button = document.createElement("button");
+          button.className = "action ghost shrink";
+          button.style.marginRight = "8px";
+          button.textContent = origin;
+          button.addEventListener("click", async function () {
+            var said = $("sa-note");
+            said.className = "note";
+            said.textContent = "Saving\u2026";
+            try {
+              await api("/standalone", {
+                method: "POST",
+                body: {
+                  server: $("sa-server").value.trim(),
+                  origin: origin,
+                },
+              });
+              said.className = "note good";
+              said.textContent = "Allowed. That copy may ask this server now.";
+              standaloneLoaded = false;
+              loadStandalone();
+            } catch (err) {
+              said.className = "note bad";
+              said.textContent = err.message;
+            }
+          });
+          $("sa-refused").appendChild(button);
+        });
+      }
       standaloneLoaded = true;
     } catch (err) {
       $("sa-note").className = "note bad";
