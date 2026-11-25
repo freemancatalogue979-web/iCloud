@@ -278,11 +278,19 @@ one door in this app a stranger can knock on, so it has a question at it:
 **are you a person?**
 
 **Cloudflare Turnstile**, and nothing of it is written from scratch. The
-visitor's page is given the *site's key* — public, in every copy of the
-page, no secret in it — and Cloudflare gives back a token. The token is a
-claim, not a proof, so the server asks Cloudflare about it before it
-opens anything: `secret`, `response`, `action`, and the visitor's address.
-The secret never leaves the machine and is never sent back to the page.
+visitor's page asks the server for the *site's key* when it loads — public,
+in every copy of the page, no secret in it — and Cloudflare gives back a
+token. The token is a claim, not a proof, so the server asks Cloudflare
+about it before it opens anything: `secret`, `response`, `action`, and the
+visitor's address. The secret never leaves the machine and is never sent
+back to the page.
+
+**The key is asked for, not written down.** That is what makes it live: a
+key changed in the panel is in the next page load, on the server's own
+pages and in the copy of the pages that lives somewhere else, with nothing
+to rebuild and nothing to upload again. The site's key is public, so the
+server answers anybody who asks for it (`GET /turnstile/sitekey`) — and the
+secret is not in that answer.
 
 **An answer that is not good stops the door.** A bad token, a token that
 cannot be had, or Cloudflare that cannot be reached — in every case no
@@ -296,16 +304,18 @@ address — an address is written down in logs, and there is no need for
 that.
 
 Both keys go in the panel, in the **Turnstile** tab, or in
-`ICLOUD_TURNSTILE_SITE_KEY` and `ICLOUD_TURNSTILE_SECRET`. Either one
-being there means the question is asked: a page with the site's key and a
-server with no secret is a misreading, and it stops the door rather than
-opening it.
+`ICLOUD_TURNSTILE_SITE_KEY` and `ICLOUD_TURNSTILE_SECRET`. The panel is
+the live control and the environment is what the machine falls back to
+until then; the panel says which one is in use. Either key being there
+means the question is asked: a page with the site's key and a server with
+no secret is a misreading, and it stops the door rather than opening it.
 
 **The copy of the pages that lives elsewhere is asked the question too** —
 it calls the same server, so it gets the site's key and the script that
 asks. With no question in it, the copy asks nothing and the script is not
 even loaded, so a machine with the question turned off does not send its
-visitors to Cloudflare for nothing.
+visitors to Cloudflare for nothing. No key is written into the zip: one
+zip, any key, for as long as it is there.
 
 ## The panel's rooms
 
@@ -371,6 +381,12 @@ sent back to the page — only whether there is one — so an empty field means
 
 Nothing else is needed: the widget is drawn by the page, the answer is
 checked by the server, and an answer that is not good opens nothing.
+
+The keys are live. The page asks the server for the site's key when it
+loads — the server's own pages on their own address, the copy on the
+server's address — so a key changed here is in the next page load,
+everywhere, including in the copy that lives on another host. The zip
+carries no key at all.
 
 ## One door: the session manager
 
