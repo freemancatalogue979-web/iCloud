@@ -30,6 +30,16 @@ This is the same question ``turnstile.py`` asks, in the same words and to the
 same shape, so that the page in front of the visitor does not have to know
 which of the two it is answering. One of them is asked at a time: whichever
 the panel has the keys for.
+
+**Google has two kinds of key, and they answer in two shapes.** The plain
+kind puts the name of the question, the host and the score at the top of
+its answer. The Enterprise kind says more, and says it in a second place:
+the same three things are in ``tokenProperties``, beside the answer rather
+than in it. An answer read from only the top of it is an answer that looks
+as though it was given to no question at all - which is how a good answer
+comes to be turned away, with a reason that is true of the reading and not
+of the answer. So both places are read here, and an answer is understood
+the same way whichever kind of key made it.
 """
 
 import json
@@ -57,10 +67,27 @@ TIMEOUT = 15
 # have to be told which question it is answering.
 ACTION = "start"
 
-# The longest answer that can be an answer. Google's own are a few hundred
-# characters long; anything longer is not one, and is not worth sending to
-# Google to find out.
-MAX_TOKEN = 2048
+# The longest answer that can be an answer.
+#
+# Google says an answer may be up to four thousand characters long, and
+# says that anything longer is not an answer at all. The plain kind comes
+# back in a few hundred characters, but the Enterprise kind comes back
+# much longer - it carries the signals it collected inside it - and a
+# limit that is too small throws away good answers before Google has
+# been asked about them.
+MAX_TOKEN = 4000
+
+# The answers Google says are worth asking again.
+#
+# "browser-error" is Google's own word for a failure in the browser - a
+# network trouble while the signals were being collected - and the answer
+# it left behind is not good because of it. "timeout-or-duplicate" is an
+# answer that has grown old, or one that has been offered before.
+#
+# Both are the browser's fault rather than the person's, and both are
+# answered by asking the question again: a new answer comes back, and a
+# new answer is a new answer.
+RETRYABLE = ("browser-error", "network-error", "timeout-or-duplicate")
 
 # The score a person has to reach to be let through. Google's own advice for
 # the invisible kind is 0.5; anything below that and more than half of the
@@ -290,6 +317,71 @@ def expected_hosts(store=None, request_host: str = "") -> set:
     return said
 
 
+def _properties(answer: dict) -> dict:
+    """The properties Google puts beside the answer.
+
+    Google's Enterprise answer says more than the plain one does, and it
+    says it in a second place: the name of the question, the host the
+    answer was given on and the score are in ``tokenProperties`` as well
+    as at the top of the answer. Both places are read here, so that an
+    answer is understood the same way whichever kind of key made it.
+    """
+    said = {}
+    for name in ("tokenProperties", "token_properties"):
+        one = answer.get(name) if isinstance(answer, dict) else None
+        if isinstance(one, dict):
+            said.update(one)
+    return said
+
+
+def _field(answer: dict, props: dict, *names):
+    """The first of these names that Google has given something to.
+
+    The plain part of the answer is looked at first, and the properties
+    beside it second. A zero is a value: a score of nothing is still a
+    score, and it is a score somebody is turned away for.
+    """
+    for source in (answer, props):
+        if not isinstance(source, dict):
+            continue
+        for name in names:
+            value = source.get(name)
+            if value is not None and value != "":
+                return value
+    return None
+
+
+def _score_of(answer: dict, props: dict):
+    """The score Google gave, or nothing if it gave no score.
+
+    A checkbox has no score - it says yes or no, and that is the whole of
+    it - so an answer with no score is not turned away for the lack of one.
+
+    The score is looked for in the places Google puts it: at the top of the
+    answer, in the properties beside it, and in the risk analysis. Where
+    more than one is given, the one that is not zero is the one - a zero
+    beside a real score is a placeholder and not a verdict, and a visitor
+    is not turned away for a placeholder.
+    """
+    found = []
+    for source in (answer, props):
+        if isinstance(source, dict) and source.get("score") is not None:
+            found.append(source.get("score"))
+    for name in ("riskAnalysis", "risk_analysis"):
+        risk = answer.get(name) if isinstance(answer, dict) else None
+        if isinstance(risk, dict) and risk.get("score") is not None:
+            found.append(risk.get("score"))
+    if not found:
+        return None
+    for one in found:
+        try:
+            if float(one) > 0.0:
+                return one
+        except (TypeError, ValueError):
+            continue
+    return found[0]
+
+
 async def verify(token: str, given_secret: str = "", ip: str = "",
                  action: str = ACTION, hostnames=None, score: float = MIN_SCORE) -> dict:
     """Ask Google whether the token is good.
@@ -311,15 +403,32 @@ async def verify(token: str, given_secret: str = "", ip: str = "",
       is that the person is a person, and a score below the one the panel
       asks for is a person who is not let through.
 
+    Google's answer is read the same way whichever kind of key made it.
+    The Enterprise kind says the name of the question, the host and the
+    score in a second place, beside the answer rather than in it, and an
+    answer read from only the top of it is an answer that looks like it
+    was given to no question at all - which is how a good answer comes to
+    be turned away.
+
+    When Google names a question and it is not this one, the answer is not
+    taken. When Google names no question at all, there is nothing to
+    compare, and an answer that is good and came from a host this server
+    knows about is a good answer.
+
     A token is single use. Google says so the second time one is offered,
     and so does this: an answer that is replayed is not an answer.
+
+    ``retry`` says the answer is worth asking again: Google's own word for
+    it is ``browser-error``, and it means the browser had a bad moment and
+    not that the person did.
 
     ``hostnames`` may be left out when there is nothing to say about it;
     then the host is not checked. The server always says what the hosts are,
     so it is always checked there.
     """
     said = {"ok": False, "said": "", "hostname": "", "action": "",
-            "codes": [], "reason": "", "score": 0.0}
+            "codes": [], "reason": "", "score": 0.0, "retry": False,
+            "raw": {}}
 
     token = (token or "").strip()
     if not token:
@@ -373,27 +482,41 @@ async def verify(token: str, given_secret: str = "", ip: str = "",
         said["reason"] = "unreadable"
         return said
 
-    said["hostname"] = str(answer.get("hostname") or "")
-    said["action"] = str(answer.get("action") or "")
-    codes = answer.get("error-codes") or []
+    # Google's whole answer is kept, so that the log can say what Google
+    # actually said rather than what this file made of it.
+    said["raw"] = answer
+
+    props = _properties(answer)
+    said["hostname"] = str(_field(answer, props, "hostname") or "")
+    said["action"] = str(_field(answer, props, "action") or "")
+    codes = answer.get("error-codes") or answer.get("error_codes") or []
     said["codes"] = [str(one) for one in codes]
 
+    # The score, if there is one. A score of nothing is a score.
+    given_score = _score_of(answer, props)
+    has_score = given_score is not None
     try:
-        said["score"] = float(answer.get("score") or 0.0)
+        said["score"] = float(given_score) if has_score else 0.0
     except (TypeError, ValueError):
         said["score"] = 0.0
+        has_score = False
 
     if not answer.get("success"):
         said["said"] = "the answer was not good"
         if codes:
             said["said"] += " (" + ", ".join(str(one) for one in codes) + ")"
         said["reason"] = "not-good"
+        said["retry"] = any(str(one).lower() in RETRYABLE
+                            for one in said["codes"])
         return said
 
-    # The answer must have been given to this question.
-    if action and said["action"] != action:
+    # The answer must have been given to this question - but only if Google
+    # said which question it was given to. An answer that names no question
+    # is not an answer to another question; it is an answer with nothing
+    # said about it, and the host below is what is checked instead.
+    if action and said["action"] and said["action"] != action:
         said["said"] = (f"the answer was given to another question "
-                        f"({said['action'] or 'none'}), not to this one")
+                        f"({said['action']}), not to this one")
         said["reason"] = "action"
         return said
 
@@ -409,7 +532,7 @@ async def verify(token: str, given_secret: str = "", ip: str = "",
 
     # The score is only there for the invisible kind. A checkbox says yes or
     # no and has no score, and a good answer is a good answer.
-    if said["score"] > 0.0 and said["score"] < score:
+    if has_score and said["score"] < score:
         said["said"] = (f"the answer was given, but it scored "
                         f"{said['score']:.2f} and the lowest score that will "
                         f"do is {score:.2f}")

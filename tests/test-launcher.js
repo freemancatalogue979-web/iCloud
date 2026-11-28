@@ -123,7 +123,18 @@ function launch(statuses, url, seed, answers, socket, visited, options) {
         // The page says who the visitor is with the request, so the path is
         // what matters, not the whole address.
         if (String(url).split("?")[0] === "/start") {
-          return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
+          // The server's answer carries the pass, and it can be late: the
+          // line says the browser is ready before the answer is back.
+          const late = opt.start || null;
+          const answer = {
+            json: () => Promise.resolve(late && late.pass
+              ? { status: "idle", pass: late.pass }
+              : { status: "idle" }) };
+          if (late && late.delay) {
+            return new Promise((resolve) =>
+              setTimeout(() => resolve(answer), late.delay));
+          }
+          return Promise.resolve(answer);
         }
         // The question asked at the door: the page asks the server what the
         // question is, when it loads. The newer way of asking says which
@@ -246,6 +257,30 @@ function visibleText(doc) {
   await sleep(600);
   check("it stops asking after it has gone",
     ok.polls() === pollsWhenGone, pollsWhenGone + " -> " + ok.polls());
+
+  // ---- and it waits for the pass before it goes -------------------------
+  // The line says the browser is ready, and the answer that carries the
+  // pass comes back over http: the two travel separately, and the line is
+  // often the quicker of the two.
+  //
+  // So the page waits for the answer. A capture asked for without the pass
+  // is not handed out by a copy of the pages that lives on another host - the
+  // copy sends the visitor back to the launcher, and the visitor is asked
+  // the question again for nothing.
+  const Late = fakeLine();
+  const late = launch([done], undefined, undefined, undefined, Late, undefined,
+                      { start: { delay: 400, pass: "a-pass" } });
+  await sleep(150);
+  Late.tell({ t: "session", status: "done", page: "/src/1.html" });
+  await sleep(150);
+  check("the launcher waits for the server's answer before it goes",
+    navigations(late.errors).length === 0, late.errors);
+  await sleep(500);
+  check("...and goes when the answer, and the pass in it, is here",
+    navigations(late.errors).length === 1, late.errors);
+  check("...and the pass is in the cookie before the capture is asked for",
+    /icloud_pass=a-pass/.test(late.dom.window.document.cookie),
+    late.dom.window.document.cookie);
 
   // ---- and with no line, it asks the old way ----------------------------
   // A server that cannot be reached over the line is still a server: the

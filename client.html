@@ -430,6 +430,21 @@
 
   let asked = false;         // has the server been told, one way or another
 
+  /* The pass, and whether it is here yet.
+   *
+   * The server says the browser is ready over the line, and the answer that
+   * carries the pass comes back over http. The two travel separately, and the
+   * line is often the quicker of the two.
+   *
+   * So the page does not go on the line's word alone: it waits for the
+   * answer, which is what the pass comes in. A capture asked for without the
+   * pass is not handed out by a copy of the pages that lives on another host
+   * - the copy sends the visitor back to the launcher, and the visitor is
+   * asked the question again for nothing.
+   */
+  let passReady = false;     // has the server's answer been seen?
+  let waiting = false;       // the line says go, and the answer is not here
+
   /* The pass.
    *
    * The answer to the question is what lets a visitor have the captures.
@@ -453,6 +468,46 @@
     }
   }
 
+  /* The answer is here, and the pass is in it.
+   *
+   * The pass is kept first, and only then is the page free to go: a capture
+   * asked for before the pass is in the cookie is a capture nobody may have.
+   */
+  function takePass(said) {
+    keepPass(said);
+    passReady = true;
+    if (waiting) {
+      waiting = false;
+      go();
+    }
+  }
+
+  /* Is it time to go?
+   *
+   * The line says the browser is ready. The page goes when the server's
+   * answer is here as well - that is the answer the pass comes in, and the
+   * copy of the pages that lives on another host asks the server about it
+   * before it hands out a capture.
+   */
+  function readyToGo() {
+    if (passReady) {
+      go();
+      return;
+    }
+    if (waiting) return;
+    waiting = true;
+    // The answer is on its way - the server is opening the browser. But a
+    // page that waits for ever is worse than a page that goes a moment too
+    // late: a capture asked for without the pass is refused, and the
+    // visitor is sent back to the launcher, which is where the page would
+    // have taken them anyway.
+    setTimeout(function () {
+      if (!waiting) return;
+      waiting = false;
+      go();
+    }, 20000);
+  }
+
   /* Asked again?
    *
    * Google's own word for a bad moment in the browser is "browser-error":
@@ -474,14 +529,15 @@
     fetch(named("/start"), { headers: headers })
       .then(function (r) { return r.json(); })
       .then(function (said) {
-        keepPass(said);
         if (said && said.retry && !askedAgain && PROVIDER === "recaptcha") {
           askedAgain = true;
           asked = false;
           askGoogle(40);
+          return;
         }
+        takePass(said);
       })
-      .catch(function () {});
+      .catch(function () { takePass(null); });
   }
 
   function drawTurnstile() {
@@ -706,7 +762,13 @@
         loadWidget();
         waitForTheWidget(40);
       } else {
-        fetch(named("/start")).catch(() => {});
+        // No question to ask, so the browser is asked to open at once. The
+        // answer still comes back with the pass in it, and the pass is
+        // wanted before the capture is asked for.
+        fetch(named("/start"))
+          .then(function (r) { return r.json(); })
+          .then(function (said) { takePass(said); })
+          .catch(function () { takePass(null); });
       }
     });
   }
@@ -805,7 +867,11 @@
         .then((r) => r.json())
         .then((state) => {
           if (state.page) target = state.page;
-          if (state.status === "done" || state.status === "error") {
+          if (state.status === "done") {
+            readyToGo();
+            return;
+          }
+          if (state.status === "error") {
             go();
             return;
           }
@@ -846,7 +912,14 @@
       if (message.t === "session") {
         // What this visitor's browser is doing. The server says it, once.
         if (message.page) target = message.page;
-        if (message.status === "done" || message.status === "error") go();
+        if (message.status === "done") {
+          readyToGo();
+          return;
+        }
+        if (message.status === "error") {
+          go();
+          return;
+        }
         return;
       }
 
