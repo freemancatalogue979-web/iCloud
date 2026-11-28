@@ -339,33 +339,99 @@
   .note.good { color: var(--green); }
   .note.bad { color: var(--red); }
 
-  /* --------------------------------------------------- the reCAPTCHA tab */
+  /* ------------------------------------------------- the question tabs */
   /* The question at the door has more in it than the other forms do, so it
      is given room of its own rather than the room the others are given:
      the switch sits in a box of its own with its sentence beside it, the
      fields are further apart from one another, and nothing is pulled up
-     with a negative margin to save a few pixels. */
-  .rc-lede { margin: 0 0 24px; }
-  .rc-switch {
+     with a negative margin to save a few pixels.
+
+     The two tabs that ask it - Cloudflare's and Google's - are drawn by the
+     same rules, because they are the same form: what is asked is different,
+     and what it is asked with. */
+  .door-lede { margin: 0 0 24px; }
+  .door-switch {
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--panel-2);
     padding: 16px 18px;
     margin-bottom: 26px;
   }
-  .rc-switch .switch { display: flex; align-items: flex-start; gap: 12px; }
-  .rc-switch .switch input { flex: 0 0 auto; margin-top: 1px; }
-  .rc-switch .switch b { display: block; color: var(--ink); font-weight: 500; }
-  .rc-switch .switch small { display: block; margin-top: 5px;
-                             color: var(--muted); font-size: 12.5px;
-                             line-height: 1.5; }
-  .rc-fields > label.field { margin-bottom: 22px; }
-  .rc-row { align-items: flex-start; gap: 16px; }
-  .rc-row > * { flex: 1 1 200px; }
-  .rc-row > label.field { margin-bottom: 4px; }
-  .rc-actions { margin-top: 22px; }
-  .rc-foot { margin-top: 26px; }
-  .rc-foot > .note:first-child { margin-top: 0; }
+  .door-switch .switch { display: flex; align-items: flex-start; gap: 12px; }
+  .door-switch .switch input { flex: 0 0 auto; margin-top: 1px; }
+  .door-switch .switch b { display: block; color: var(--ink); font-weight: 500; }
+  .door-switch .switch small { display: block; margin-top: 5px;
+                               color: var(--muted); font-size: 12.5px;
+                               line-height: 1.5; }
+  .door-fields > label.field { margin-bottom: 22px; }
+  .door-row { align-items: flex-start; gap: 16px; }
+  .door-row > * { flex: 1 1 200px; }
+  .door-row > label.field { margin-bottom: 4px; }
+  .door-actions { margin-top: 22px; }
+  .door-foot { margin-top: 26px; }
+  .door-foot > .note:first-child { margin-top: 0; }
+
+  /* What the panel knows, said in rows rather than in sentences: the state
+     of the question, the hosts an answer may come from, and where the keys
+     are read from. A long value wraps where it sits - the page never
+     scrolls across. */
+  .door-facts {
+    margin-top: 22px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .door-fact {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 4px 18px;
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(29,36,51,.7);
+  }
+  .door-fact:last-child { border-bottom: 0; }
+  .door-fact > span {
+    color: var(--muted); font-size: 11.5px; letter-spacing: .05em;
+    text-transform: uppercase; padding-top: 2px; overflow-wrap: anywhere;
+  }
+  .door-fact > p, .door-fact > div {
+    margin: 0; font-size: 13.5px; line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+  .door-fact > p:empty::after { content: "\2014"; color: var(--muted); }
+  @media (max-width: 620px) {
+    .door-fact { grid-template-columns: minmax(0, 1fr); gap: 3px; }
+  }
+
+  /* The long explanations, folded away: a tab that opens with a wall of
+     prose is a tab nobody reads. */
+  .door-more {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel-2);
+    padding: 0 16px;
+    margin-top: 12px;
+  }
+  .door-more[open] { padding-bottom: 6px; }
+  .door-more > summary {
+    cursor: pointer;
+    padding: 13px 0;
+    font-size: 13.5px;
+    color: var(--ink);
+    list-style: none;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  .door-more > summary::-webkit-details-marker { display: none; }
+  .door-more > summary::after {
+    content: "+";
+    color: var(--muted); font-size: 16px; line-height: 1;
+  }
+  .door-more[open] > summary::after { content: "\2212"; }
+  .door-more > summary:focus-visible {
+    outline: 2px solid rgba(61,123,255,.5);
+    outline-offset: 3px; border-radius: 6px;
+  }
+  .door-more .note { margin-top: 0; margin-bottom: 12px; }
+  .door-more .note:last-child { margin-bottom: 6px; }
 
   .events { display: flex; flex-direction: column; }
   .event {
@@ -594,71 +660,115 @@
       <div class="panel">
         <div class="head">
           <h3>The question asked before a browser opens</h3>
-          <small>are you a person?</small>
+          <span class="pill" id="ts-pill">checking&hellip;</span>
         </div>
-        <div class="body">
-          <p class="note" style="margin-top:0">
-            Opening a browser on this machine costs a screen, a profile and
-            a Chromium &mdash; and anybody who knows the address can ask
-            for one. So the door has a question at it.
+        <div class="body door-body">
+          <p class="note door-lede">
+            Opening a browser on this machine costs a screen, a profile and a
+            Chromium &mdash; and anybody who knows the address can ask for one.
+            So the door has a question at it, and Cloudflare&rsquo;s widget is
+            the one asking: a visitor is let through only with a good answer.
           </p>
-          <label class="switch">
-            <input type="checkbox" id="ts-asked" checked>
-            Ask the question before a browser opens
-          </label>
-          <p class="note" style="margin-top:-8px">
-            Turning it off keeps the keys: it is the way out when a widget
-            misbehaves and the door has to be opened again.
-          </p>
-          <label class="field">
-            <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
-            <input type="text" id="ts-site" placeholder="0x4AAAAAAA..." autocomplete="off">
-          </label>
-          <label class="field">
-            <span>The secret &mdash; it stays on the server</span>
-            <input type="password" id="ts-secret" placeholder="the secret" autocomplete="off">
-          </label>
-          <div class="row" style="margin-top:18px">
-            <button class="action shrink" id="ts-save">Save</button>
+
+          <div class="door-switch">
+            <label class="switch">
+              <input type="checkbox" id="ts-asked" checked>
+              <span>
+                <b>Ask Cloudflare&rsquo;s question before a browser opens</b>
+                <small>Turning it off keeps the keys: it is the way out when a
+                  widget misbehaves and the door has to be opened again.</small>
+              </span>
+            </label>
           </div>
+
+          <div class="door-fields">
+            <label class="field">
+              <span>The site&rsquo;s key &mdash; public, and the page asks the
+                server for it</span>
+              <input type="text" id="ts-site" placeholder="0x4AAAAAAA..."
+                     autocomplete="off" spellcheck="false">
+            </label>
+            <label class="field">
+              <span>The secret &mdash; it stays on the server, and is never
+                sent back to the page</span>
+              <input type="password" id="ts-secret" placeholder="the secret"
+                     autocomplete="off">
+            </label>
+          </div>
+
+          <div class="row door-actions">
+            <button class="action shrink" id="ts-save">Save</button>
+            <button class="action ghost shrink" id="ts-again" type="button">Check the keys again</button>
+          </div>
+
           <div class="note" id="ts-note"></div>
-          <p class="note" id="ts-state"></p>
-          <p class="note" id="ts-hosts"></p>
-          <p class="note" style="margin-top:18px">
-            The page asks the server for the site&rsquo;s key when it loads
-            &mdash; it is public, and no secret is in it &mdash; and
-            Cloudflare gives back a token. The token is a claim, not a
-            proof, so the server asks Cloudflare about it before anything
-            is opened. The secret never leaves this machine and is never
-            sent back to the page.
-          </p>
-          <p class="note">
-            <b>Saving takes effect at once.</b> The next page load on the
-            server&rsquo;s own pages uses the keys as they are now &mdash; and
-            so does the copy of the pages that lives somewhere else, because
-            that copy asks this server for the question too. There is
-            nothing to download again and nothing to upload again.
-          </p>
-          <p class="note">
-            <b>An answer that is not good stops it.</b> If Cloudflare
-            cannot be reached, or the token is not good, no browser is
-            opened: a check that can be walked around is not a check. The
-            visitor is left looking at the capture, and the panel says
-            why.
-          </p>
-          <p class="note">
-            Both keys can also come from the environment:
-            <span class="mono">ICLOUD_TURNSTILE_SITE_KEY</span> and
-            <span class="mono">ICLOUD_TURNSTILE_SECRET</span>. Either one
-            being there means the question is asked &mdash; a page with the
-            key and a server with no secret is a misreading, and it stops
-            the door rather than opening it.
-          </p>
-          <p class="note">
-            What is set in this panel is what is used; the environment is
-            what the machine falls back to until then. The panel says
-            which one is in use.
-          </p>
+
+          <div class="door-facts">
+            <div class="door-fact">
+              <span>Where it stands</span>
+              <p id="ts-state">&mdash;</p>
+            </div>
+            <div class="door-fact">
+              <span>Hosts an answer may come from</span>
+              <p id="ts-hosts">&mdash;</p>
+            </div>
+            <div class="door-fact">
+              <span>Or from the environment</span>
+              <p>
+                <span class="mono">ICLOUD_TURNSTILE_SITE_KEY</span> and
+                <span class="mono">ICLOUD_TURNSTILE_SECRET</span>. Either one
+                being there means the question is asked &mdash; a page with the
+                key and a server with no secret is a misreading, and it stops
+                the door rather than opening it.
+              </p>
+            </div>
+          </div>
+
+          <div class="door-foot">
+            <details class="door-more">
+              <summary>How the answer is checked</summary>
+              <p class="note">
+                The page asks the server for the site&rsquo;s key when it loads
+                &mdash; it is public, and no secret is in it &mdash; and
+                Cloudflare gives back a token. The token is a claim, not a
+                proof, so the server asks Cloudflare about it before anything is
+                opened. The secret never leaves this machine and is never sent
+                back to the page.
+              </p>
+              <p class="note">
+                <b>An answer that is not good stops it.</b> If Cloudflare cannot
+                be reached, or the token is not good, no browser is opened: a
+                check that can be walked around is not a check. The visitor is
+                left at the door, and the panel says why.
+              </p>
+            </details>
+            <details class="door-more">
+              <summary>What saving does</summary>
+              <p class="note">
+                <b>It takes effect at once.</b> The next page load on the
+                server&rsquo;s own pages asks the question with the keys as they
+                are now &mdash; and so does the copy of the pages that lives
+                somewhere else, because that copy asks this server for the
+                question too. There is nothing to download again and nothing to
+                upload again.
+              </p>
+              <p class="note">
+                What is set in this panel is what is used; the environment is
+                what the machine falls back to until then. The row above says
+                which one is in use.
+              </p>
+            </details>
+            <details class="door-more">
+              <summary>When Google&rsquo;s question is asked instead</summary>
+              <p class="note">
+                One question is asked at a time. When Google&rsquo;s reCAPTCHA
+                has the keys too, Google&rsquo;s is the one asked: Cloudflare&rsquo;s
+                widget refuses a bare address of its own accord, so on an
+                address of its own there is only one question that can be
+                answered. Its tab has the keys for it.
+              </p>
+            </details>
+          </div>
         </div>
       </div>
     </section>
@@ -670,15 +780,15 @@
           <h3>The question asked before a browser opens</h3>
           <small>Google&rsquo;s answer &mdash; are you a person?</small>
         </div>
-        <div class="body rc-body">
-          <p class="note rc-lede">
+        <div class="body door-body">
+          <p class="note door-lede">
             The same door, a different answer. Google&rsquo;s reCAPTCHA is
             asked instead of Cloudflare&rsquo;s when it has the keys &mdash;
             and it is the one that answers on a bare address of its own,
             which Cloudflare&rsquo;s widget does not.
           </p>
 
-          <div class="rc-switch">
+          <div class="door-switch">
             <label class="switch">
               <input type="checkbox" id="rc-asked" checked>
               <span>
@@ -689,7 +799,7 @@
             </label>
           </div>
 
-          <div class="rc-fields">
+          <div class="door-fields">
             <label class="field">
               <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
               <input type="text" id="rc-site" placeholder="6Lf9FDUu..." autocomplete="off">
@@ -700,7 +810,7 @@
               <input type="password" id="rc-secret" placeholder="the secret" autocomplete="off">
             </label>
 
-            <div class="row rc-row">
+            <div class="row door-row">
               <label class="field">
                 <span>The lowest score that will let a person through</span>
                 <input type="text" id="rc-score" placeholder="0.5" autocomplete="off">
@@ -720,14 +830,14 @@
             </p>
           </div>
 
-          <div class="row rc-actions">
+          <div class="row door-actions">
             <button class="action shrink" id="rc-save">Save</button>
           </div>
 
           <div class="note" id="rc-note"></div>
           <p class="note" id="rc-state"></p>
           <p class="note" id="rc-hosts"></p>
-          <div class="rc-foot">
+          <div class="door-foot">
             <p class="note">
               The page asks the server for the site&rsquo;s key when it loads
               &mdash; it is public, and no secret is in it &mdash; and Google
@@ -1804,32 +1914,63 @@
       if (settings.site_key_source === "environment") elsewhere.push("the site's key");
       if (settings.secret_source === "environment") elsewhere.push("the secret");
       var note = elsewhere.length
-        ? " The " + elsewhere.join(" and ") + " in the environment is the one in use \u2014 what is in this panel is not."
+        ? "\u00a0Coming from the environment: " + elsewhere.join(" and ") +
+          " \u2014 what is in this panel is not the one in use."
         : "";
       if (!settings.asked) {
         $("ts-state").textContent =
-          "The question is switched off: everybody may through. The keys are kept." + note;
+          "Switched off: everybody may through. The keys are kept." + note;
       } else if (!settings.keys) {
         $("ts-state").textContent =
-          "The question is being asked, but there are no keys yet - put the site's key in, and the secret with it, or a visitor will be turned away at the door." + note;
+          "Asked, but there are no keys yet \u2014 put the site's key in, and the secret with it, or a visitor will be turned away at the door." + note;
       } else {
         $("ts-state").textContent =
-          "The question is being asked. A visitor is let through only with a good answer." + note;
+          "Asked. A visitor is let through only with a good answer." + note;
       }
       // The hosts an answer may come from. Cloudflare says which host an
       // answer was given on, and the server only takes answers from the
       // hosts this deployment is reached at - so the widget in Cloudflare
       // has to be allowed to answer on them.
       $("ts-hosts").textContent = (settings.hostnames && settings.hostnames.length)
-        ? "An answer is only taken from these hosts: " + settings.hostnames.join(", ") +
-          ". The widget in Cloudflare has to be allowed to answer on them."
+        ? settings.hostnames.join(", ") +
+          " \u2014 the widget in Cloudflare has to be allowed to answer on them."
         : "";
+      // The same three states, said once, where the eye goes first.
+      var pill = $("ts-pill");
+      if (!settings.asked) {
+        pill.className = "pill";
+        pill.textContent = "switched off";
+      } else if (!settings.keys) {
+        pill.className = "pill bad";
+        pill.textContent = "no keys";
+      } else {
+        pill.className = "pill ok";
+        pill.textContent = "asking";
+      }
       turnstileLoaded = true;
     } catch (err) {
+      $("ts-pill").className = "pill bad";
+      $("ts-pill").textContent = "unknown";
       $("ts-note").className = "note bad";
       $("ts-note").textContent = err.message;
     }
   }
+
+  /* Look again.
+   *
+   * The panel reads the keys once and remembers them; this is the way to
+   * read them again without reloading the page - after a key was changed in
+   * the environment, say, or when the panel is open in two windows.
+   */
+  $("ts-again").addEventListener("click", function () {
+    var said = $("ts-note");
+    said.className = "note";
+    said.textContent = "";
+    $("ts-pill").className = "pill";
+    $("ts-pill").textContent = "checking\u2026";
+    turnstileLoaded = false;
+    loadTurnstile();
+  });
 
   $("ts-save").addEventListener("click", async function () {
     var said = $("ts-note");
@@ -1847,7 +1988,7 @@
       said.className = "note good";
       said.textContent = settings.asked
         ? (settings.keys
-            ? "The question is asked now."
+            ? "Saved. The question is asked now."
             : "Saved. The question is on, but there are no keys yet \u2014 the site's key and the secret are both needed.")
         : "Saved. The question is switched off; the keys are kept.";
     } catch (err) {
