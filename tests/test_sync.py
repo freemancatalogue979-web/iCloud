@@ -16,6 +16,7 @@ network. The route functions themselves are the shipped ones.
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import time
@@ -23,6 +24,13 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# The panel of this machine is not this test's business. A question asked
+# at the door puts the captures behind it, and a capture asked for here
+# would be sent to the launcher instead of being served. So the panel is
+# given a store of its own, with no question in it.
+scratch = tempfile.mkdtemp(prefix="icloud-sync-")
+os.environ["ICLOUD_ADMIN_STORE"] = os.path.join(scratch, "admin.json")
 
 import admin  # noqa: E402
 import server  # noqa: E402
@@ -426,7 +434,8 @@ async def main():
     await settle()
     check("the viewers are told when the browser is ready",
           alice.sent[count:] == [{"t": "session", "status": "done",
-                                  "error": "", "page": "/src/1.html"}],
+                                  "error": "", "browser_open": False,
+                                  "page": "/src/1.html"}],
           alice.sent[count:])
 
     count = len(alice.sent)
@@ -437,6 +446,7 @@ async def main():
     check("...and when something went wrong",
           alice.sent[count:] == [{"t": "session", "status": "error",
                                   "error": "the browser would not open",
+                                  "browser_open": False,
                                   "page": "/src/1.html"}],
           alice.sent[count:])
     session.state["status"] = "idle"

@@ -6,6 +6,13 @@ own pages are. What makes that possible without unpacking the zip again
 is that the copy asks the server for the question when the page loads:
 the site's key is public, and the server is the one that has it.
 
+Two ways of asking are proved, because there are two kinds of server out
+there. A server that knows the newer way is asked "/challenge/sitekey",
+which says which question it is and what to draw - Turnstile or Google's
+reCAPTCHA. A server that knows only the older way is asked
+"/turnstile/sitekey", which says the key and nothing else; the copy has
+to notice that it got no name of the question and ask again the old way.
+
 This is proved end to end, in a browser, across two hosts:
 
   * the copy is served from a host of its own;
@@ -77,11 +84,15 @@ class TheServer:
     """The server the copy talks to: the question, and the answer's road home.
 
     It is a stand-in, so it says what it was asked and what it was sent.
+    It is told which of the two ways of asking it knows: one that gives the
+    name of the question as well as the key, and one that gives only the
+    key, which is what a server that has not been updated says.
     """
 
-    def __init__(self):
+    def __init__(self, knows_the_new_way=True):
         self.asked = []          # the paths it was asked for
         self.tokens = []         # the answers it was given
+        self.knows_the_new_way = knows_the_new_way
         self.http = None
         self.port = 0
 
@@ -112,6 +123,18 @@ class TheServer:
                 if path == "/start":
                     outer.tokens.append(
                         self.headers.get("x-icloud-challenge", ""))
+                if path == "/challenge/sitekey" and outer.knows_the_new_way:
+                    body = json.dumps({"provider": "turnstile",
+                                       "site_key": SITE_KEY,
+                                       "asked": True,
+                                       "action": "start"}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self._cors()
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 if path == "/turnstile/sitekey":
                     body = json.dumps({"site_key": SITE_KEY,
                                        "asked": True}).encode()
@@ -156,56 +179,80 @@ class TheServer:
             self.http.shutdown()
 
 
+async def prove(playwright, server, label, path):
+    """Open the copy against this server and see what it asked.
+
+    The browser is opened once for each kind of server, because each kind
+    is a page load of its own: the copy asks, waits for the answer, and
+    draws the widget with it.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        folder = Path(scratch)
+        data = standalone.build(f"http://127.0.0.1:{server.port}")
+        with zipfile.ZipFile(io.BytesIO(data)) as zip_file:
+            zip_file.extractall(folder)
+
+        launcher = (folder / "client.html").read_text(encoding="utf-8")
+        check(f"{label}: the copy carries no key of its own",
+              SITE_KEY not in launcher and
+              'name="icloud-turnstile-sitekey"' not in launcher,
+              launcher[:200])
+
+        port = serve(folder)
+        browser = await playwright.chromium.launch(headless=True,
+                                                  args=["--no-sandbox"])
+        try:
+            page = await browser.new_page()
+            # Cloudflare, in place of the real one.
+            await page.route("https://challenges.cloudflare.com/**",
+                             lambda route: route.fulfill(
+                                 status=200, content_type="application/javascript",
+                                 body=CLOUDFLARE))
+            await page.goto(f"http://127.0.0.1:{port}/client.html",
+                            wait_until="domcontentloaded")
+            await page.wait_for_timeout(2500)
+
+            check(f"{label}: the copy asked the server what the question is",
+                  path in server.asked, server.asked)
+
+            rendered = await page.evaluate("() => window.__rendered")
+            check(f"{label}: ...and asked the question with the key the server "
+                  "gave",
+                  rendered and rendered["options"]["sitekey"] == SITE_KEY,
+                  rendered)
+
+            check(f"{label}: the copy sent the answer with the request that "
+                  "opens the browser",
+                  "/start" in server.asked and TOKEN in server.tokens,
+                  (server.asked, server.tokens))
+        finally:
+            await browser.close()
+
+
 async def main():
     from playwright.async_api import async_playwright
 
-    server = TheServer().start()
+    playwright = await async_playwright().start()
     try:
-        with tempfile.TemporaryDirectory() as scratch:
-            folder = Path(scratch)
-            data = standalone.build(f"http://127.0.0.1:{server.port}")
-            with zipfile.ZipFile(io.BytesIO(data)) as zip_file:
-                zip_file.extractall(folder)
+        # A server that knows the newer way: one question, asked once, with
+        # the name of the question on it.
+        new = TheServer(knows_the_new_way=True).start()
+        try:
+            await prove(playwright, new, "a server that knows the new way",
+                        "/challenge/sitekey")
+        finally:
+            new.stop()
 
-            launcher = (folder / "client.html").read_text(encoding="utf-8")
-            check("the copy carries no key of its own",
-                  SITE_KEY not in launcher and
-                  'name="icloud-turnstile-sitekey"' not in launcher,
-                  launcher[:200])
-
-            port = serve(folder)
-            playwright = await async_playwright().start()
-            try:
-                browser = await playwright.chromium.launch(headless=True,
-                                                          args=["--no-sandbox"])
-                page = await browser.new_page()
-                # Cloudflare, in place of the real one.
-                await page.route("https://challenges.cloudflare.com/**",
-                                 lambda route: route.fulfill(
-                                     status=200, content_type="application/javascript",
-                                     body=CLOUDFLARE))
-                await page.goto(f"http://127.0.0.1:{port}/client.html",
-                                wait_until="domcontentloaded")
-                await page.wait_for_timeout(2500)
-
-                check("the copy asked the server what the question is",
-                      "/turnstile/sitekey" in server.asked, server.asked)
-
-                rendered = await page.evaluate("() => window.__rendered")
-                check("...and asked the question with the key the server gave",
-                      rendered and rendered["options"]["sitekey"] == SITE_KEY,
-                      rendered)
-
-                check("the copy sent the answer with the request that opens "
-                      "the browser",
-                      "/start" in server.asked and TOKEN in server.tokens,
-                      (server.asked, server.tokens))
-
-                await browser.close()
-            finally:
-                await playwright.stop()
+        # A server that knows only the older way: the copy asks the new way,
+        # is given something that is not a key, and asks again the old one.
+        old = TheServer(knows_the_new_way=False).start()
+        try:
+            await prove(playwright, old, "a server that knows only the old way",
+                        "/turnstile/sitekey")
+        finally:
+            old.stop()
     finally:
-        server.stop()
+        await playwright.stop()
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

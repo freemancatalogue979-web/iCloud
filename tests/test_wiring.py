@@ -108,9 +108,11 @@ async def main():
 
     # -- the screen is the machine's own ------------------------------
     geometry = server.geometry_for(session)
+    # The geometry is rounded, not cut off: a screen of 1366 drawn at one
+    # and a quarter is 1707.5 pixels, and the machine has 1708 of them.
     check("the screen is the size the device says",
-          geometry == f"{int(device.screen['width'] * device.dpr)}x"
-                      f"{int(device.screen['height'] * device.dpr)}x24",
+          geometry == f"{int(round(device.screen['width'] * device.dpr))}x"
+                      f"{int(round(device.screen['height'] * device.dpr))}x24",
           geometry)
 
     # -- and the browser is told to leave from the group's address ----
