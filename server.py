@@ -42,6 +42,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 
 import admin
 import browsers
+import door
 import geo
 import identity as identity_module
 import live
@@ -729,7 +730,7 @@ def bring_new_tab_to_front(session: "Session", new_page):
 # The things a page is allowed to ask for. The panel is not among them: it
 # has a secret of its own, and a page on another host has no business
 # there.
-CLIENT_ROUTES = ("/start", "/status", "/nav")
+CLIENT_ROUTES = ("/start", "/status", "/nav", "/challenge/state")
 
 # The one thing anybody may ask for: the site's key for the question asked
 # at the door. It is public - Cloudflare puts it in every page that uses
@@ -856,6 +857,32 @@ def expected_hostnames(request) -> set:
     if challenge_provider() == "recaptcha":
         return recaptcha.expected_hosts(admin.STORE, request_host=host)
     return turnstile.expected_hosts(admin.STORE, request_host=host)
+
+
+def own_names() -> list:
+    """The names this server answers on, other than a number.
+
+    The hosts an answer may come from are the hosts this server is known by:
+    the panel holds them, and they are the names a copy of the pages can ask
+    this server at.
+
+    A name that is only a number is not one a Worker can ask at - Cloudflare
+    turns such a request away with "error code: 1003" - and the copy's own
+    host is not this server's own name, so neither is in here.
+    """
+    said: list = []
+    for hosts in (recaptcha.expected_hosts(admin.STORE),
+                  turnstile.expected_hosts(admin.STORE)):
+        for one in sorted(hosts or []):
+            name = str(one).strip().lower()
+            if not name or name in said:
+                continue
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", name):
+                continue
+            if ".workers.dev" in name:
+                continue
+            said.append(name)
+    return said
 
 
 # The pass.
@@ -1002,6 +1029,36 @@ def named_for(request) -> bool:
     except Exception:
         return False
     return bool(sid)
+
+
+def names_a_session(request) -> bool:
+    """Does this address name a session?
+
+    A capture is for one browser and one session, and says so in its
+    address. The name has to be there, and it has to be a name a session
+    could have - so a capture asked for without one is not a capture.
+
+    The session does not have to be here yet. A capture that is fetched
+    before the question has been answered asks the question itself, and the
+    answer is for the session the address names - so the session is made
+    when the answer comes, not before.
+    """
+    try:
+        sid = str(request.query_params.get("sid", "") or "").strip()
+    except Exception:
+        return False
+    return bool(sid) and bool(sessions.SESSION_ID.match(sid))
+
+
+def is_capture_page(path: str) -> bool:
+    """Is this path a capture that is a page?
+
+    The captures that are pages carry the question at the door. The ones
+    that are not - the flow, a picture - are not handed to anybody before
+    the question has been answered.
+    """
+    name = str(path or "").lstrip("/")
+    return name.lower().endswith(_HTML_SUFFIXES)
 
 
 def identity_of(request) -> str:
@@ -1193,10 +1250,47 @@ async def challenge_sitekey(request: Request):
                         headers=NO_STORE)
 
 
+@app.get("/challenge/state")
+async def challenge_state(request: Request):
+    """Has this session answered the question, and what is the question?
+
+    A capture asks this before it does anything. A capture that carries the
+    question at the door asks it there, and the answer goes back to the
+    server to be checked - so the page has to know whether this session has
+    answered it already. Everybody who came through the launcher has, and is
+    not asked again: the question is asked once, at the door, and not again
+    on every page of the sign-in.
+
+    The site's key is public, and is given here as it is on
+    "/challenge/sitekey" - but this one is for the pages of the app, and it
+    is asked for by them, so it is on the list of things a page may ask for.
+    """
+    said = challenge_settings()
+    session = session_of(request)
+    return JSONResponse({
+        "ok": True,
+        "asked": said["asked"],
+        "passed": bool(session is not None
+                       and getattr(session, "passed", False)),
+        "provider": said["provider"],
+        "site_key": said["site_key"],
+        "action": said["action"],
+        "kind": said["kind"],
+    }, headers=NO_STORE)
+
+
 @app.get("/start")
 async def start(request: Request):
     """Launch this visitor's browser and press Sign In."""
-    session = session_for(visitor_of(request))
+    # The page may say which session it is for. A capture's address names
+    # the session it is for, and the page answers the question for that one
+    # - so the name in the address is the one that is used, and the cookie
+    # is only there when the page did not say.
+    try:
+        named = str(request.query_params.get("visitor", "") or "").strip()
+    except Exception:
+        named = ""
+    session = session_for(named or visitor_of(request))
     # The visitor is given their device and their group before the browser
     # opens: the browser needs to know both before it is opened, not
     # after.
@@ -1227,6 +1321,9 @@ async def start(request: Request):
     session.passed = True
 
     state = await start_browser(session)
+    # And the pages that were waiting at the door are told: the content they
+    # were not given is given now.
+    session.hub.tell_content()
     # The cookie says the same thing on every request from now on, so the
     # page does not have to say it again.
     return JSONResponse({**state, "pass": make_pass(session.id)},
@@ -1645,12 +1742,30 @@ def _attributes(tag_text: str):
 #   * connect-src gains 'self' and the websocket schemes, so its socket can
 #     be opened.
 #
+# And the question at the door, which the capture asks itself, needs the
+# widget's own hosts: the script that asks, the frame the widget is drawn
+# in, and the address the answer is checked at.
+#
 # A policy that says nothing about scripts is left alone: it already allows
 # them.
 # --------------------------------------------------------------------------
 
 CSP_ENGINE_SCRIPT = "'self'"
 CSP_ENGINE_CONNECT = "'self' ws: wss:"
+
+# The hosts the widget at the door is made of. Google's own for Google's
+# question, Cloudflare's for Cloudflare's. Both are named in both cases: a
+# copy of the pages is built once and served for as long as it lives, and
+# the question it asks can be changed in the panel without the copy being
+# built again.
+CSP_WIDGET_SCRIPT = ("https://www.google.com/recaptcha/ "
+                     "https://www.gstatic.com/recaptcha/ "
+                     "https://challenges.cloudflare.com/")
+CSP_WIDGET_FRAME = ("https://www.google.com/recaptcha/ "
+                    "https://challenges.cloudflare.com/")
+CSP_WIDGET_CONNECT = ("https://www.google.com/recaptcha/ "
+                      "https://challenges.cloudflare.com/")
+CSP_WIDGET_IMG = "https://www.gstatic.com/recaptcha/"
 
 
 def _relax_policy(policy: str, connect: str = "") -> str:
@@ -1695,6 +1810,29 @@ def _relax_policy(policy: str, connect: str = "") -> str:
     elif "default-src" in names:
         parts.append("connect-src " + CSP_ENGINE_CONNECT +
                      (" " + connect if connect else ""))
+
+    # And the question at the door, which the capture asks itself: the
+    # script that asks, the frame it is drawn in, the place the answer is
+    # checked at, and the badge's picture.
+    #
+    # The names are read again: the directives that were not there have
+    # just been added, and they need the widget's hosts as well.
+    names = [part.split()[0].lower() for part in parts]
+    for directive, sources in (("script-src", CSP_WIDGET_SCRIPT),
+                               ("script-src-elem", CSP_WIDGET_SCRIPT),
+                               ("frame-src", CSP_WIDGET_FRAME),
+                               ("connect-src", CSP_WIDGET_CONNECT),
+                               ("img-src", CSP_WIDGET_IMG)):
+        if directive in names:
+            parts = [
+                widened(part, sources)
+                if named(part, directive) else part
+                for part in parts
+            ]
+        elif directive in ("frame-src", "img-src") and "default-src" in names:
+            # Scripts and connections are already named above; the frame and
+            # the picture follow default-src, so they have to be named too.
+            parts.append(directive + " " + sources)
 
     return "; ".join(parts)
 
@@ -1892,6 +2030,57 @@ def missing_page(path: str, folder: Path, identity: str = "") -> str:
     return page_document("No captured page", body)
 
 
+# --------------------------------------------------------------------------
+# The door on its own
+#
+# A capture asked for before the question has been answered is not given out.
+# What is given out instead is the question - the same block every capture
+# carries, on a page of its own, with nothing of the capture in it.
+#
+# The answer goes to the server and the server checks it, exactly as it does
+# for a capture that asks the question itself. When the answer is good the
+# page goes back to the capture it was standing in for, with the pass in its
+# hand, and the capture is served then - because the session has answered.
+# --------------------------------------------------------------------------
+
+
+def live_question() -> dict:
+    """The question that is being asked now, and the key to ask it with.
+
+    Said in the shape the door reads it in: the name of the provider, the
+    site's key, which kind of Google's widget it is, and what the answer is
+    called.
+    """
+    said = challenge_settings()
+    return {"provider": said["provider"],
+            "site_key": said["site_key"],
+            "kind": said["kind"],
+            "action": said["action"]}
+
+
+def door_page(request) -> str:
+    """The question at the door, on a page of its own.
+
+    Nothing of the capture is in here: not the page, not the values, not the
+    browser. The question is asked, the answer goes to the server, and the
+    server says whether the capture may be given out at all.
+
+    The address of the capture is in the page as well, so that a good answer
+    can go back to it - the same address, with the names still on it.
+    """
+    back = request.url.path
+    try:
+        query = request.url.query
+    except Exception:
+        query = ""
+    if query:
+        back = f"{back}?{query}"
+    # The address is put in the page as JavaScript, so the characters that
+    # would end the script are written as themselves.
+    back = json.dumps(back).replace("<", "\\u003c")
+    return door.page(back=back, question=live_question())
+
+
 @app.get("/src")
 @app.get("/src/{path:path}")
 async def captured(request: Request, path: str = ""):
@@ -1913,8 +2102,18 @@ async def captured(request: Request, path: str = ""):
     # The captures are behind the question when there is one. A stranger who
     # has not answered it is sent to the launcher, which asks it - and the
     # captures are not served to them on the way.
+    #
+    # A capture that is a page is the exception: it is not sent away, it is
+    # given the question instead. The page itself is not given out before
+    # the answer has been checked - that is the whole of it. So what a
+    # stranger, or a copied address, gets is the door: the question, on a
+    # page of its own, with nothing of the capture in it. The answer goes to
+    # the server, the server checks it, and the capture is given out after
+    # that - and not before.
     if not may_have_captures(request):
-        return RedirectResponse("/", status_code=302)
+        if not (is_capture_page(path) and names_a_session(request)):
+            return RedirectResponse("/", status_code=302)
+        return HTMLResponse(door_page(request), headers=NO_STORE)
 
     # And a capture is for one browser and one session, and says so in its
     # address. A capture asked for without those names is not a capture: it
@@ -1949,6 +2148,10 @@ async def captured(request: Request, path: str = ""):
         # and the scripts are not pages, and they are nobody's.
         session = session_for_named(request)
         source = target.read_text(encoding="utf-8", errors="replace")
+        # The question in the page is the question that is being asked now:
+        # the key that is live, put in fresh, so that a key changed in the
+        # panel is in the next page that is served.
+        source = door.with_question(source, **live_question())
         cookie = ({"Set-Cookie": session_cookie(session.id)}
                   if session is not None else {})
         return HTMLResponse(with_engine(source),
@@ -2114,22 +2317,53 @@ class Hub:
             "values": {key: dict(entry) for key, entry in self.values.items()},
         }
 
+    def may_see_content(self) -> bool:
+        """May this session's viewers be told what the session is doing?
+
+        The content of a capture - what the browser is showing, and what has
+        been typed into it - is kept back until the question has been
+        answered. A page that carries the question at the door is served
+        before the answer, and it is served to nobody else: this is the
+        other half of the door, and it is the half that cannot be walked
+        around, because it is the server that decides.
+
+        With no question being asked, there is nothing to keep back.
+        """
+        if not challenge_provider():
+            return True
+        if self.session is None:
+            return False
+        return bool(getattr(self.session, "passed", False))
+
     def join(self, viewer: Viewer) -> None:
         self.viewers.add(viewer)
         if self.session is not None:
             self.session.touch()
-        viewer.send(self.snapshot())
-        # Where the browser is, so a viewer that joins late is looking at the
-        # same session the others are.
-        viewer.send({"t": "browser", **self.browser})
-        # And what this session is doing, so a page that has just arrived
-        # knows where it stands without having to ask.
+        if self.may_see_content():
+            viewer.send(self.snapshot())
+            # Where the browser is, so a viewer that joins late is looking at
+            # the same session the others are.
+            viewer.send({"t": "browser", **self.browser})
+        # And what this session is doing, so that a page that has just
+        # arrived knows where it stands without having to ask - and, in
+        # particular, knows whether the question has been answered yet.
         viewer.send(self.session_state())
         # Somebody is here now, and the manager says so. The panel is a
         # subscriber, so it hears it from the manager rather than being
         # poked from inside the hub.
         if self.session is not None:
             SESSIONS.changed(self.session, why="presence")
+
+    def tell_content(self) -> None:
+        """The content, said now that the question has been answered.
+
+        A page that was waiting at the door is told what it may see, and
+        what the browser is doing.
+        """
+        if not self.may_see_content():
+            return
+        self.broadcast(self.snapshot())
+        self.broadcast({"t": "browser", **self.browser})
 
     def session_state(self) -> dict:
         """What this session is doing, in one message.
@@ -2148,6 +2382,10 @@ class Hub:
                 "status": str(state.get("status") or "idle"),
                 "error": str(state.get("error") or ""),
                 "browser_open": bool(state.get("browser_open")),
+                # Whether the question has been answered. A page that was
+                # waiting at the door is waiting for this.
+                "passed": bool(self.session is not None
+                               and getattr(self.session, "passed", False)),
                 "page": self.page}
 
     def tell_state(self) -> None:
@@ -2258,7 +2496,8 @@ class Hub:
             if self.session is not None:
                 self.session.launcher_page = ""
                 self.session.launcher_why = ""
-            viewer.send(self.snapshot())
+            if self.may_see_content():
+                viewer.send(self.snapshot())
 
         elif kind == "nav":
             self.navigate(message.get("page"), sender=viewer)
@@ -2273,11 +2512,14 @@ class Hub:
                 "checked": bool(message.get("checked")),
             }
             self.values[key] = entry
-            self.broadcast({"t": "value", "key": key, **entry}, sender=viewer)
+            if self.may_see_content():
+                self.broadcast({"t": "value", "key": key, **entry}, sender=viewer)
 
         elif kind == "click":
             x, y = message.get("x"), message.get("y")
             if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+                return
+            if not self.may_see_content():
                 return
             self.broadcast(
                 {
@@ -2293,6 +2535,8 @@ class Hub:
             # "Where is the browser?" A document has just been bound and may
             # hold fields the browser knows about and the page does not, so
             # the state is sent again to this viewer.
+            if not self.may_see_content():
+                return
             viewer.send({"t": "browser", **self.browser})
 
         elif kind == "splash":
@@ -2695,6 +2939,26 @@ def session_for_named(request) -> Session | None:
     """
     name = visitor_of(request)
     return session_for(name) if name else None
+
+
+def session_of(request) -> Session | None:
+    """The session this request is about, if there is one.
+
+    The visitor's own session - the cookie says who, or the name in the
+    address does - and, failing that, the session named in the address: a
+    capture says whose session it is for.
+
+    Looking up is not making: a request that only reads must not give a
+    visitor a session of their own.
+    """
+    session = session_lookup(visitor_of(request))
+    if session is not None:
+        return session
+    try:
+        sid = str(request.query_params.get("sid", "") or "").strip()
+    except Exception:
+        sid = ""
+    return session_lookup(sid) if sid else None
 
 
 def session_lookup(sid: str | None) -> Session | None:
