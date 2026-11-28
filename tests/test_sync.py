@@ -92,9 +92,15 @@ async def open_viewer():
     return websocket, task
 
 
-def make_session_request(session="the-tests"):
-    """A request that belongs to a visitor."""
+def make_session_request(session="the-tests", named=False):
+    """A request that belongs to a visitor.
+
+    ``named`` puts the names in the address as well: a capture is for one
+    browser and one session, and says so in the address it is asked for by.
+    """
+    query = f"sid={session}".encode() if named else b""
     return Request({"type": "http", "method": "GET", "path": "/",
+                    "query_string": query,
                     "headers": [(b"cookie", f"{server.SESSION_COOKIE}={session}".encode())]},
                    None)
 
@@ -308,7 +314,7 @@ async def main():
 
     server.SRC = root
 
-    response = await server.captured(make_session_request(), "1.html")
+    response = await server.captured(make_session_request(named=True), "1.html")
     body = response.body.decode()
     check("a captured page is served as HTML", response.status_code == 200 and
           response.media_type.startswith("text/html"), response.status_code)
@@ -328,27 +334,27 @@ async def main():
           "default-src 'none'" in body and
           'name="mobile-web-app-capable"' not in body, body[:300])
 
-    asset = await server.captured(make_session_request(), "site.css")
+    asset = await server.captured(make_session_request(named=True), "site.css")
     check("an asset is served with its type",
           asset.status_code == 200 and asset.media_type == "text/css" and
           asset.body == b"body { color: red; }", asset.media_type)
 
-    listing = await server.captured(make_session_request(), "")
+    listing = await server.captured(make_session_request(named=True), "")
     check("the folder lists the captures",
           listing.status_code == 200 and "1.html" in listing.body.decode() and
           "2.html" in listing.body.decode())
 
-    missing = await server.captured(make_session_request(), "nope.html")
+    missing = await server.captured(make_session_request(named=True), "nope.html")
     check("a missing capture says where to put it",
           missing.status_code == 404 and "src/nope.html" in missing.body.decode() and
           "/sync.js" not in missing.body.decode(), missing.status_code)
 
-    traversal = await server.captured(make_session_request(), "../" + elsewhere.name + "/secret.html")
+    traversal = await server.captured(make_session_request(named=True), "../" + elsewhere.name + "/secret.html")
     leaked = traversal.body.decode()
     check("nothing outside src/ can be read",
           traversal.status_code == 404 and "TOP SECRET" not in leaked, traversal.status_code)
 
-    request = make_session_request()
+    request = make_session_request(named=True)
     client = await server.index(request)
     check("/ serves the launcher while the browser is idle",
           str(client.path).endswith("client.html"), client.path)
@@ -360,10 +366,15 @@ async def main():
 
     session.state["status"] = "done"
     redirect = await server.index(request)
+    # The capture it sends the person to carries the names as well, or the
+    # page it lands on does not know who it is for.
+    where = redirect.headers.get("location") or ""
     check("/ becomes the capture once Sign In has been clicked",
           redirect.status_code == 307 and
-          redirect.headers.get("location") == session.hub.page,
-          (redirect.status_code, redirect.headers.get("location")))
+          where.split("?")[0] == session.hub.page,
+          (redirect.status_code, where))
+    check("...and the names went with it",
+          "sid=the-tests" in where, where)
     session.state["status"] = "idle"
 
     # ---- every visitor gets their own browser ---------------------------

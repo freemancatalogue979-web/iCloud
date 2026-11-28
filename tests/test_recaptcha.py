@@ -10,6 +10,11 @@ What is pinned here:
   * a score below the one the panel asks for does not either - the
     invisible kind says how likely it is that the person is a person, and
     that is a thing to be asked about;
+  * both of Google's answers are read the same way - the plain one, and the
+    Enterprise one that keeps the name of the question beside the answer
+    rather than in it;
+  * an answer that Google says is worth asking again is said so, and the
+    page is told to ask it again;
   * an answer that cannot be had stops the door rather than opening it -
     a check that can be walked around is not a check;
   * the secret never leaves the server, and the page is never sent it;
@@ -127,6 +132,16 @@ class Bare:
         self.scope = {"query_string": b""}
 
 
+def named(sid: str, uid: str = "the-user") -> str:
+    """The names a capture's address carries.
+
+    The session is the server's name for the visitor's browser, and the user
+    is the name that browser calls itself. A capture asked for without them
+    is not a capture: it is a page that anybody may ask for.
+    """
+    return f"uid={uid}&sid={sid}"
+
+
 def make_get(path, cookies=None, query=""):
     """A request for a page, with the cookies it is asked for."""
     headers = []
@@ -206,6 +221,77 @@ async def main():
         check("...and says so", "another question" in said["said"], said)
         check("...and the reason is named", said.get("reason") == "action", said)
 
+        # -- and Google's two kinds of answer --------------------------------
+        # The plain kind puts the name of the question, the host and the
+        # score at the top of its answer. The Enterprise kind says the same
+        # three things beside the answer instead, in "tokenProperties". An
+        # answer read from only the top of it looks as though it was given
+        # to no question at all - and that is how a good answer came to be
+        # turned away, with a reason that was true of the reading and not
+        # of the answer.
+        google.answer = {"success": True, "score": 0.9,
+                         "tokenProperties": {"hostname": "icloud.example.com",
+                                             "action": "start"}}
+        said = await recaptcha.verify("an-enterprise-answer",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("an answer that keeps its question beside it lets the person "
+              "through", said["ok"], said)
+        check("...and the question is read from beside it",
+              said.get("action") == "start", said)
+        check("...and so is the host it was given on",
+              said.get("hostname") == "icloud.example.com", said)
+
+        # The score is read from beside the answer too.
+        google.answer = {"success": True,
+                         "tokenProperties": {"hostname": "icloud.example.com",
+                                             "action": "start",
+                                             "score": 0.9}}
+        said = await recaptcha.verify("an-enterprise-score",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("...and so is the score", said["ok"] and said.get("score") == 0.9,
+              said)
+
+        # The score of an assessment is in its risk analysis, and a zero
+        # beside a real score is a placeholder and not a verdict.
+        google.answer = {"success": True, "score": 0.0,
+                         "riskAnalysis": {"score": 0.9, "reasons": []},
+                         "tokenProperties": {"hostname": "icloud.example.com",
+                                             "action": "start"}}
+        said = await recaptcha.verify("an-assessment-answer",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("the score is read from the risk analysis",
+              said["ok"] and said.get("score") == 0.9, said)
+
+        google.answer = {"success": True,
+                         "riskAnalysis": {"score": 0.0, "reasons": []},
+                         "tokenProperties": {"hostname": "icloud.example.com",
+                                             "action": "start"}}
+        said = await recaptcha.verify("an-assessment-with-no-score",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("an assessment that scored nothing does not",
+              not said["ok"] and said.get("reason") == "score", said)
+
+        # An answer that names no question at all is not an answer to
+        # another question: there is nothing to compare it with.
+        google.answer = {"success": True, "hostname": "icloud.example.com",
+                         "score": 0.9}
+        said = await recaptcha.verify("a-questionless-answer",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("an answer that names no question is not turned away for it",
+              said["ok"], said)
+        check("...and the question is not the reason",
+              said.get("reason") != "action", said)
+
         # An answer given on a host this server does not know.
         google.answer = {"success": True, "hostname": "somewhere-else.example",
                          "action": "start", "score": 0.9}
@@ -249,6 +335,18 @@ async def main():
         check("an answer with no score at all is not turned away for it",
               said["ok"], said)
 
+        # A score of nothing is a score, and it is below the one the panel
+        # asks for: an answer that scored nothing is not a person.
+        google.answer = {"success": True, "hostname": "icloud.example.com",
+                         "action": "start", "score": 0.0}
+        said = await recaptcha.verify("a-score-of-nothing",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"},
+                                      score=0.5)
+        check("an answer that scored nothing does not",
+              not said["ok"], said)
+        check("...and the reason is named", said.get("reason") == "score", said)
+
         # -- an answer is good once ----------------------------------------
         google.answer = {"success": True, "hostname": "icloud.example.com",
                          "action": "start", "score": 0.9}
@@ -261,6 +359,38 @@ async def main():
         check("...and Google says it has expired",
               "timeout-or-duplicate" in again["said"], again)
 
+        # -- and an answer that is worth asking again ------------------------
+        # "browser-error" is Google's own word for a bad moment in the
+        # browser: the signals were not collected, so the answer is not good
+        # because of it. It is the browser's bad day and not the person's,
+        # and the way out is to ask the question again.
+        google.answer = {"success": False, "error-codes": ["browser-error"]}
+        said = await recaptcha.verify("a-bad-moment",
+                                      given_secret="the-secret")
+        check("an answer that is not the person's fault does not let them in",
+              not said["ok"], said)
+        check("...and it is said to be worth asking again",
+              said.get("retry") is True, said)
+
+        google.answer = {"success": False,
+                         "error-codes": ["invalid-input-response"]}
+        said = await recaptcha.verify("a-simply-bad-answer",
+                                      given_secret="the-secret")
+        check("...and an answer that is simply bad is not worth asking again",
+              not said.get("retry"), said)
+
+        # What Google said, whole, is kept - so that the log can show what
+        # Google said rather than what this file made of it.
+        google.answer = {"success": True, "hostname": "icloud.example.com",
+                         "action": "start", "score": 0.9,
+                         "challenge_ts": "2024-01-01T00:00:00Z"}
+        said = await recaptcha.verify("a-readable-answer",
+                                      given_secret="the-secret",
+                                      hostnames={"icloud.example.com"})
+        check("what Google said is kept, so that the log can show it",
+              (said.get("raw") or {}).get("challenge_ts") ==
+              "2024-01-01T00:00:00Z", said)
+
         # An answer that is too long to be an answer is not worth asking
         # Google about.
         before = len(google.asked)
@@ -270,6 +400,21 @@ async def main():
               not said["ok"], said)
         check("...and Google is not even asked about it",
               len(google.asked) == before, (before, len(google.asked)))
+
+        # Google's own limit is four thousand characters, and the Enterprise
+        # kind is longer than the plain one - it carries the signals it
+        # collected inside it. A limit that is too small throws away good
+        # answers before Google has been asked about them.
+        check("the longest answer that can be an answer is Google's own limit",
+              recaptcha.MAX_TOKEN == 4000, recaptcha.MAX_TOKEN)
+        google.answer = {"success": True, "hostname": "icloud.example.com",
+                         "action": "start", "score": 0.9}
+        before = len(google.asked)
+        said = await recaptcha.verify("y" * 3000, given_secret="the-secret",
+                                      hostnames={"icloud.example.com"})
+        check("a long answer is asked about rather than thrown away",
+              said["ok"] and len(google.asked) == before + 1,
+              (said, len(google.asked) - before))
 
         # -- and the hosts an answer may come from -------------------------
         import admin  # noqa: E402
@@ -428,6 +573,20 @@ async def main():
             check("...and no browser is open", not state.get("browser_open"),
                   state)
 
+            # An answer that is worth asking again is said so, so that the
+            # page can ask it again: a new answer comes back, and a new
+            # answer is a new answer.
+            google.answer = {"success": False, "error-codes": ["browser-error"]}
+            answer = await routes["/start"](Bare({"x-icloud-challenge":
+                                                   "a-bad-moment"}))
+            state = getattr(answer, "body", answer)
+            if isinstance(state, (bytes, str)):
+                state = json.loads(state)
+            check("the door says an answer that is worth asking again is "
+                  "worth asking again", state.get("retry") is True, state)
+            check("...and still no browser is open for it",
+                  not state.get("browser_open"), state)
+
         # ---- and the door says which thing is missing ---------------------
         admin.STORE.set_recaptcha("6Lf9FDUu", "the-secret", asked=True)
         said = await server.check_person(Bare({}))
@@ -489,10 +648,21 @@ async def main():
             session = server.session_for(sid)
             session.passed = True
             answer = await capture_route(
-                make_get("/src/1.html", {server.SESSION_COOKIE: sid}),
+                make_get("/src/1.html", {server.SESSION_COOKIE: sid},
+                         named(sid)),
                 path="1.html")
             check("a visitor who has answered is given the capture",
                   getattr(answer, "status_code", 0) == 200,
+                  getattr(answer, "status_code", answer))
+
+            # But a capture asked for without the names is not a capture,
+            # however good the session is: it is a page that anybody may ask
+            # for, and it is not served.
+            answer = await capture_route(
+                make_get("/src/1.html", {server.SESSION_COOKIE: sid}),
+                path="1.html")
+            check("...and a capture asked for without the names is not one",
+                  getattr(answer, "status_code", 0) in (302, 307),
                   getattr(answer, "status_code", answer))
 
             # And a pass is enough on its own: that is how a copy of the
@@ -500,16 +670,20 @@ async def main():
             # question itself.
             a_pass = server.make_pass(sid)
             answer = await capture_route(
-                make_get("/src/1.html", {server.PASS_COOKIE: a_pass}),
+                make_get("/src/1.html", {server.PASS_COOKIE: a_pass},
+                         named(sid)),
                 path="1.html")
             check("...and a pass is enough on its own",
                   getattr(answer, "status_code", 0) == 200,
                   getattr(answer, "status_code", answer))
 
-            # A pass that was not made here is not a pass.
+            # A pass that was not made here is not a pass - and it does not
+            # open the door for a session that has not answered the question
+            # either. The session named in the address is one that has not.
             answer = await capture_route(
                 make_get("/src/1.html",
-                         {server.PASS_COOKIE: "x.9999999999.deadbeef"}),
+                         {server.PASS_COOKIE: "x.9999999999.deadbeef"},
+                         named("b" * 32)),
                 path="1.html")
             check("...and a pass that was not made here is not one",
                   getattr(answer, "status_code", 0) in (302, 307),
@@ -520,7 +694,8 @@ async def main():
             # has been gone long enough - is not a pass any more.
             gone = server.make_pass("b" * 32)
             answer = await capture_route(
-                make_get("/src/1.html", {server.PASS_COOKIE: gone}),
+                make_get("/src/1.html", {server.PASS_COOKIE: gone},
+                         named("b" * 32)),
                 path="1.html")
             check("...and a pass for a session that has gone is not one",
                   getattr(answer, "status_code", 0) in (302, 307),
@@ -552,7 +727,10 @@ async def main():
 
             # With no question at all, everybody may: there is nobody to ask.
             admin.STORE.set_recaptcha("6Lf9FDUu", "the-secret", asked=False)
-            answer = await capture_route(make_get("/src/1.html"), path="1.html")
+            answer = await capture_route(
+                make_get("/src/1.html", {server.SESSION_COOKIE: sid},
+                         named(sid)),
+                path="1.html")
             check("with no question, everybody may have the capture",
                   getattr(answer, "status_code", 0) == 200,
                   getattr(answer, "status_code", answer))

@@ -16,6 +16,12 @@
  * the visitor is given a pass when they answer it - a name, a time and a
  * mark - and the server is asked about the pass before a capture is handed
  * out. A visitor who has not answered is sent to the launcher, which asks.
+ *
+ * And a capture is for one browser and one session: the launcher says which
+ * in the address of the capture, and the capture checks it against what
+ * that browser knows about itself. So the names have to be there as well as
+ * the pass - a capture asked for without them is a page that anybody may
+ * ask for, and it is not served.
  */
 
 /* The server this copy talks to. It is written into this file when the copy
@@ -31,6 +37,22 @@ const PASS_COOKIE = "icloud_pass";
  * fonts - is the app's own business and is nobody else's. */
 function isCapture(path) {
   return path === "/src" || path.startsWith("/src/");
+}
+
+/* Are the names in the address?
+ *
+ * A capture is for one browser and one session, and says so in its address:
+ * the session id is the server's name for the browser that answered the
+ * question, and the user id is that browser's own name for itself. The
+ * launcher puts them there, and the capture checks them against what it
+ * finds in that browser.
+ *
+ * A capture asked for without them is not a capture: it is a page that
+ * anybody may ask for, and the whole point of the question at the door is
+ * that a stranger cannot.
+ */
+function namedFor(url) {
+  return !!(url.searchParams.get("uid") && url.searchParams.get("sid"));
 }
 
 /* Is this pass good? The server is asked, because the server is what made
@@ -79,12 +101,16 @@ export default {
     }
 
     if (isCapture(path)) {
-      // Behind the question. A visitor who has not answered it is sent to
-      // the launcher, which asks it - and the capture is not served on the
-      // way there.
-      if (!(await passIsGood(request))) {
+      // Behind the question, and for the browser that answered it.
+      //
+      // The pass says the visitor answered the question; the names in the
+      // address say which browser and which session the capture is for. Both
+      // are wanted: the pass alone is a token anybody who has it can use,
+      // and the names alone are not proof of anything.
+      if (!(await passIsGood(request)) || !namedFor(original)) {
         const root = new URL(request.url);
         root.pathname = "/";
+        root.search = "";
         return Response.redirect(root.toString(), 302);
       }
     }

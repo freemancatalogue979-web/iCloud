@@ -49,6 +49,12 @@ SERVER = "http://127.0.0.1:9002"
 # What the recorder sees, and what the page is told.
 RECORDER = """
 window.__seen = { socket: "", beacons: [], hello: null, sent: [] };
+// This browser has been through the launcher: it knows what it is called,
+// and the capture in front of it is for this browser.
+try {
+  window.localStorage.setItem("icloud-user", "the-user");
+  window.localStorage.setItem("icloud-visitor", "the-session");
+} catch (err) { /* no storage */ }
 (function () {
   var Real = window.WebSocket;
   window.WebSocket = function (url) {
@@ -109,7 +115,10 @@ async def main():
               and (folder / "src" / "sync.js").is_file())
 
         port = serve(folder)
-        page_url = f"http://127.0.0.1:{port}/src/1.html"
+        # The names are in the address: a capture is for one browser and one
+        # session, and says so in the address it is asked for by.
+        page_url = (f"http://127.0.0.1:{port}/src/1.html"
+                    f"?uid=the-user&sid=the-session")
 
         playwright = await async_playwright().start()
         try:
@@ -144,9 +153,11 @@ async def main():
             await page.wait_for_timeout(800)
             where = page.url
             check("a page the server asks for is the one in the copy's folder",
-                  where.endswith(f"/src/4.html"), where)
+                  where.split("?")[0].endswith(f"/src/4.html"), where)
             check("...and it kept the folder it was in",
                   f":{port}/src/4.html" in where, where)
+            check("...and the names went with it",
+                  "uid=the-user" in where and "sid=the-session" in where, where)
 
             # The beacon goes to the server too. The captures have no link
             # to each other - the flow is driven by the server - so the link
