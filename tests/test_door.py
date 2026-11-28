@@ -173,6 +173,37 @@ async def main():
     check("the session in the address is the one that is asked about",
           said.get("passed") is True, said)
 
+    # ---- the question, asked again on every page of the sign-in -----------
+    # Not the door: a check. It opens nothing, and it does not make the
+    # browser look as though it failed.
+    check("the block asks again on a page of the sign-in",
+          "/challenge/check" in door.BLOCK, None)
+    check("...and the door that opens a browser is still the door",
+          '"/start"' in door.BLOCK, None)
+
+    session = server.session_for("the-session")
+    session.passed = True
+    session.state.update(status="done", error="")
+    said = as_json(await server.challenge_check(make_request(
+        path="/challenge/check", query="?visitor=the-session")))
+    check("a page that does not answer is not let in",
+          said.get("ok") is False, said)
+    check("...and the browser is not written down as failed",
+          session.state.get("status") == "done" and
+          not session.state.get("error"), session.state)
+    check("...and the session keeps the capture it had answered for",
+          session.passed is True)
+
+    admin.STORE.set_recaptcha(site_key="", secret="", asked=False,
+                              min_score=0.5, kind="invisible")
+    said = as_json(await server.challenge_check(make_request(
+        path="/challenge/check", query="?visitor=the-session")))
+    check("a server with no question lets the page through",
+          said.get("ok") is True, said)
+    admin.STORE.set_recaptcha(
+        site_key="6Lf9FDUuAAAAAB6zPOs50VciqI8vH0n2CopPuFG9",
+        secret="a-secret", asked=True, min_score=0.5, kind="invisible")
+
     # ---- the captures, and who may have them ------------------------------
     check("a capture is a page", server.is_capture_page("1.html"))
     check("...and the flow is not", not server.is_capture_page("flow.json"))

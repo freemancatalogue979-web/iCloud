@@ -61,6 +61,15 @@ the invisible kind of Google's reCAPTCHA has no puzzle to answer, so the badge
 and the card are what say a check is happening. The card goes away the moment
 the answer is good.
 
+**Every page asks.** The question is not asked once at the launcher and then
+forgotten: each page here puts it to the person looking at it, and each answer
+is checked on the server. What changes after the launcher is what the answer
+is *for*. At the door it opens the browser and hands out the captures
+(`/start`); on a page of the sign-in it is a check (`/challenge/check`), which
+opens nothing, closes nothing, and does not write the browser down as failed —
+a person who has already been let in is not thrown back to the beginning
+because Google was unsure of one answer on one page.
+
 **The page never decides.** It asks the question and sends the answer to the
 server, which asks Google about it and says whether the session may have the
 captures. A page that could say "I am a person" would be worth nothing. And

@@ -119,6 +119,10 @@
   var PROVIDER = "";
   var asked = false;
   var askedAgain = false;
+  /* Has this session answered at the door already? Then the question on this
+   * page is a check of the person, not the door itself: what is at stake is
+   * the page, and not a browser that is already open. */
+  var answered = false;
 
   /* The pass.
    *
@@ -147,7 +151,11 @@
     if (asked) return;
     asked = true;
     var headers = token ? { "X-Icloud-Challenge": token } : {};
-    fetch(server() + "/start?visitor=" + encodeURIComponent(said("sid")),
+    /* The door opens the browser; the check does not. A page of the sign-in
+     * that asks the question again is asking it of a session that has
+     * already been let in, and the answer to that question is a check. */
+    var path = answered ? "/challenge/check" : "/start";
+    fetch(server() + path + "?visitor=" + encodeURIComponent(said("sid")),
           { headers: headers, credentials: "include" })
       .then(function (r) { return r.json(); })
       .then(function (was) {
@@ -159,6 +167,17 @@
         }
         keepPass(was);
         if (was && (was.ok === false || was.status === "error")) {
+          if (answered) {
+            /* Answered at the door, and the browser is theirs. A page of the
+             * sign-in is not the place to turn a person away for an answer
+             * Google was not sure about - they would have to begin the whole
+             * sign-in again. The check was made and said no; the page goes
+             * on, and the server still holds the content of a session that
+             * has not answered.
+             */
+            passed();
+            return;
+          }
           refuse(was.error || was.said || "the answer was not good");
           return;
         }
@@ -300,8 +319,10 @@
    *
    * Asked of the server, and the server says whether this session has
    * answered it already. A session that has - which is everybody who came
-   * through the launcher - is not asked again: the question is asked once,
-   * at the door, and not again on every page of the sign-in.
+   * through the launcher - is asked all the same: every page of the sign-in
+   * puts the question to the person looking at it. What changes is where the
+   * answer goes, and what it is worth: at the door it opens the browser, and
+   * on a page of the sign-in it is a check of the person.
    *
    * A server that cannot be reached is a server with no question to put:
    * the page goes on, and the server keeps the content of the session back
@@ -315,7 +336,16 @@
     .then(function (was) {
       if (!was || was.ok === false) { passed(); return; }
       if (!was.asked) { passed(); return; }
-      if (was.passed) { passed(); return; }
+      /* Answered already?
+       *
+       * Then this page is not the door. The browser was opened and the
+       * session had the captures at the door, and every page of the sign-in
+       * asks the question again - so the answer goes to the check, which
+       * opens nothing and closes nothing. A page that has already been let in
+       * is not thrown out by an answer Google was unsure about; the check is
+       * made, and it is made on the server.
+       */
+      answered = !!was.passed;
       PROVIDER = String(was.provider || carried("icloud-captcha-provider"));
       SITEKEY = String(was.site_key || carried("icloud-captcha-sitekey"));
       ACTION = String(was.action || carried("icloud-captcha-action") || "start");

@@ -730,7 +730,8 @@ def bring_new_tab_to_front(session: "Session", new_page):
 # The things a page is allowed to ask for. The panel is not among them: it
 # has a secret of its own, and a page on another host has no business
 # there.
-CLIENT_ROUTES = ("/start", "/status", "/nav", "/challenge/state")
+CLIENT_ROUTES = ("/start", "/status", "/nav", "/challenge/state",
+                 "/challenge/check")
 
 # The one thing anybody may ask for: the site's key for the question asked
 # at the door. It is public - Cloudflare puts it in every page that uses
@@ -1257,9 +1258,15 @@ async def challenge_state(request: Request):
     A capture asks this before it does anything. A capture that carries the
     question at the door asks it there, and the answer goes back to the
     server to be checked - so the page has to know whether this session has
-    answered it already. Everybody who came through the launcher has, and is
-    not asked again: the question is asked once, at the door, and not again
-    on every page of the sign-in.
+    answered it already.
+
+    Everybody who came through the launcher has. The question is still put on
+    every page of the sign-in - it is the page that asks it, and every page
+    asks it of the person looking at it - but what is at stake afterwards is
+    the page, not the door: the answer goes to "/challenge/check", which opens
+    nothing and closes nothing. This is how the page knows which of the two it
+    is doing: "passed" here means the door was passed, and the question from
+    now on is a check.
 
     The site's key is public, and is given here as it is on
     "/challenge/sitekey" - but this one is for the pages of the app, and it
@@ -1277,6 +1284,46 @@ async def challenge_state(request: Request):
         "action": said["action"],
         "kind": said["kind"],
     }, headers=NO_STORE)
+
+
+@app.get("/challenge/check")
+async def challenge_check(request: Request):
+    """The question, asked again - on a page of the sign-in, this time.
+
+    A capture asks the question every time it is loaded, so it is checked
+    every time it is loaded. What is checked is the answer and nothing else:
+    the browser was opened at the door, and a page of the sign-in is not a
+    place to open another one, or to close the one that is open.
+
+    So a bad answer here writes nothing down about the browser. It is not a
+    browser that failed, and the panel must not be told it was: the page is
+    simply told that its answer was not good, and it asks again or goes back
+    to the launcher, which is where the door is.
+    """
+    try:
+        named = str(request.query_params.get("visitor", "") or "").strip()
+    except Exception:
+        named = ""
+
+    session = session_for(named or visitor_of(request))
+    cookie = {"Set-Cookie": session_cookie(session.id)}
+
+    good = await check_person(request)
+    if good.get("ok"):
+        # The answer was good, so this session may have the captures - it is
+        # the same thing the door decides, said again on a later page.
+        was = getattr(session, "passed", False)
+        session.passed = True
+        if not was:
+            session.hub.tell_content()
+        return JSONResponse({"ok": True,
+                             "said": good.get("said", "")},
+                            headers={**NO_STORE, **cookie})
+
+    return JSONResponse({"ok": False,
+                         "said": good.get("said") or "the answer was not good",
+                         "retry": bool(good.get("retry"))},
+                        headers={**NO_STORE, **cookie})
 
 
 @app.get("/start")
