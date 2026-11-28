@@ -283,18 +283,39 @@ async def main():
 
         # The visitor this page belongs to: the cookie says whose browser
         # this is, and the capture is that visitor's.
+        #
+        # And the names in the capture's address: the session the server
+        # knows this browser by, and the name this browser calls itself. The
+        # capture checks them against what it finds in the browser, so the
+        # browser is given the same ones.
         await page.context.add_cookies([{
             "name": server.SESSION_COOKIE,
             "value": "the-browser-test",
             "url": f"http://127.0.0.1:{port}",
+        }, {
+            "name": server.USER_COOKIE,
+            "value": "the-browser-test-user",
+            "url": f"http://127.0.0.1:{port}",
         }])
+        await page.add_init_script(
+            """try {
+                 window.localStorage.setItem("icloud-user",
+                                             "the-browser-test-user");
+               } catch (err) { /* no storage */ }""")
 
-        await page.goto(f"http://127.0.0.1:{port}/src/1.html", wait_until="load")
+        await page.goto(
+            f"http://127.0.0.1:{port}/src/1.html"
+            f"?uid=the-browser-test-user&sid=the-browser-test",
+            wait_until="load")
         await page.wait_for_timeout(1500)
 
         # ---- the engine runs at all --------------------------------------
         check("the engine is running in the page",
               await page.evaluate("!!window.__icloudSync"), console[:4])
+
+        check("...and the page was not refused as another browser's",
+              not await page.evaluate("!!window.__icloudRefused"),
+              console[:4])
 
         refusals = [m for m in console if "Content Security Policy" in m]
         check("the capture's policy does not refuse the engine",

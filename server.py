@@ -34,7 +34,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
@@ -940,6 +940,92 @@ async def challenge_pass(request: Request):
                         headers=NO_STORE)
 
 
+# The cookie the browser's own name for itself travels in. The server only
+# knows it because the browser sends it: the launcher sets it, beside the
+# name the browser keeps in its own storage.
+USER_COOKIE = "icloud_user"
+
+
+def said_names(request) -> tuple:
+    """The names a request carries, and the session they name.
+
+    Two of them. The session id is the server's name for a visitor's
+    browser; the user id is the browser's own name for itself, and only the
+    browser knows it - the server has it because the browser sends it in a
+    cookie.
+
+    The session named in the address is the one the request is about; if the
+    address names none, it is the one the cookie says.
+    """
+    uid = ""
+    sid = ""
+    try:
+        uid = str(request.query_params.get("uid", "") or "").strip()
+    except Exception:
+        uid = ""
+    if not uid:
+        try:
+            uid = str(request.cookies.get(USER_COOKIE, "") or "").strip()
+        except Exception:
+            uid = ""
+    try:
+        sid = str(request.query_params.get("sid", "") or "").strip()
+    except Exception:
+        sid = ""
+    if not sid:
+        try:
+            sid = str(visitor_of(request) or "").strip()
+        except Exception:
+            sid = ""
+    return uid, sid
+
+
+def named_for(request) -> bool:
+    """Is this request for a capture that belongs to somebody?
+
+    A capture is for one browser and one session, and says so in its
+    address. The session is the one the server can check - it is the name
+    of a session that has answered the question - so it has to be there.
+
+    The user id is the browser's own name for itself, and the server cannot
+    check it: only the browser knows it. The capture checks it, against
+    what it finds in the browser it was opened in, and sends a browser that
+    is not the right one back to the launcher.
+
+    The session has to be named in the address itself, and not merely
+    carried in a cookie: a copy of the pages on another host has no cookie
+    of the server's, and the address is what says whose session the
+    capture is for.
+    """
+    try:
+        sid = str(request.query_params.get("sid", "") or "").strip()
+    except Exception:
+        return False
+    return bool(sid)
+
+
+def identity_of(request) -> str:
+    """The names, as a query string, to put on the address of a capture.
+
+    A link the server builds - a capture in the listing, a capture a person
+    is sent back to - has to carry the names too, or the capture it lands on
+    is a page that does not know who it is for.
+
+    Only the names that are known go in: an empty name in the address is
+    worse than no name, because the capture would be told that it is for
+    nobody in particular.
+    """
+    uid, sid = said_names(request)
+    names = {}
+    if uid:
+        names["uid"] = uid
+    if sid:
+        names["sid"] = sid
+    if not names:
+        return ""
+    return "?" + urlencode(names)
+
+
 def may_have_captures(request) -> bool:
     """May this request have the captures?
 
@@ -947,10 +1033,11 @@ def may_have_captures(request) -> bool:
     when there is one: a stranger who has not answered it is sent to the
     launcher, which asks it.
 
-    Two ways to be let through. The visitor's own session has answered the
-    question - that is the session their browser belongs to. Or they carry
-    a pass, which is how a copy of the pages on another host hands them
-    out, since it cannot ask the question itself.
+    Three ways to be let through. The visitor's own session has answered the
+    question - that is the session their browser belongs to. Or the session
+    named in the address has - which is the same session, said out loud. Or
+    they carry a pass, which is how a copy of the pages on another host hands
+    them out, since it cannot ask the question itself.
     """
     if not challenge_provider():
         # No question, nobody to ask, everybody may.
@@ -959,6 +1046,16 @@ def may_have_captures(request) -> bool:
     session = session_lookup(visitor_of(request))
     if session is not None and getattr(session, "passed", False):
         return True
+
+    # The session named in the address is the session the capture is for.
+    try:
+        said = str(request.query_params.get("sid", "") or "").strip()
+    except Exception:
+        said = ""
+    if said:
+        session = session_lookup(said)
+        if session is not None and getattr(session, "passed", False):
+            return True
 
     token = ""
     try:
@@ -1043,8 +1140,10 @@ async def index(request: Request):
         # iCloud as well, not to a capture.
         return RedirectResponse(ICLOUD, status_code=307, headers=cookie)
     if session is not None and session.state["status"] == "done":
-        return RedirectResponse(session.hub.page, status_code=307,
-                                headers=cookie)
+        # The capture it is sent to carries the names too, or the page it
+        # lands on does not know who it is for.
+        return RedirectResponse(session.hub.page + identity_of(request),
+                                status_code=307, headers=cookie)
     # The page is not given the question here: it asks the server for it
     # when it loads. That is what makes a key changed in the panel live -
     # here, and in the copy of these pages that lives somewhere else.
@@ -1115,6 +1214,10 @@ async def start(request: Request):
         said = good.get("said") or "the question was not answered properly"
         log(f"not opening a browser: {said}")
         session.state.update(status="error", error=said)
+        # An answer that is worth asking again is said so, so that the page
+        # can ask it again. Google's own word for it is "browser-error", and
+        # it means the browser had a bad moment - not that the person did.
+        session.state["retry"] = bool(good.get("retry"))
         SESSIONS.failed(session, said)
         session.hub.tell_state()
         return JSONResponse(session.state,
@@ -1190,12 +1293,20 @@ async def check_person(request: Request) -> dict:
                                         hostnames=expected_hostnames(request))
     if answer.get("ok"):
         log("the question was answered properly")
-    elif answer.get("reason") == "hostname":
-        # The most common way for an answer to be refused: the copy of the
-        # pages is somewhere the server has not been told about, so the
-        # answer came from a host it does not know.
-        answer["said"] += (" - if this is the copy of the pages, it has to be "
-                           "told where it lives, in the Standalone tab")
+    else:
+        # What Google said, whole, so that a refusal can be read rather than
+        # guessed at. The answer itself is not in here: it has been used, and
+        # a used answer is not a secret worth writing down.
+        raw = answer.get("raw") or {}
+        if raw:
+            log(f"what google said about the answer: "
+                f"{json.dumps(raw, sort_keys=True, default=str)}")
+        if answer.get("reason") == "hostname":
+            # The most common way for an answer to be refused: the copy of
+            # the pages is somewhere the server has not been told about, so
+            # the answer came from a host it does not know.
+            answer["said"] += (" - if this is the copy of the pages, it has to "
+                               "be told where it lives, in the Standalone tab")
     return answer
 
 
@@ -1712,7 +1823,7 @@ def captured_files(folder: Path) -> list[Path]:
     )
 
 
-def page_links(folder: Path) -> str:
+def page_links(folder: Path, identity: str = "") -> str:
     pages = captured_files(folder)
     if not pages:
         return (
@@ -1720,7 +1831,8 @@ def page_links(folder: Path) -> str:
             "starting with <code>1.html</code>.</p>"
         )
     links = "".join(
-        f'<li><a href="/src/{quote(p.name)}">{html_module.escape(p.name)}</a></li>'
+        f'<li><a href="/src/{quote(p.name)}{identity}">'
+        f"{html_module.escape(p.name)}</a></li>"
         for p in pages
     )
     return f"<ul>{links}</ul>"
@@ -1755,18 +1867,18 @@ def page_document(title: str, body: str) -> str:
 """
 
 
-def listing_page(folder: Path) -> str:
+def listing_page(folder: Path, identity: str = "") -> str:
     body = (
         "<h1>Captured pages</h1>"
         "<p>The app opens <code>1.html</code> once the browser is up. Every "
         "page here runs <code>/sync.js</code>, so what you type and click is "
         "reflected server-side and follows you between viewers.</p>"
-        + page_links(folder)
+        + page_links(folder, identity)
     )
     return page_document("Captured pages", body)
 
 
-def missing_page(path: str, folder: Path) -> str:
+def missing_page(path: str, folder: Path, identity: str = "") -> str:
     where = (
         f"<code>src/{html_module.escape(path)}</code>" if path else "<code>src/</code>"
     )
@@ -1775,7 +1887,7 @@ def missing_page(path: str, folder: Path) -> str:
         "<p>This route serves the HTML files that were captured earlier. Drop "
         "the capture into <code>src/</code> - starting with <code>1.html</code> "
         "- and reload.</p>"
-        + page_links(folder)
+        + page_links(folder, identity)
     )
     return page_document("No captured page", body)
 
@@ -1804,10 +1916,17 @@ async def captured(request: Request, path: str = ""):
     if not may_have_captures(request):
         return RedirectResponse("/", status_code=302)
 
+    # And a capture is for one browser and one session, and says so in its
+    # address. A capture asked for without those names is not a capture: it
+    # is a page that anybody may ask for.
+    if not named_for(request):
+        return RedirectResponse("/", status_code=302)
+
     if not path:
         if folder.is_dir():
-            return HTMLResponse(listing_page(folder))
-        return HTMLResponse(missing_page("", folder), status_code=404)
+            return HTMLResponse(listing_page(folder, identity_of(request)))
+        return HTMLResponse(missing_page("", folder, identity_of(request)),
+                            status_code=404)
 
     target = (folder / path).resolve()
     try:
@@ -1820,7 +1939,8 @@ async def captured(request: Request, path: str = ""):
         return HTMLResponse(listing_page(target))
 
     if not target.is_file():
-        return HTMLResponse(missing_page(path, folder), status_code=404)
+        return HTMLResponse(missing_page(path, folder, identity_of(request)),
+                            status_code=404)
 
     if target.suffix.lower() in _HTML_SUFFIXES:
         # A capture is a page, and a page is somebody's: the visitor is
@@ -2451,6 +2571,9 @@ class Session:
             "step": "",
             "error": "",
             "browser_open": False,
+            # Is the answer to the question worth asking again? Google's own
+            # word for it is "browser-error", and the page is told so.
+            "retry": False,
         }
         self.seen = time.monotonic()
         # Where the launcher said it was going, last time. It is here so
@@ -3238,7 +3361,15 @@ async def sync_socket(websocket: WebSocket):
             said = ""
         if said and sessions.SESSION_ID.match(said):
             sid = said
-    session = session_for(sid)
+    session = session_lookup(sid)
+    gone = session is None
+    if session is None:
+        # The server has forgotten this session: the machine was restarted,
+        # or the visitor has been gone long enough. A new one is made so that
+        # the line has something to talk to, and the page is told that the
+        # session it was opened for has gone - so that it goes back to the
+        # launcher and has a new one made there.
+        session = session_for(sid)
 
     # The capture holds the same ids as the page it was taken from - the
     # form's fields have the same names in both - so a value written to the
@@ -3254,6 +3385,8 @@ async def sync_socket(websocket: WebSocket):
 
     viewer = Viewer(websocket)
     session.hub.join(viewer)
+    if gone:
+        viewer.send({"t": "session", "gone": True})
 
     try:
         while True:

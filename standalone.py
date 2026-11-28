@@ -93,10 +93,26 @@ Any static host - a cPanel, a bucket, a CDN:
 A Cloudflare Worker:
 
 1. Unpack the zip into a folder.
-2. In that folder: npx wrangler deploy
-3. The Worker is at the address wrangler prints. Put that address in the
+2. Open wrangler.toml and put the name of your Worker at the top of it -
+   the "name =" line. If it is left as it is, the copy is published under a
+   new name, and the Worker you had goes on serving the captures to
+   anybody who asks for them. (If this copy knows where it lives, the name
+   is already in there.)
+3. In that folder: npx wrangler deploy
+4. The Worker is at the address wrangler prints. Put that address in the
    server's panel, in the Standalone tab, under "Where the copy will
    live".
+
+The settings in wrangler.toml matter as much as the name:
+
+  run_worker_first = true    the Worker sees a request for a capture
+                             before the file is served. Without it the
+                             captures are plain files, and the question at
+                             the door is never asked.
+
+  not_found_handling = none  a path that is not a file is a 404, and not
+                             the launcher. The launcher answered for every
+                             path is a visitor going round in circles.
 
 The one thing to be careful about
 ---------------------------------
@@ -294,12 +310,36 @@ def with_server(page_html: str, server: str) -> str:
     return tag + page_html
 
 
-def build(server: str) -> bytes:
+def worker_name(origin: str = "") -> str:
+    """The name of the Worker that serves a copy at this address.
+
+    A Worker on workers.dev is at "<name>.<account>.workers.dev", so the
+    name is the first part of the address.
+
+    A copy that knows where it lives knows the name of the Worker it is
+    served by - and a zip that is named for the Worker it is meant to
+    replace is a zip that replaces it, rather than one that is published
+    beside it while the old one goes on serving the captures to anybody who
+    asks.
+    """
+    said = (origin or "").strip().lower()
+    said = said.split("://")[-1].split("/")[0]
+    if ".workers.dev" not in said:
+        return ""
+    return said.split(".")[0]
+
+
+def build(server: str, worker: str = "") -> bytes:
     """The zip, ready to be downloaded.
 
     ``server`` is the address the server is reached at, from the outside
     world: "https://icloud.example.com". It is put in every page, and the
     pages are allowed to talk to it.
+
+    ``worker`` is the name of the Cloudflare Worker this copy is served by,
+    when it is known: it goes into the settings the Worker is deployed with,
+    so that deploying the zip replaces that Worker instead of publishing a
+    new one beside it.
 
     No key is put in the zip. The copy asks the server for the question it
     is to be asked when it loads - the site's key is public, and the
@@ -365,6 +405,13 @@ def build(server: str) -> bytes:
                     # server is. The address goes in the file that is
                     # written, and not in the one in the repository.
                     text = text.replace(SERVER_MARK, said)
+                elif name == "wrangler.toml" and worker:
+                    # The name of the Worker this copy is served by: the
+                    # copy is deployed to that Worker and replaces it, rather
+                    # than being published beside it.
+                    text = re.sub(r'^name\s*=\s*".*"$',
+                                  f'name = "{worker}"', text, count=1,
+                                  flags=re.MULTILINE)
                 zip_file.writestr(name, text)
 
         zip_file.writestr("README.txt", NOTE)

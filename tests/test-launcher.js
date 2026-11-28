@@ -157,6 +157,26 @@ const wentTo = (launched) => {
   return hook ? hook.went() : "";
 };
 
+/* Where the launcher went, without the names it puts in the address.
+ *
+ * A capture is for one browser and one session, and says so in its
+ * address: the launcher puts the names there, and the capture checks them
+ * against what that browser knows about itself. So the place is checked
+ * here, and the names are checked on their own. */
+const wentPath = (launched) => {
+  const there = wentTo(launched);
+  if (!there) return "";
+  const at = there.indexOf("?");
+  return at >= 0 ? there.slice(0, at) : there;
+};
+
+/* The names in the address the launcher went to. */
+const wentNames = (launched) => {
+  const there = wentTo(launched);
+  const at = there.indexOf("?");
+  return at >= 0 ? there.slice(at + 1) : "";
+};
+
 /* What the launcher said about itself, last of all. */
 const saidAboutItself = (launched) => {
   const hook = launched.dom.window.__icloudLauncher;
@@ -416,6 +436,61 @@ function visibleText(doc) {
       googleStarts[0].options.headers["X-Icloud-Challenge"] === "a-good-token",
     googleStarts.length ? googleStarts[0].options.headers : "no request");
 
+  // ---- and an answer that is worth asking again is asked again -----------
+  // Google's own word for a bad moment in the browser is "browser-error":
+  // the signals were not collected, so the answer is not good because of
+  // it. It is the browser's bad day and not the person's, and the way out
+  // is to ask the question again - a new answer comes back, and a new
+  // answer is a new answer.
+  const retry = { asked: [], sent: [] };
+  const retryDom = new JSDOM(CLIENT, {
+    url: "http://localhost:9002/",
+    runScripts: "dangerously",
+    virtualConsole: new VirtualConsole(),
+    beforeParse(window) {
+      window.grecaptcha = {
+        ready: (fn) => fn(),
+        execute: (key, options) => {
+          retry.asked.push({ key: key, options: options });
+          return Promise.resolve("a-good-token");
+        },
+      };
+      window.fetch = (where, options) => {
+        const path = String(where).split("?")[0];
+        retry.sent.push({ url: path, options: options || {} });
+        if (path === "/challenge/sitekey") {
+          return Promise.resolve({
+            json: () => Promise.resolve({
+              provider: "recaptcha", site_key: "6Lf9FDUu", asked: true,
+              action: "start", kind: "invisible" }) });
+        }
+        if (path === "/start") {
+          // The first answer is refused, and the refusal says that it is
+          // worth asking again.
+          const first = retry.sent.filter((one) => one.url === "/start").length === 1;
+          return Promise.resolve({
+            json: () => Promise.resolve(first
+              ? { status: "error",
+                  error: "the answer was not good (browser-error)",
+                  retry: true }
+              : { status: "idle" }) });
+        }
+        return Promise.resolve({
+          json: () => Promise.resolve({ status: "idle" }) });
+      };
+    },
+  });
+  await sleep(300);
+
+  const retryStarts = retry.sent.filter((one) => one.url === "/start");
+  check("an answer that is worth asking again is asked again",
+    retry.asked.length === 2, retry.asked.length);
+  check("...and the new answer is sent with the request that opens the browser",
+    retryStarts.length === 2 &&
+      retryStarts[1].options.headers &&
+      retryStarts[1].options.headers["X-Icloud-Challenge"] === "a-good-token",
+    retryStarts.length > 1 ? retryStarts[1].options.headers : "no request");
+
   // ---- and the copy's own folder ---------------------------------------
   // The server knows its pages by their own names - "/src/1.html" - and a
   // copy may live in a folder of its own. The folder is put back, so a
@@ -469,7 +544,7 @@ function visibleText(doc) {
 
   check("a copy serving the launcher where the capture should be takes the "
     + "visitor to the server's own copy",
-    wentTo(caught) === SERVER + "/src/1.html", wentTo(caught));
+    wentPath(caught) === SERVER + "/src/1.html", wentTo(caught));
   check("...and it goes once, and not round and round",
     navigations(caught.errors).length === 1, caught.errors);
 
@@ -500,7 +575,7 @@ function visibleText(doc) {
   Tried.tell({ t: "session", status: "done", page: "/src/1.html" });
   await sleep(200);
   check("a capture's place that has been tried is not tried again",
-    wentTo(tried) === SERVER + "/src/1.html", wentTo(tried));
+    wentPath(tried) === SERVER + "/src/1.html", wentTo(tried));
 
   // And a copy that is working is left alone: the launcher goes to the
   // capture in the copy, and not to the server.
@@ -511,7 +586,7 @@ function visibleText(doc) {
   Fine.tell({ t: "session", status: "done", page: "/src/1.html" });
   await sleep(200);
   check("a copy that is serving the captures is left alone",
-    wentTo(fine) === COPY + "/src/1.html", wentTo(fine));
+    wentPath(fine) === COPY + "/src/1.html", wentTo(fine));
 
   // A copy in a folder of its own asks for the capture in that folder.
   const InFolderCopy = fakeLine();
@@ -521,7 +596,13 @@ function visibleText(doc) {
   InFolderCopy.tell({ t: "session", status: "done", page: "/src/1.html" });
   await sleep(200);
   check("a copy in a folder of its own asks for the capture in that folder",
-    wentTo(inFolderCopy) === COPY + "/app/src/1.html", wentTo(inFolderCopy));
+    wentPath(inFolderCopy) === COPY + "/app/src/1.html", wentTo(inFolderCopy));
+
+  // And the names are in the address: a capture is for one browser and one
+  // session, and says so in the address it is asked for by.
+  const names = wentNames(fine);
+  check("the capture's address carries the names it is for",
+    /(^|&)uid=[^&]+/.test(names) && /(^|&)sid=[^&]+/.test(names), names);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

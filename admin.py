@@ -1657,12 +1657,18 @@ def build_router() -> APIRouter:
         store = STORE
         if not _authed(request, store):
             return _denied("the admin's secret is needed")
-        said = store.standalone()["server"] or server_url(request)
+        said = store.standalone()
+        address = said["server"] or server_url(request)
         # No key goes into the zip: the copy asks the server for the
         # question when the page loads, so a key changed in the panel is
         # live in the copy without unpacking it again.
+        #
+        # And the name of the Worker this copy is served by goes into the
+        # settings it is deployed with: deploying the zip replaces that
+        # Worker, rather than publishing a new one beside it.
         try:
-            data = standalone.build(said)
+            data = standalone.build(address,
+                                   standalone.worker_name(said["origin"]))
         except Exception as exc:
             return _denied(str(exc).splitlines()[0], status=500)
         return Response(

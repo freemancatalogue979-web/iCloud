@@ -73,6 +73,33 @@
     }
   }
 
+  /* Who this browser is.
+   *
+   * The visitor's id is the server's name for this session - the browser
+   * that is open on the other side. This is a different name for a different
+   * thing: it is who this browser is, and it never leaves this browser.
+   *
+   * The captures are given both names in their address, and they check them:
+   * the session against the one this browser has, and the user against the
+   * one this browser remembers. A capture opened in a browser that is not
+   * the one it was made for is not this one's capture - it goes back to the
+   * launcher, where a session is made and the question is asked again.
+   */
+  const USER_KEY = "icloud-user";
+  const USER_COOKIE = "icloud_user";
+
+  function user() {
+    try {
+      const kept = localStorage.getItem(USER_KEY);
+      if (kept && /^[A-Za-z0-9_-]{8,64}$/.test(kept)) return kept;
+      const made = newVisitor();
+      localStorage.setItem(USER_KEY, made);
+      return made;
+    } catch (e) {
+      return "";      // no storage: a browser without a memory of itself
+    }
+  }
+
   // Where the server is.
   //
   // A copy of this page that was served by the server talks to it on the same
@@ -284,7 +311,7 @@
     gone = true;
     const there = localPath(target);
     if (!there) return;
-    const to = new URL(there, location.href);
+    const to = withIdentity(new URL(there, location.href));
 
     // A page that sends itself to itself goes for ever: the browser runs
     // it again, it asks again, and the visitor watches a page reload
@@ -333,7 +360,7 @@
     if (!base) return false;        // this is the server's own page: nowhere else
     if (gaveUp()) return false;     // it has been tried; going again is a round
     markGaveUp();
-    const to = new URL(base + target, location.href);
+    const to = withIdentity(new URL(base + target, location.href));
     sayWhere(to.pathname, why || "to the server's own copy");
     went = to.href;
     location.replace(to.href);
@@ -348,6 +375,33 @@
   if (who) {
     document.cookie = "icloud_session=" + who + "; path=/; max-age=31536000; " +
         "SameSite=Lax";
+  }
+  // And the browser's own name for itself, in a cookie as well as in the
+  // storage: the server puts it in the addresses it builds - the capture's
+  // own links, and the page it sends a person back to when their session
+  // has gone - and a cookie is the only way it can be told.
+  const me = user();
+  if (me) {
+    document.cookie = USER_COOKIE + "=" + me + "; path=/; max-age=31536000; " +
+        "SameSite=Lax";
+  }
+
+  /* The names a capture's address carries.
+   *
+   * The session id is the server's name for this visitor's browser. The user
+   * id is this browser's own name for itself. Both go in the address of every
+   * capture, so that the capture knows who it is for - and a copy of the
+   * address opened in another browser is a page that says so and sends that
+   * browser back to the launcher.
+   */
+  function withIdentity(url) {
+    try {
+      if (me) url.searchParams.set("uid", me);
+      if (who) url.searchParams.set("sid", who);
+    } catch (err) {
+      /* an address that will not take them: the capture sends them back */
+    }
+    return url;
   }
   /* The question asked before a browser is opened.
    *
@@ -399,6 +453,19 @@
     }
   }
 
+  /* Asked again?
+   *
+   * Google's own word for a bad moment in the browser is "browser-error":
+   * the signals were not collected, so the answer that came back is not
+   * good because of it. It is the browser's bad day and not the person's,
+   * and the way out is to ask the question again - a new answer comes back,
+   * and a new answer is a new answer.
+   *
+   * Once. A visitor is not kept waiting on a widget that is having a bad
+   * day, and the server has the last word on whether to try again.
+   */
+  let askedAgain = false;
+
   function challenge(token) {
     // Once. The server is told a second time that nothing is wrong.
     if (asked) return;
@@ -406,7 +473,14 @@
     const headers = token ? { "X-Icloud-Challenge": token } : {};
     fetch(named("/start"), { headers: headers })
       .then(function (r) { return r.json(); })
-      .then(function (said) { keepPass(said); })
+      .then(function (said) {
+        keepPass(said);
+        if (said && said.retry && !askedAgain && PROVIDER === "recaptcha") {
+          askedAgain = true;
+          asked = false;
+          askGoogle(40);
+        }
+      })
       .catch(function () {});
   }
 

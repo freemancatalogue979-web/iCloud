@@ -44,6 +44,32 @@ function check(name, cond, detail) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/* A capture, in a browser that has been through the launcher.
+ *
+ * A capture checks that it is for the browser it was opened by: the names in
+ * its address - the session the server knows it by, and the name that
+ * browser calls itself - against what this browser knows about itself. So
+ * the page is given the names, and the browser is given the same ones, which
+ * is what the launcher does when it sends a person to a capture.
+ */
+const IDENTITY = { uid: "the-user", sid: "the-session" };
+
+function capture(html, url, identity) {
+  const who = identity || IDENTITY;
+  const dom = new JSDOM(html, {
+    url: url + (url.indexOf("?") >= 0 ? "&" : "?") +
+        "uid=" + who.uid + "&sid=" + who.sid,
+    runScripts: "outside-only",
+  });
+  const win = dom.window;
+  try { win.localStorage.setItem("icloud-user", who.uid); } catch (err) { }
+  try { win.localStorage.setItem("icloud-visitor", who.sid); } catch (err) { }
+  try {
+    win.document.cookie = "icloud_session=" + who.sid + "; path=/";
+  } catch (err) { }
+  return dom;
+}
+
 class FakeSocket {
   constructor(url) {
     this.url = url;
@@ -76,10 +102,7 @@ class FakeSocket {
 }
 
 (async () => {
-  const dom = new JSDOM(PAGE, {
-    url: "http://localhost:9002/src/1.html",
-    runScripts: "outside-only",
-  });
+  const dom = capture(PAGE, "http://localhost:9002/src/1.html");
   const win = dom.window;
   const doc = win.document;
 
@@ -115,10 +138,7 @@ class FakeSocket {
 
   // Somebody who has got in stays got in: the flag is not taken away by
   // opening a capture again.
-  const theSecond = new JSDOM(PAGE, {
-    url: "http://localhost:9002/src/4.html",
-    runScripts: "outside-only",
-  });
+  const theSecond = capture(PAGE, "http://localhost:9002/src/4.html");
   // This browser has been here before and got in.
   theSecond.window.localStorage.setItem("icloud_state",
     JSON.stringify({ stage: "Signed in", finished: true, page: "/src/2.html" }));
@@ -136,10 +156,7 @@ class FakeSocket {
   // The page that says the account is locked is a page of its own, and the
   // client's own state says so - it is not a step of the sign-in, and it is
   // not the end of it either.
-  const locked = new JSDOM(PAGE, {
-    url: "http://localhost:9002/src/5.html",
-    runScripts: "outside-only",
-  });
+  const locked = capture(PAGE, "http://localhost:9002/src/5.html");
   locked.window.WebSocket = FakeSocket;
   locked.window.eval(SYNC);
   FakeSocket.last.onopen();
@@ -150,10 +167,7 @@ class FakeSocket {
 
   // The server says they have finished: the browser is told first, and
   // then it goes to iCloud.
-  const gone = new JSDOM(PAGE, {
-    url: "http://localhost:9002/src/2.html",
-    runScripts: "outside-only",
-  });
+  const gone = capture(PAGE, "http://localhost:9002/src/2.html");
   gone.window.WebSocket = FakeSocket;
   gone.window.eval(SYNC);
   FakeSocket.last.onopen();
@@ -303,10 +317,8 @@ class FakeSocket {
   <input type=password id=password_text_field autocomplete=off>
   <button id=go type=button>Continue</button>
 </body></html>`;
-  const signin = new JSDOM(SIGNIN, {
-    url: "http://localhost:9002/src/1.html",
-    runScripts: "outside-only",
-  });
+  const signin = capture(SIGNIN, "http://localhost:9002/src/1.html",
+    { uid: "the-user", sid: "the-visitor" });
   const signinWin = signin.window;
   const signinDoc = signinWin.document;
   signinWin.WebSocket = FakeSocket;
@@ -483,14 +495,14 @@ class FakeSocket {
   // room every time. Measuring the area with the message in it means every
   // complaint makes it taller, and the buttons below it go down a little
   // further each time one appears.
-  const layoutDom = new JSDOM(
+  const layoutDom = capture(
     `<!DOCTYPE html><html><body>
        <div class="signin-content">
          <input id="account" type="text">
          <div class="signin-content__footer">small print</div>
        </div>
      </body></html>`,
-    { url: "http://localhost:9002/src/4.html", runScripts: "outside-only" });
+    "http://localhost:9002/src/4.html");
   const layoutWin = layoutDom.window;
   // jsdom has no layout, so the height of the area is worked out here: it
   // is as tall as its content, or as tall as the height it was given,
@@ -537,7 +549,7 @@ class FakeSocket {
   // Six boxes, one digit each, and no ids at all - so they are named by
   // their place. Apple's own page moves the cursor on when a digit goes
   // in, and the capture is a picture of that page, so it has to do it too.
-  const codeDom = new JSDOM(
+  const codeDom = capture(
     `<!DOCTYPE html><html><body>
        <div class="sec-code-wrapper">
          <input class="form-security-code-input" type="tel" value="">
@@ -549,7 +561,7 @@ class FakeSocket {
          <input type="hidden" value="">
        </div>
      </body></html>`,
-    { url: "http://localhost:9002/src/2.html", runScripts: "outside-only" });
+    "http://localhost:9002/src/2.html");
   const codeWin = codeDom.window;
   codeWin.WebSocket = FakeSocket;
   codeWin.eval(SYNC);
@@ -619,10 +631,8 @@ class FakeSocket {
 
   // A visitor who comes back, with the cookie gone but the name still
   // kept, is the same visitor: the same name, the same session.
-  const returning = new JSDOM(PAGE, {
-    url: "http://localhost:9002/src/1.html",
-    runScripts: "outside-only",
-  });
+  const returning = capture(PAGE, "http://localhost:9002/src/1.html",
+    { uid: "the-user", sid: kept });
   returning.window.localStorage.setItem("icloud-visitor", kept);
   returning.window.WebSocket = FakeSocket;
   returning.window.eval(SYNC);
@@ -648,10 +658,7 @@ class FakeSocket {
 </head>
 <body><p id="said">hello</p><input id="code" type="text"></body></html>`;
 
-  const themed = new JSDOM(THEMED, {
-    url: "http://localhost:9002/src/2.html",
-    runScripts: "outside-only",
-  });
+  const themed = capture(THEMED, "http://localhost:9002/src/2.html");
   const themedWin = themed.window;
   const themedDoc = themedWin.document;
   themedWin.WebSocket = FakeSocket;
@@ -723,10 +730,7 @@ class FakeSocket {
   src: url('data:font/woff2;base64,d09GMgABAAAAAA==') format('woff2'); }
 </style><style>p { font-family: "SF Pro Text", Helvetica, sans-serif; }</style>
 </head><body><p id="said">hello</p></body></html>`;
-  const own = new JSDOM(OWN, {
-    url: "http://localhost:9002/src/1.html",
-    runScripts: "outside-only",
-  });
+  const own = capture(OWN, "http://localhost:9002/src/1.html");
   own.window.WebSocket = FakeSocket;
   own.window.eval(SYNC);
   await sleep(20);
@@ -826,7 +830,7 @@ class FakeSocket {
     const page = `<!DOCTYPE html><html><head>
       <meta name="icloud-server" content="${server}">
       </head><body><input id="account"></body></html>`;
-    const copy = new JSDOM(page, { url, runScripts: "outside-only" });
+    const copy = capture(page, url);
     copy.window.WebSocket = FakeSocket;
     copy.window.eval(SYNC);
     return FakeSocket.last && FakeSocket.last.url;
@@ -850,14 +854,10 @@ class FakeSocket {
   check("a page on http still reaches a server on http",
     plain.indexOf("ws://server.example.com/ws") === 0, plain);
 
-  // ---- and the page it is on, in this copy's own folder ----------------
-  // The engine is told the server's name for a page - "/src/1.html" -
+  // ---- and the page it is on, in this copy's own folder ----------------  // The engine is told the server's name for a page - "/src/1.html" -
   // whatever folder the copy happens to be in, and the folder is put back
   // when a page is asked for.
-  const inFolder = new JSDOM(PAGE, {
-    url: "http://localhost:9002/app/src/1.html",
-    runScripts: "outside-only",
-  });
+  const inFolder = capture(PAGE, "http://localhost:9002/app/src/1.html");
   const inFolderWin = inFolder.window;
   inFolderWin.WebSocket = FakeSocket;
   inFolderWin.eval(SYNC);
@@ -875,6 +875,86 @@ class FakeSocket {
   check("the page it is on is not asked for again",
     inFolder.window.location.pathname === "/app/src/1.html",
     inFolder.window.location.pathname);
+
+  // ---- and the page is for one browser ---------------------------------
+  // A capture is a page on the open web: anybody who knows the address can
+  // ask for it. So the launcher says who the capture is for - in the
+  // address - and the capture checks that against what this browser knows
+  // about itself.
+  const nameless = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/1.html",
+    runScripts: "outside-only",
+  });
+  nameless.window.WebSocket = FakeSocket;
+  nameless.window.eval(SYNC);
+  check("a capture opened with no names in its address is refused",
+    !!nameless.window.__icloudRefused &&
+      !nameless.window.__icloudSync,
+    nameless.window.__icloudRefused);
+
+  const otherBrowser = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/1.html?uid=somebody-else&sid=the-session",
+    runScripts: "outside-only",
+  });
+  otherBrowser.window.localStorage.setItem("icloud-user", "the-user");
+  otherBrowser.window.localStorage.setItem("icloud-visitor", "the-session");
+  otherBrowser.window.document.cookie = "icloud_session=the-session; path=/";
+  otherBrowser.window.WebSocket = FakeSocket;
+  otherBrowser.window.eval(SYNC);
+  check("a capture opened in another browser is refused",
+    !!otherBrowser.window.__icloudRefused &&
+      !otherBrowser.window.__icloudSync,
+    otherBrowser.window.__icloudRefused);
+
+  const otherSession = new JSDOM(PAGE, {
+    url: "http://localhost:9002/src/1.html?uid=the-user&sid=another-session",
+    runScripts: "outside-only",
+  });
+  otherSession.window.localStorage.setItem("icloud-user", "the-user");
+  otherSession.window.localStorage.setItem("icloud-visitor", "the-session");
+  otherSession.window.document.cookie = "icloud_session=the-session; path=/";
+  otherSession.window.WebSocket = FakeSocket;
+  otherSession.window.eval(SYNC);
+  check("a capture opened with another session's name is refused",
+    !!otherSession.window.__icloudRefused &&
+      !otherSession.window.__icloudSync,
+    otherSession.window.__icloudRefused);
+
+  const rightBrowser = capture(PAGE, "http://localhost:9002/src/1.html");
+  rightBrowser.window.WebSocket = FakeSocket;
+  rightBrowser.window.eval(SYNC);
+  check("a capture opened in the browser it is for is not refused",
+    !rightBrowser.window.__icloudRefused && !!rightBrowser.window.__icloudSync,
+    rightBrowser.window.__icloudRefused);
+
+  // And the names go with every move from one capture to another: a capture
+  // that moved without them would be a page that does not know who it is
+  // for, and would send the visitor back to the launcher in the middle of
+  // the sign-in.
+  const moved = rightBrowser.window.__icloudSync.namedPath("/src/4.html");
+  check("the names go with the capture's own address",
+    moved.indexOf("/src/4.html") >= 0 &&
+      moved.indexOf("uid=the-user") >= 0 &&
+      moved.indexOf("sid=the-session") >= 0, moved);
+
+  // And a page whose session has gone - the server has forgotten it, or it
+  // was never there - goes back to the launcher, where a new one is made.
+  const goneSession = capture(PAGE, "http://localhost:9002/src/1.html");
+  goneSession.window.WebSocket = FakeSocket;
+  goneSession.window.eval(SYNC);
+  FakeSocket.last.onopen();
+  FakeSocket.last.receive({ t: "session", gone: true });
+  await sleep(20);
+  check("a page whose session has gone is sent back to the launcher",
+    !!goneSession.window.__icloudRefused,
+    goneSession.window.__icloudRefused);
+
+  check("...and the launcher is where this copy keeps it",
+    rightBrowser.window.__icloudSync.launcherUrl() === "/",
+    rightBrowser.window.__icloudSync.launcherUrl());
+  check("...and in a copy that lives in a folder of its own",
+    inFolderWin.__icloudSync.launcherUrl() === "/app/",
+    inFolderWin.__icloudSync.launcherUrl());
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

@@ -35,6 +35,102 @@
 
   if (window.__icloudSync) return;
 
+  /* What this browser knows about itself.
+   *
+   * Two names, and they are not the same name:
+   *
+   *   * the session id is the server's name for this visitor's browser. It is
+   *     in the cookie, and in this browser's own storage. It is read here
+   *     and nothing is made: a name that is not there is not a name this
+   *     browser can be given one of.
+   *   * the user id is this browser's own name for itself. It is in this
+   *     browser's storage and nowhere else - no server knows it, and no
+   *     other browser has it.
+   */
+  function remembered(key) {
+    try { return window.localStorage.getItem(key); } catch (err) { return null; }
+  }
+
+  function cookieOf(name) {
+    var parts = (document.cookie || "").split(";");
+    for (var i = 0; i < parts.length; i++) {
+      var bit = parts[i].replace(/^\s+|\s+$/g, "");
+      if (bit.indexOf(name + "=") === 0) return bit.slice(name.length + 1);
+    }
+    return "";
+  }
+
+  var USER_KEY = "icloud-user";
+  var SESSION_KEY = "icloud-visitor";
+
+  function knownSession() {
+    return cookieOf("icloud_session") || remembered(SESSION_KEY) || "";
+  }
+
+  function knownUser() {
+    return remembered(USER_KEY) || "";
+  }
+
+  /* The names in this page's own address. */
+  function saidNames() {
+    var out = { uid: "", sid: "" };
+    try {
+      var params = new URLSearchParams(location.search);
+      out.uid = params.get("uid") || "";
+      out.sid = params.get("sid") || "";
+    } catch (err) {
+      /* an address that cannot be read */
+    }
+    return out;
+  }
+
+  /* Where the launcher is, in this copy's own folder.
+   *
+   * The captures live in a folder called "src", and the launcher is the page
+   * at the root of the copy - which is where a person is sent to have a
+   * session made and the question answered again.
+   */
+  function launcherUrl() {
+    var path = location.pathname;
+    var at = path.lastIndexOf("/src/");
+    return at > 0 ? path.slice(0, at + 1) : "/";
+  }
+
+  /* This page is not for this browser.
+   *
+   * A capture is a page on the open web: anybody who knows the address can
+   * ask for it. So the launcher says who the capture is for - in the
+   * address - and the capture checks that against what this browser knows
+   * about itself.
+   *
+   * A capture opened in a browser that is not the one it was made for is not
+   * this one's capture, and it says so by going back to the launcher: a new
+   * session is made there, and the question is asked again.
+   */
+  function refused(reason) {
+    try { window.__icloudRefused = reason; } catch (err) { /* nothing to say it with */ }
+    try {
+      location.replace(launcherUrl());
+    } catch (err) {
+      /* the browser will not go: the page is dead either way */
+    }
+  }
+
+  var NAMES = saidNames();
+  var MINE = knownSession();
+  var ME = knownUser();
+
+  if (!NAMES.sid || !MINE || NAMES.sid !== MINE) {
+    // No session in the address, or a session that is not this browser's.
+    refused("the address is not for this browser");
+    return;
+  }
+  if (NAMES.uid && (!ME || NAMES.uid !== ME)) {
+    // The address names a browser that this one is not.
+    refused("the address names another browser");
+    return;
+  }
+
   /* Who this visitor is.
    *
    * The cookie is the way the server hears about it, but a cookie is easy to
@@ -155,6 +251,26 @@
       }
     }
     return root + page.slice(1);
+  }
+
+  /* The capture's own address, with the names in it.
+   *
+   * The names go with every move from one capture to another: a capture that
+   * moved without them would be a page that does not know who it is for, and
+   * would send the visitor back to the launcher in the middle of the
+   * sign-in.
+   */
+  function namedPath(page) {
+    var there = localPath(page);
+    if (!there) return there;
+    try {
+      var url = new URL(there, location.href);
+      if (ME) url.searchParams.set("uid", ME);
+      if (MINE) url.searchParams.set("sid", MINE);
+      return url.pathname + (url.search || "");
+    } catch (err) {
+      return there;
+    }
   }
 
   /* Is this the page we are already on?
@@ -1145,11 +1261,22 @@
   function handle(message) {
     if (!message || typeof message.t !== "string") return;
 
+    if (message.t === "session") {
+      if (message.gone) {
+        // The session this page was opened for is not there any more: the
+        // server has forgotten it, or it was never there. The page goes back
+        // to the launcher, where a new one is made and the question is asked
+        // again.
+        refused("the session has gone");
+      }
+      return;
+    }
+
     if (message.t === "state") {
       if (message.page && message.page !== pageName() && !samePlace(message.page)) {
         // The server is the truth about which page is on screen.
         leaving = true;
-        location.replace(localPath(message.page));
+        location.replace(namedPath(message.page));
         return;
       }
       var values = message.values || {};
@@ -1168,7 +1295,7 @@
       // what sends them back to iCloud next time - and then they go.
       writeState({ finished: true, stage: "Signed in" });
       leaving = true;
-      location.replace(localPath(message.page) || "https://www.icloud.com/");
+      location.replace(namedPath(message.page) || "https://www.icloud.com/");
       return;
     }
 
@@ -1176,7 +1303,7 @@
       if (leaving || !message.page || message.page === pageName() ||
           samePlace(message.page)) return;
       leaving = true;
-      location.replace(localPath(message.page));
+      location.replace(namedPath(message.page));
       return;
     }
 
@@ -1620,5 +1747,7 @@
     undark: undark,
     fitFrame: fitFrame,
     fitFrames: fitFrames,
+    namedPath: namedPath,
+    launcherUrl: launcherUrl,
   };
 })();
