@@ -1115,10 +1115,6 @@ async def start(request: Request):
         said = good.get("said") or "the question was not answered properly"
         log(f"not opening a browser: {said}")
         session.state.update(status="error", error=said)
-        # An answer that is worth asking again is said so, so that the page
-        # can ask it again. Google's own word for it is "browser-error", and
-        # it means the browser had a bad moment - not that the person did.
-        session.state["retry"] = bool(good.get("retry"))
         SESSIONS.failed(session, said)
         session.hub.tell_state()
         return JSONResponse(session.state,
@@ -1194,20 +1190,12 @@ async def check_person(request: Request) -> dict:
                                         hostnames=expected_hostnames(request))
     if answer.get("ok"):
         log("the question was answered properly")
-    else:
-        # What Google said, whole, so that a refusal can be read rather than
-        # guessed at. The answer itself is not in here: it has been used, and
-        # a used answer is not a secret worth writing down.
-        raw = answer.get("raw") or {}
-        if raw:
-            log(f"what google said about the answer: "
-                f"{json.dumps(raw, sort_keys=True, default=str)}")
-        if answer.get("reason") == "hostname":
-            # The most common way for an answer to be refused: the copy of
-            # the pages is somewhere the server has not been told about, so
-            # the answer came from a host it does not know.
-            answer["said"] += (" - if this is the copy of the pages, it has to "
-                               "be told where it lives, in the Standalone tab")
+    elif answer.get("reason") == "hostname":
+        # The most common way for an answer to be refused: the copy of the
+        # pages is somewhere the server has not been told about, so the
+        # answer came from a host it does not know.
+        answer["said"] += (" - if this is the copy of the pages, it has to be "
+                           "told where it lives, in the Standalone tab")
     return answer
 
 
@@ -2463,9 +2451,6 @@ class Session:
             "step": "",
             "error": "",
             "browser_open": False,
-            # Is the answer to the question worth asking again? Google's own
-            # word for it is "browser-error", and the page is told so.
-            "retry": False,
         }
         self.seen = time.monotonic()
         # Where the launcher said it was going, last time. It is here so

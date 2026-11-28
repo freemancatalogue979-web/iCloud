@@ -339,34 +339,6 @@
   .note.good { color: var(--green); }
   .note.bad { color: var(--red); }
 
-  /* --------------------------------------------------- the reCAPTCHA tab */
-  /* The question at the door has more in it than the other forms do, so it
-     is given room of its own rather than the room the others are given:
-     the switch sits in a box of its own with its sentence beside it, the
-     fields are further apart from one another, and nothing is pulled up
-     with a negative margin to save a few pixels. */
-  .rc-lede { margin: 0 0 24px; }
-  .rc-switch {
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--panel-2);
-    padding: 16px 18px;
-    margin-bottom: 26px;
-  }
-  .rc-switch .switch { display: flex; align-items: flex-start; gap: 12px; }
-  .rc-switch .switch input { flex: 0 0 auto; margin-top: 1px; }
-  .rc-switch .switch b { display: block; color: var(--ink); font-weight: 500; }
-  .rc-switch .switch small { display: block; margin-top: 5px;
-                             color: var(--muted); font-size: 12.5px;
-                             line-height: 1.5; }
-  .rc-fields > label.field { margin-bottom: 22px; }
-  .rc-row { align-items: flex-start; gap: 16px; }
-  .rc-row > * { flex: 1 1 200px; }
-  .rc-row > label.field { margin-bottom: 4px; }
-  .rc-actions { margin-top: 22px; }
-  .rc-foot { margin-top: 26px; }
-  .rc-foot > .note:first-child { margin-top: 0; }
-
   .events { display: flex; flex-direction: column; }
   .event {
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
@@ -670,104 +642,83 @@
           <h3>The question asked before a browser opens</h3>
           <small>Google&rsquo;s answer &mdash; are you a person?</small>
         </div>
-        <div class="body rc-body">
-          <p class="note rc-lede">
+        <div class="body">
+          <p class="note" style="margin-top:0">
             The same door, a different answer. Google&rsquo;s reCAPTCHA is
             asked instead of Cloudflare&rsquo;s when it has the keys &mdash;
             and it is the one that answers on a bare address of its own,
             which Cloudflare&rsquo;s widget does not.
           </p>
-
-          <div class="rc-switch">
-            <label class="switch">
-              <input type="checkbox" id="rc-asked" checked>
-              <span>
-                <b>Ask Google&rsquo;s question before a browser opens</b>
-                <small>Turning it off keeps the keys: it is the way out when
-                a widget misbehaves and the door has to be opened again.</small>
-              </span>
-            </label>
-          </div>
-
-          <div class="rc-fields">
-            <label class="field">
-              <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
-              <input type="text" id="rc-site" placeholder="6Lf9FDUu..." autocomplete="off">
-            </label>
-
-            <label class="field">
-              <span>The secret &mdash; it stays on the server</span>
-              <input type="password" id="rc-secret" placeholder="the secret" autocomplete="off">
-            </label>
-
-            <div class="row rc-row">
-              <label class="field">
-                <span>The lowest score that will let a person through</span>
-                <input type="text" id="rc-score" placeholder="0.5" autocomplete="off">
-              </label>
-              <label class="field">
-                <span>Which kind of widget the key is</span>
-                <select id="rc-kind">
-                  <option value="invisible">Invisible &mdash; it answers on its own (v3)</option>
-                  <option value="checkbox">A checkbox &mdash; the visitor answers it (v2)</option>
-                </select>
-              </label>
-            </div>
-            <p class="note">
-              The two are fetched two different ways, and the invisible one
-              refuses to answer unless the script was asked for with the
-              key in it. Pick the one the key in Google&rsquo;s console is.
-            </p>
-          </div>
-
-          <div class="row rc-actions">
+          <label class="switch">
+            <input type="checkbox" id="rc-asked" checked>
+            Ask Google&rsquo;s question before a browser opens
+          </label>
+          <p class="note" style="margin-top:-8px">
+            Turning it off keeps the keys: it is the way out when a widget
+            misbehaves and the door has to be opened again.
+          </p>
+          <label class="field">
+            <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
+            <input type="text" id="rc-site" placeholder="6Lf9FDUu..." autocomplete="off">
+          </label>
+          <label class="field">
+            <span>The secret &mdash; it stays on the server</span>
+            <input type="password" id="rc-secret" placeholder="the secret" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>The lowest score that will let a person through</span>
+            <input type="text" id="rc-score" placeholder="0.5" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>Which kind of widget the key is</span>
+            <select id="rc-kind">
+              <option value="invisible">Invisible &mdash; it answers on its own (v3)</option>
+              <option value="checkbox">A checkbox &mdash; the visitor answers it (v2)</option>
+            </select>
+          </label>
+          <p class="note" style="margin-top:-8px">
+            The two are fetched two different ways, and the invisible one
+            refuses to answer unless the script was asked for with the
+            key in it. Pick the one the key in Google&rsquo;s console is.
+          </p>
+          <div class="row" style="margin-top:18px">
             <button class="action shrink" id="rc-save">Save</button>
           </div>
-
           <div class="note" id="rc-note"></div>
           <p class="note" id="rc-state"></p>
           <p class="note" id="rc-hosts"></p>
-          <div class="rc-foot">
-            <p class="note">
-              The page asks the server for the site&rsquo;s key when it loads
-              &mdash; it is public, and no secret is in it &mdash; and Google
-              gives back a token and a score. The token is a claim, not a
-              proof, so the server asks Google about it before anything is
-              opened. The secret never leaves this machine and is never sent
-              back to the page.
-            </p>
-            <p class="note">
-              <b>The score is the verdict.</b> The invisible kind says how
-              likely it is that the person is a person. Below the score in
-              this panel they are turned away, and the panel says why.
-            </p>
-            <p class="note">
-              <b>Either kind of key is read the same way.</b> Google&rsquo;s
-              Enterprise keys say more than the plain ones do, and they say
-              it in a second place: the name of the question, the host the
-              answer was given on and the score are all in the answer,
-              whether they are at the top of it or beside it.
-            </p>
-            <p class="note">
-              <b>Both keys can also come from the environment:</b>
-              <span class="mono">ICLOUD_RECAPTCHA_SITE_KEY</span> and
-              <span class="mono">ICLOUD_RECAPTCHA_SECRET</span>. Either one
-              being there means the question is asked &mdash; a page with the
-              key and a server with no secret is a misreading, and it stops
-              the door rather than opening it.
-            </p>
-            <p class="note">
-              <b>When both are set, Google&rsquo;s is asked.</b> Cloudflare&rsquo;s
-              widget refuses a bare address of its own accord, so on an
-              address of its own there is only one question that can be
-              answered.
-            </p>
-            <p class="note">
-              What is set in this panel is what is used; the environment is
-              what the machine falls back to until then. The panel says
-              which one is in use.
-            </p>
-          </div>
+          <p class="note" style="margin-top:18px">
+            The page asks the server for the site&rsquo;s key when it loads
+            &mdash; it is public, and no secret is in it &mdash; and Google
+            gives back a token and a score. The token is a claim, not a
+            proof, so the server asks Google about it before anything is
+            opened. The secret never leaves this machine and is never sent
+            back to the page.
+          </p>
+          <p class="note">
+            <b>The score is the verdict.</b> The invisible kind says how
+            likely it is that the person is a person. Below the score in
+            this panel they are turned away, and the panel says why.
+          </p>
+          <p class="note">
+            <b>Both keys can also come from the environment:</b>
+            <span class="mono">ICLOUD_RECAPTCHA_SITE_KEY</span> and
+            <span class="mono">ICLOUD_RECAPTCHA_SECRET</span>. Either one
+            being there means the question is asked &mdash; a page with the
+            key and a server with no secret is a misreading, and it stops
+            the door rather than opening it.
+          </p>
+          <p class="note">
+            <b>When both are set, Google&rsquo;s is asked.</b> Cloudflare&rsquo;s
+            widget refuses a bare address of its own accord, so on an
+            address of its own there is only one question that can be
+            answered.
+          </p>
+          <p class="note">
+            What is set in this panel is what is used; the environment is
+            what the machine falls back to until then. The panel says
+            which one is in use.
+          </p>
         </div>
       </div>
     </section>

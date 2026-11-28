@@ -41,6 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 import sessions
 import proxy_pool
+import recaptcha as recaptcha_module
 import standalone
 import turnstile as turnstile_module
 
@@ -294,6 +295,74 @@ class Store:
         }
         self.save()
         return self.turnstile()
+
+    def recaptcha(self) -> dict:
+        """The keys for Google's question, asked before a browser is opened.
+
+        The site's key is public - it goes in the page, and the page is
+        sent to strangers. The secret is not: it stays here, and it is
+        never sent back to the page.
+
+        The score is here too: the invisible kind says how likely it is
+        that the person is a person, and the lowest score that will do is
+        the operator's to say.
+
+        The kind is here as well: Google's two kinds are fetched two
+        different ways, and the page has to be told which one it is
+        answering.
+        """
+        settings = self.data.get("recaptcha")
+        if not isinstance(settings, dict):
+            settings = {}
+        try:
+            score = float(settings.get("min_score"))
+        except (TypeError, ValueError):
+            score = 0.5
+        said_kind = str(settings.get("kind") or "").strip().lower()
+        return {"site_key": str(settings.get("site_key") or "").strip(),
+                "secret": str(settings.get("secret") or "").strip(),
+                "secret_set": bool(settings.get("secret")),
+                "min_score": score,
+                "kind": said_kind if said_kind in recaptcha_module.KINDS
+                        else recaptcha_module.KIND,
+                # The switch. The keys are kept when it is turned off, so
+                # the way back is a click and not a retyping.
+                "asked": settings.get("asked", True) is not False}
+
+    def set_recaptcha(self, site_key: str = "", secret: str = "",
+                      asked: bool = None, min_score: float = None,
+                      kind: str = None) -> dict:
+        """Keep the keys. An empty secret means "keep the one that is there"."""
+        current = self.recaptcha()
+        given = str(secret or "").strip()
+        # The site's key is sent back to the page - it is public - so what
+        # is given is what is kept, and it can be cleared. The secret is
+        # never sent back, so an empty one means "keep the one that is
+        # there".
+        if site_key is None:
+            site = str(current.get("site_key") or "")
+        else:
+            site = str(site_key).strip()
+        score = current.get("min_score", 0.5)
+        if min_score is not None:
+            try:
+                score = float(min_score)
+            except (TypeError, ValueError):
+                score = current.get("min_score", 0.5)
+        said_kind = current.get("kind", recaptcha_module.KIND)
+        if kind is not None:
+            wanted = str(kind or "").strip().lower()
+            if wanted in recaptcha_module.KINDS:
+                said_kind = wanted
+        self.data["recaptcha"] = {
+            "site_key": site,
+            "secret": given or current.get("secret") or "",
+            "min_score": score,
+            "kind": said_kind,
+            "asked": current.get("asked", True) if asked is None else bool(asked),
+        }
+        self.save()
+        return self.recaptcha()
 
     # -- the standalone copy -----------------------------------------------
 
@@ -1311,6 +1380,74 @@ def build_router() -> APIRouter:
                 "secret_set": said["secret_set"],
                 "asked": said["switch"],
                 "keys": said["keys"],
+                "site_key_source": said["site_key_source"],
+                "secret_source": said["secret_source"]}
+
+    @router.get("/api/recaptcha")
+    async def recaptcha_settings(request: Request):
+        """The keys for Google's question, asked before a browser is opened."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        # What is in use, and where it came from: the panel is the live
+        # control, and the environment is what the machine falls back to.
+        said = recaptcha_module.settings(store)
+        try:
+            host = request.headers.get("host", "")
+        except Exception:
+            host = ""
+        return {
+            "site_key": said["site_key"],
+            "secret_set": said["secret_set"],
+            # The switch, and whether the keys are enough to ask the
+            # question at all. Either key being there means they are - and
+            # the page's key without the server's secret is a misreading
+            # that stops the door rather than opening it.
+            "asked": said["switch"],
+            "keys": said["keys"],
+            "site_key_source": said["site_key_source"],
+            "secret_source": said["secret_source"],
+            # The lowest score that will let a person through.
+            "min_score": said["min_score"],
+            # Which kind of widget it is: the invisible one, which answers
+            # on its own, or the checkbox, which the visitor answers.
+            "kind": said["kind"],
+            # The widget this app asks, to start from. The site's key is
+            # public, so it can be offered; the secret never is.
+            "default_site_key": recaptcha_module.DEFAULT_SITE_KEY,
+            # The hosts an answer may come from, so that the operator can
+            # see what Google's widget has to be allowed to answer on.
+            "hostnames": sorted(recaptcha_module.expected_hosts(
+                store, request_host=host)),
+        }
+
+    @router.post("/api/recaptcha")
+    async def recaptcha_save(request: Request):
+        """Keep the keys. The secret is only written when a new one is given."""
+        store = STORE
+        if not _authed(request, store):
+            return _denied("the admin's secret is needed")
+        body = await _body(request)
+        asked = body.get("asked")
+        score = body.get("min_score")
+        try:
+            score = float(score) if score is not None else None
+        except (TypeError, ValueError):
+            score = None
+        kind = body.get("kind")
+        store.set_recaptcha(body.get("site_key"),
+                            body.get("secret"),
+                            asked if isinstance(asked, bool) else None,
+                            score,
+                            str(kind) if kind is not None else None)
+        note("the keys for Google's question were changed")
+        said = recaptcha_module.settings(store)
+        return {"ok": True, "site_key": said["site_key"],
+                "secret_set": said["secret_set"],
+                "asked": said["switch"],
+                "keys": said["keys"],
+                "min_score": said["min_score"],
+                "kind": said["kind"],
                 "site_key_source": said["site_key_source"],
                 "secret_source": said["secret_source"]}
 

@@ -28,6 +28,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# The panel of this machine is not this test's business. A question asked
+# at the door puts the captures behind it, and a capture asked for here
+# would be sent to the launcher instead of being served. So the panel is
+# given a store of its own, with no question in it.
+scratch = tempfile.mkdtemp(prefix="icloud-browser-")
+os.environ["ICLOUD_ADMIN_STORE"] = os.path.join(scratch, "admin.json")
+
+import admin  # noqa: E402
 import live  # noqa: E402
 import server  # noqa: E402
 

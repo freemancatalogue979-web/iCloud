@@ -41,6 +41,12 @@ ENGINE = HERE / "sync.js"
 # down rather than remembered.
 WORKER = HERE / "worker"
 
+# Where the address of the server goes in the Worker, when the copy is
+# made. The Worker asks the server about a pass before it hands out the
+# captures, so it has to know where the server is - and the address is
+# different for every copy.
+SERVER_MARK = "__ICLOUD_SERVER__"
+
 # The name the page carries in the server's own naming. A copy that lives in
 # a folder is still this page, as far as the server is concerned.
 SERVER_TAG = '<meta name="icloud-server" content="{server}">'
@@ -340,16 +346,26 @@ def build(server: str) -> bytes:
                                   flow.read_text(encoding="utf-8"))
 
         # The engine itself, which the captures look for beside them.
+        #
+        # The bytes, not the text: a file read as text has its line endings
+        # tidied up, and the copy is meant to hold the engine that is in the
+        # repository, exactly as it is.
         if ENGINE.is_file():
-            zip_file.writestr("src/sync.js",
-                              ENGINE.read_text(encoding="utf-8"))
+            zip_file.writestr("src/sync.js", ENGINE.read_bytes())
 
         # The Worker that serves this copy on a Cloudflare Worker, and the
         # settings it is served with.
         for name in ("worker.js", "wrangler.toml", ".assetsignore"):
             source = WORKER / name
             if source.is_file():
-                zip_file.writestr(name, source.read_text(encoding="utf-8"))
+                text = source.read_text(encoding="utf-8")
+                if name == "worker.js":
+                    # The Worker asks this server about a pass before it
+                    # hands out the captures, so it has to know where the
+                    # server is. The address goes in the file that is
+                    # written, and not in the one in the repository.
+                    text = text.replace(SERVER_MARK, said)
+                zip_file.writestr(name, text)
 
         zip_file.writestr("README.txt", NOTE)
 
