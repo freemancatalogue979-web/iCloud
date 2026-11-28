@@ -64,9 +64,19 @@ BLOCK = """<!-- The question at the door, asked by this page itself. -->
 <meta name="icloud-captcha-sitekey" content="6Lf9FDUuAAAAAB6zPOs50VciqI8vH0n2CopPuFG9">
 <meta name="icloud-captcha-kind" content="invisible">
 <meta name="icloud-captcha-action" content="start">
-<div id="icloud-door" style="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;
-     background:#fff;color:#111;font:14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-     padding:14px 18px;border-top:1px solid #ddd;text-align:center">Checking that you are a person&hellip;</div>
+<style>
+/* Google's badge, kept where it is and kept seen. The invisible kind has no
+ * puzzle to show, so the badge is the one mark on the page that says a check
+ * was made; Google fades it out on a page it has answered, and a check nobody
+ * can see is a check nobody trusts. */
+.grecaptcha-badge { visibility: visible !important; }
+</style>
+<div id="icloud-door" role="dialog" aria-live="polite" aria-label="Checking that you are a person"
+     style="position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;
+     display:flex;align-items:center;justify-content:center;gap:12px;box-sizing:border-box;
+     max-width:calc(100vw - 24px);background:#fff;color:#111;border:1px solid rgba(0,0,0,.12);
+     border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.18);padding:12px 16px;
+     font:14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif"><span id="icloud-door-said">Checking that you are a person&hellip;</span><div id="icloud-door-widget"></div></div>
 <script>
 /* The question at the door.
  *
@@ -326,11 +336,21 @@ BLOCK = """<!-- The question at the door, asked by this page itself. -->
    * The invisible kind is not seen; the checkbox kind is.
    */
   function aPlaceForTheWidget() {
-    if (document.getElementById("icloud-door-widget")) return;
-    var holder = document.createElement("div");
-    holder.id = "icloud-door-widget";
-    holder.style.display = KIND === "checkbox" ? "block" : "none";
-    document.body.appendChild(holder);
+    var holder = document.getElementById("icloud-door-widget");
+    if (!holder) {
+      holder = document.createElement("div");
+      holder.id = "icloud-door-widget";
+      var card = document.getElementById("icloud-door");
+      (card || document.body || document.documentElement).appendChild(holder);
+    }
+    /* The widget is drawn in the card the person can see, so that the kind
+     * with a box to tick has a box to tick: a widget drawn at the end of the
+     * page is a widget the capture's own layout can cover up. The invisible
+     * kind has nothing to draw - the badge is Google's own, and it puts that
+     * on the page itself - so the holder is given no room.
+     */
+    holder.style.display =
+        (PROVIDER === "recaptcha" && KIND !== "checkbox") ? "none" : "block";
   }
 
   /* What is the question?
@@ -358,7 +378,7 @@ BLOCK = """<!-- The question at the door, asked by this page itself. -->
       ACTION = String(was.action || carried("icloud-captcha-action") || "start");
       KIND = String(was.kind || carried("icloud-captcha-kind") || "invisible");
       if (!SITEKEY) { refuse("the server has no key for the question"); return; }
-      var note = document.getElementById("icloud-door");
+      var note = document.getElementById("icloud-door-said");
       if (note) {
         note.textContent = "One moment - checking that you are a person.";
       }
@@ -430,6 +450,217 @@ def with_question(page_html: str, provider: str = "", site_key: str = "",
     return page_html
 
 
+# --------------------------------------------------------------------------
+# The page's own policy, and the widget it has to be able to fetch
+#
+# A capture is a copy of a page that had no question at it, and the policy it
+# carries says so: "default-src 'none'" refuses everything that is not named.
+# Google's widget is not one of the things named there, so a capture served by
+# anything that does not stop to widen the policy - a folder of files on a
+# host, a bucket, a CDN - carries a question it is not allowed to ask: the
+# script is refused, and the page sits behind a check that can never run.
+#
+# So the page's policy is widened here, once, in the page, with the widget's
+# own hosts and nothing else. The server widens it again on the way out - for
+# the engine, and for a copy that lives elsewhere - and widening a policy that
+# already says a thing changes nothing, so the two do not fight.
+#
+# Only the directives that are there are touched, and only to add sources:
+# everything the capture forbade stays forbidden, so the page still renders
+# exactly as it was captured.
+# --------------------------------------------------------------------------
+
+# The hosts the question is made of: the script that asks it, the frame the
+# widget is drawn in, the place the answer is checked at, and the badge.
+WIDGET_SCRIPT = ("https://www.google.com/recaptcha/ "
+                 "https://www.gstatic.com/recaptcha/ "
+                 "https://challenges.cloudflare.com/")
+WIDGET_FRAME = ("https://www.google.com/recaptcha/ "
+                "https://challenges.cloudflare.com/")
+WIDGET_CONNECT = ("https://www.google.com/recaptcha/ "
+                  "https://challenges.cloudflare.com/")
+WIDGET_IMG = "https://www.gstatic.com/recaptcha/"
+
+# The sources each directive needs.
+WIDGET_SOURCES = (
+    ("script-src", WIDGET_SCRIPT),
+    ("script-src-elem", WIDGET_SCRIPT),
+    ("frame-src", WIDGET_FRAME),
+    ("connect-src", WIDGET_CONNECT),
+    ("img-src", WIDGET_IMG),
+)
+
+
+def _tags(page_html: str):
+    """Every tag in the document, in order.
+
+    Yields (start, end, closing, text). A tag's attributes have to be walked
+    properly: a SingleFile capture keeps a whole nested document in an
+    <iframe srcdoc="..."> attribute, and the tags inside that value are not
+    tags of this page.
+    """
+    size = len(page_html)
+    i = 0
+    while i < size:
+        i = page_html.find("<", i)
+        if i < 0:
+            return
+
+        if page_html.startswith("<!--", i):
+            end = page_html.find("-->", i + 4)
+            if end < 0:
+                return
+            i = end + 3
+            continue
+
+        j = i + 1
+        closing = page_html.startswith("/", j)
+        if closing:
+            j += 1
+
+        name_at = j
+        while j < size and page_html[j] not in " \t\r\n/>":
+            j += 1
+        name = page_html[name_at:j].lower()
+
+        k = j
+        while k < size:
+            char = page_html[k]
+            if char in "\"'":
+                k = page_html.find(char, k + 1)
+                if k < 0:
+                    return
+                k += 1
+                continue
+            if char == ">":
+                break
+            k += 1
+        if k >= size:
+            return
+
+        yield i, k + 1, name, closing, page_html[i:k + 1]
+        i = k + 1
+
+
+def _attributes(tag_text: str):
+    """The attributes of a start tag: (name, value start, value end)."""
+    size = len(tag_text)
+    i = 1
+    while i < size and tag_text[i] not in " \t\r\n/>":
+        i += 1
+
+    while i < size:
+        while i < size and tag_text[i] in " \t\r\n/":
+            i += 1
+        if i >= size or tag_text[i] == ">":
+            break
+
+        name_at = i
+        while i < size and tag_text[i] not in " \t\r\n=/>":
+            i += 1
+        name = tag_text[name_at:i].lower()
+
+        j = i
+        while j < size and tag_text[j] in " \t\r\n":
+            j += 1
+
+        if j < size and tag_text[j] == "=":
+            j += 1
+            while j < size and tag_text[j] in " \t\r\n":
+                j += 1
+            if j < size and tag_text[j] in "\"'":
+                quote = tag_text[j]
+                start = j + 1
+                end = tag_text.find(quote, start)
+                if end < 0:
+                    end = size
+                yield name, start, end
+                i = end + 1
+            else:
+                start = j
+                while j < size and tag_text[j] not in " \t\r\n>":
+                    j += 1
+                yield name, start, j
+                i = j
+        else:
+            yield name, i, i
+
+
+def widen_policy(policy: str) -> str:
+    """The policy, with the question's own hosts added to it.
+
+    Only sources are added; nothing is taken away. A policy that says nothing
+    about scripts is left alone: it already allows them.
+    """
+    parts = [part.strip() for part in (policy or "").split(";") if part.strip()]
+    names = [part.split()[0].lower() for part in parts]
+
+    def named(part, directive):
+        return part.split()[0].lower() == directive
+
+    def widened(part, sources):
+        tokens = part.split()
+        for source in sources.split():
+            if source not in tokens:
+                part = part + " " + source
+        return part
+
+    for directive, sources in WIDGET_SOURCES:
+        if directive in names:
+            parts = [widened(part, sources) if named(part, directive) else part
+                     for part in parts]
+            continue
+        # script-src-elem is not added: it would take over from script-src for
+        # every <script> on the page, and the page's own inline question would
+        # be refused by the directive put in to allow Google's script.
+        if directive == "script-src-elem":
+            continue
+        if directive == "script-src" and "script-src-elem" in names:
+            # The elements are already named, and naming them again here would
+            # not let the inline question through.
+            continue
+        if "default-src" in names:
+            # It follows default-src, so it has to be named to be widened.
+            parts.append(directive + " " + sources)
+
+    return "; ".join(parts)
+
+
+def with_policy(page_html: str) -> str:
+    """The capture, with its own policy able to fetch the question.
+
+    Only the policies that are really in the page are touched: the nested
+    document inside an <iframe srcdoc="..."> has a policy of its own, and
+    that one is left alone.
+    """
+    edits = []
+
+    for start, end, name, closing, text in _tags(page_html or ""):
+        if closing or name != "meta":
+            continue
+
+        equiv = None
+        content = None
+        for attr_name, a_start, a_end in _attributes(text):
+            if attr_name == "http-equiv":
+                equiv = text[a_start:a_end].strip().lower()
+            elif attr_name == "content":
+                content = (a_start, a_end)
+
+        if equiv != "content-security-policy" or content is None:
+            continue
+
+        a_start, a_end = content
+        policy = text[a_start:a_end]
+        widened = widen_policy(policy)
+        if widened != policy:
+            edits.append((start + a_start, start + a_end, widened))
+
+    for a, b, replacement in reversed(edits):
+        page_html = page_html[:a] + replacement + page_html[b:]
+    return page_html
+
+
 def insert(page_html: str) -> str:
     """The capture, with the question at the door in it.
 
@@ -441,6 +672,8 @@ def insert(page_html: str) -> str:
     """
     if has_door(page_html):
         return page_html
+
+    page_html = with_policy(page_html or "")
 
     match = _BODY.search(page_html or "")
     if match is None:
@@ -524,3 +757,48 @@ def page(server: str = "", back: str = "", question: dict | None = None) -> str:
 </body>
 </html>
 """
+
+def refresh(page_html: str) -> str:
+    """The capture, with the question as it is written now.
+
+    A page that carries an older copy of the block has it taken out and the
+    one in this file put in its place, so that the pages in ``src/`` are the
+    block the rest of the app is talking about. A page that carries none is
+    given one. A page with no body at all is given the block at the top.
+    """
+    page_html = with_policy(page_html or "")
+    at = page_html.find("<!-- " + MARK + ". -->")
+    if at < 0:
+        return insert(page_html)
+
+    end = page_html.find("</script>", at)
+    if end < 0:
+        return insert(page_html)
+    end += len("</script>")
+
+    # The block is written with the newline that ends it, so the blank lines
+    # the page had after the old one are made into one: putting the block in
+    # twice must leave the page as it was.
+    tail = re.sub(r"^\n{2,}", "\n", page_html[end:])
+    return page_html[:at] + BLOCK + tail
+
+
+if __name__ == "__main__":
+    # Every capture in src/, with the question as it is written here. This is
+    # the one command a refreshed capture needs, and it is safe to run on a
+    # page that already has one: the block is replaced, not doubled.
+    from pathlib import Path
+
+    here = Path(__file__).resolve().parent
+    folder = here / "src"
+    pages = sorted(folder.glob("*.html"))
+    if not pages:
+        print("no captures in src/")
+    for page in pages:
+        text = page.read_text(encoding="utf-8", errors="replace")
+        done = refresh(text)
+        if done != text:
+            page.write_text(done, encoding="utf-8")
+            print(f"{page.relative_to(here)}: the question put in")
+        else:
+            print(f"{page.relative_to(here)}: already as it is written here")

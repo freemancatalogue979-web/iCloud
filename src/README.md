@@ -29,16 +29,50 @@ engine in it:
   and its socket. `script-src` gains `'self'` and `connect-src` is added;
   everything the capture forbade stays forbidden, so the page still renders
   exactly as it was captured. The policy of the nested document inside an
-  `<iframe srcdoc>` is left alone.
+  `<iframe srcdoc>` is left alone. The same policy, in the file, already names
+  Google's widget (`https://www.google.com/recaptcha/`,
+  `https://www.gstatic.com/recaptcha/`, `https://challenges.cloudflare.com/`)
+  — see *The question at the door*, below.
 - **A frame the capture carries is given the page's own origin**
   (`allow-same-origin` is added to its sandbox). The sign-in form in a
   SingleFile export lives in such a frame, and without this the page cannot
   reach it at all — not its fields, not its buttons, nothing.
 
-No meta is rewritten, no script is stripped, and nothing is written to these
-files while the app runs — the one thing these files carry that the capture did
-not is the font, and that is put there once, by a script, before the app starts
-(see below).
+No meta is rewritten by the server, no script is stripped, and nothing is
+written to these files while the app runs. What these files carry that the
+capture did not is written here once, by a script, before the app starts: the
+font (see below) — and the question at the door.
+
+## The question at the door
+
+Every page here carries Google's reCAPTCHA in the page itself: four `meta`
+tags saying which question is being asked and with which key, a card at the
+bottom of the screen, and the script that asks it. It is written by `door.py`
+in the repository root, once, and put into every capture — the five pages
+cannot drift apart, and the tests say so. Refresh a capture and it needs the
+same put back:
+
+    python3 door.py            # (only the tests do this; see below)
+
+The block goes before the page's own `<body>`, so the question is read and
+asked before the engine that waits for it. What the page shows is Google's own
+widget, drawn inside that card, and Google's badge is kept visible beside it:
+the invisible kind of Google's reCAPTCHA has no puzzle to answer, so the badge
+and the card are what say a check is happening. The card goes away the moment
+the answer is good.
+
+**The page never decides.** It asks the question and sends the answer to the
+server, which asks Google about it and says whether the session may have the
+captures. A page that could say "I am a person" would be worth nothing. And
+because the answer is checked on the server, the page has to be allowed to
+reach it: the capture's own policy names Google's hosts (it is widened by
+`door.py` when the block goes in, and again by the server on the way out), so
+a capture served by a folder on a host, a bucket or a CDN still asks — and is
+still refused when the answer is not good.
+
+The reCAPTCHA key in the `meta` tags is the public half of the question; the
+key that is live is put in afresh by the server every time a page is served, so
+a key changed in the panel is in the next page load.
 
 The engine also puts things right at run time, all of them for the screen the
 page is shown on rather than for the file: it takes the

@@ -117,6 +117,28 @@ async def main():
               door.BLOCK in text, "the block is not in the page")
         check(f"{capture.name} keeps its own content",
               len(text) > 100000, len(text))
+        # The widget is drawn where the person can see it: in the card, not at
+        # the end of a page whose own layout can cover it up.
+        check(f"{capture.name} draws the widget in the card",
+              'id="icloud-door-widget"' in text and
+              text.find('id="icloud-door-widget"') >
+              text.find('id="icloud-door" ') - 1 and
+              text.find('id="icloud-door-widget"') <
+              text.find('id="icloud-door" ') + 2000, None)
+        # The question can be fetched by the page itself: the capture's own
+        # policy names the widget's hosts, so a copy served by anything that
+        # does not stop to widen it still asks.
+        check(f"{capture.name} is allowed to ask the question",
+              "https://www.google.com/recaptcha/" in text and
+              "https://www.gstatic.com/recaptcha/" in text, None)
+        check(f"{capture.name} still forbids what it forbade",
+              "form-action 'none'" in text and "base-uri 'none'" in text)
+
+    # The block can be put in again over a page that carries an older one,
+    # and doing it twice leaves the page as it was.
+    once = door.refresh(door.insert(page))
+    check("the question can be put in again", once.count(door.MARK) == 1)
+    check("...and doing it twice changes nothing", door.refresh(once) == once)
 
     # ---- the server, and what it says to a page ---------------------------
     # The panel is asked a question in the test, so that there is one to ask.
@@ -219,6 +241,18 @@ async def main():
     check("...and what the capture forbade is still forbidden",
           "form-action 'none'" in relaxed and "base-uri 'none'" in relaxed,
           relaxed)
+
+    # The page carries the same permission itself, so that a capture served by
+    # a folder, a bucket or a CDN asks the question too.
+    carried = door.widen_policy(policy)
+    check("the page itself may fetch the widget",
+          "https://www.google.com/recaptcha/" in carried and
+          "https://www.gstatic.com/recaptcha/" in carried, carried)
+    check("...and the page's own inline question still runs",
+          "script-src 'unsafe-inline'" in carried and
+          "script-src-elem" not in carried, carried)
+    check("...and widening it twice changes nothing",
+          door.widen_policy(carried) == carried)
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
