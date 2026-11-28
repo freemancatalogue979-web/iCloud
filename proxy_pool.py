@@ -51,8 +51,13 @@ DECODO_SERVER = "gate.decodo.com:7000"
 # Where the exit address is checked. The same service the provider points
 # at; the browser is asked, so the answer is the address the browser
 # really leaves from.
+#
+# ipinfo.io is used rather than the provider's own echo: the provider's
+# /json began answering with browser details and no address at all, so
+# the check could never pass. This one answers {"ip": ..., "country": ...},
+# which is what parse_exit reads, and it is quick.
 EXIT_CHECK_URL = os.environ.get("ICLOUD_EXIT_CHECK_URL") or \
-    "https://ip.decodo.com/json"
+    "https://ipinfo.io/json"
 
 
 def _env(name: str, default: str = "") -> str:

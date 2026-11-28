@@ -442,6 +442,58 @@ async def prepare_identity(session: "Session", request: Request) -> None:
         f"{session.identity.device.timezone}")
 
 
+_PLAYWRIGHT = None
+
+
+async def playwright():
+    """The one Playwright driver, started once and shared by every session.
+
+    Starting it costs about half a second and a process of its own, and a
+    driver holds no browser and no profile - it is only the channel the
+    browsers are asked through. One for the whole server means a visitor
+    does not pay for it, and a session that ends does not end it.
+    """
+    global _PLAYWRIGHT
+    if _PLAYWRIGHT is None:
+        from playwright.async_api import async_playwright
+
+        _PLAYWRIGHT = await async_playwright().start()
+    return _PLAYWRIGHT
+
+
+def note_exit(session: "Session", task=None) -> None:
+    """Record where the browser left from, whenever that answer arrives.
+
+    The check is made alongside the page the visitor types into, not in
+    front of it. When it answers before the sign-in is handed over it is
+    read there; when it answers after, it is read here, and the panel is
+    told - the visitor is already working by then and is not interrupted.
+    """
+    if task is None:
+        answer = session.exit or {}
+    else:
+        try:
+            answer = task.result()
+        except Exception as exc:
+            answer = {"ok": False, "ip": "", "country": "",
+                      "said": str(exc).splitlines()[0] if str(exc)
+                      else "the check failed",
+                      "wrong": False, "mismatch": False}
+        session.exit = answer
+
+    if answer.get("ok"):
+        log(f"leaving from {answer.get('ip')} "
+            f"({answer.get('country')}) - checked")
+    else:
+        log(f"NOT CHECKED: {answer.get('said')}")
+        # A note, not a verdict: by the time a late answer comes back the
+        # visitor may already be typing, and an unchecked proxy is not the
+        # same as a broken session.
+        if session.state.get("status") != "done":
+            session.state["error"] = answer.get("said", "")
+    SESSIONS.changed(session, why="exit-checked")
+
+
 async def verify_exit(session: "Session") -> dict:
     """Check where the browser really leaves from.
 
@@ -908,14 +960,17 @@ async def start_browser(session: "Session"):
 
     session.state.update(status="running", error="", browser_open=False)
 
+    # The exit check, when one is made. Started alongside the page the
+    # visitor will type into and awaited before the sign-in is handed over;
+    # kept here so a session that fails on the way still tidies it up.
+    exit_task = None
+
     try:
-        # Imported here rather than at module load: serving the captured pages
+        # Started here rather than at module load: serving the captured pages
         # does not need Playwright, and a machine without it should still be
         # able to open the app and read the error on /status.
-        from playwright.async_api import async_playwright
-
         if session.pw is None:
-            session.pw = await async_playwright().start()
+            session.pw = await playwright()
 
         try:
             session.ctx, session.page = await launch(session)
@@ -930,6 +985,12 @@ async def start_browser(session: "Session"):
         # The browser is up: the manager says so, so the panel stops saying
         # the client is only arriving.
         SESSIONS.changed(session, why="browser-open")
+        # And the pages watching are told at once, so the launcher goes to
+        # the capture now rather than after the work that follows. The
+        # capture is the browser's own mirror - it fills itself in as the
+        # browser does, which is a better thing to look at than a blank
+        # screen.
+        session.hub.tell_state()
 
         # What the browser says about itself is worth keeping: it is the
         # only one who knows which build it is, and the client hints it
@@ -942,36 +1003,39 @@ async def start_browser(session: "Session"):
         except Exception:
             pass
 
-        # Where the browser really leaves from. This is checked before the
-        # sign-in is handed over, because a browser that fell back to the
-        # machine's own address is the one thing this arrangement exists
-        # to prevent - and it is better to say so than to let it through.
+        # Where the browser really leaves from, and the page the visitor will
+        # type into, are both waits on the network - so they wait together
+        # instead of one after the other. The check is still finished and
+        # read before anything is handed over; only its waiting is shared.
         if session.identity is not None:
-            session.exit = await verify_exit(session)
-            if session.exit.get("ok"):
-                log(f"leaving from {session.exit.get('ip')} "
-                    f"({session.exit.get('country')}) - checked")
-            else:
-                log(f"NOT CHECKED: {session.exit.get('said')}")
-                session.state["error"] = session.exit.get("said", "")
-            SESSIONS.changed(session, why="exit-checked")
+            exit_task = asyncio.create_task(verify_exit(session))
 
-            # A browser that left from the machine's own address is the one
-            # thing this whole arrangement is here to prevent: the proxy
-            # was not used, and the sign-in would be done from here. It is
-            # not handed over - the sign-in is not started at all, and the
-            # browser is closed.
-            #
-            # Everything else is another matter - the check could not be
-            # made at all (the service may be down, and the proxy may be
-            # working perfectly well), or the address is a good one in a
-            # country other than the one the visitor was seen in. Those
-            # are noted and shown in the panel, and the sign-in goes on,
-            # unless the operator asks for it to be strict
-            # (ICLOUD_EXIT_STRICT=1).
-            strict = os.environ.get("ICLOUD_EXIT_STRICT", "").strip() in \
-                ("1", "true", "yes", "on")
-            if session.exit.get("wrong") or (strict and not session.exit.get("ok")):
+        # The browser is the session. The capture is a copy of a moment of
+        # it, and this is what connects the two: what is typed into the
+        # capture is written into the browser, and what the browser is
+        # showing is written back into the capture.
+        session.bridge.attach(session.ctx, session.page)
+
+        # A tab the sign-in flow opens is where the user will be typing.
+        session.ctx.on("page", lambda page: bring_new_tab_to_front(session, page))
+
+        log("going to icloud.com")
+        # "commit" rather than "domcontentloaded": the page is ready when the
+        # click finds the button, and the click waits for it on its own - so
+        # the page's own loading is spent inside the click, not before it.
+        await session.page.goto("https://www.icloud.com/", wait_until="commit")
+        await session.page.bring_to_front()
+
+        log("clicking Sign In")
+        await session.page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
+
+        strict_now = os.environ.get("ICLOUD_EXIT_STRICT", "").strip() in \
+            ("1", "true", "yes", "on")
+        if exit_task is not None and strict_now:
+            # Strict mode: the answer is the point, so it is waited for.
+            session.exit = await exit_task
+            note_exit(session)
+            if session.exit.get("wrong") or not session.exit.get("ok"):
                 log("the sign-in is not started - the browser is not leaving "
                     "from where it should")
                 session.state["status"] = "error"
@@ -988,28 +1052,47 @@ async def start_browser(session: "Session"):
                 SESSIONS.failed(session, session.state["error"])
                 session.hub.tell_state()
                 return session.state
-
-        # The browser is the session. The capture is a copy of a moment of
-        # it, and this is what connects the two: what is typed into the
-        # capture is written into the browser, and what the browser is
-        # showing is written back into the capture.
-        session.bridge.attach(session.ctx, session.page)
-
-        # A tab the sign-in flow opens is where the user will be typing.
-        session.ctx.on("page", lambda page: bring_new_tab_to_front(session, page))
-
-        log("going to icloud.com")
-        await session.page.goto("https://www.icloud.com/", wait_until="domcontentloaded")
-        await session.page.bring_to_front()
-
-        log("clicking Sign In")
-        await session.page.locator(SIGNIN_BUTTON).first.click(timeout=15000)
+        elif exit_task is not None:
+            # Not strict: the answer is worth having, not worth waiting for.
+            # The browser is on the sign-in page and the visitor is about to
+            # type, so a check still on its way is read when it lands rather
+            # than held in front of them. An answer already in is read here.
+            if exit_task.done():
+                try:
+                    session.exit = exit_task.result()
+                except Exception as exc:
+                    session.exit = {"ok": False, "ip": "", "country": "",
+                                    "said": str(exc).splitlines()[0] if str(exc)
+                                    else "the check failed",
+                                    "wrong": False, "mismatch": False}
+                note_exit(session)
+                if session.exit.get("wrong"):
+                    log("the sign-in is not started - the browser is not "
+                        "leaving from where it should")
+                    session.state["status"] = "error"
+                    session.state["error"] = session.exit.get("said") or \
+                        "the browser is not leaving from where it should"
+                    try:
+                        await session.ctx.close()
+                    except Exception:
+                        pass
+                    session.ctx = None
+                    session.page = None
+                    session.state["browser_open"] = False
+                    SESSIONS.failed(session, session.state["error"])
+                    session.hub.tell_state()
+                    return session.state
+            else:
+                exit_task.add_done_callback(
+                    lambda task: note_exit(session, task))
 
         session.state["status"] = "done"
         log("done - sign in yourself in the browser window")
         session.hub.tell_state()
 
     except Exception as exc:
+        if exit_task is not None and not exit_task.done():
+            exit_task.cancel()
         session.state["status"] = "error"
         session.state["error"] = str(exc).splitlines()[0]
         log(f"FAILED: {session.state['error']}")
@@ -1690,6 +1773,7 @@ class Hub:
         return {"t": "session",
                 "status": str(state.get("status") or "idle"),
                 "error": str(state.get("error") or ""),
+                "browser_open": bool(state.get("browser_open")),
                 "page": self.page}
 
     def tell_state(self) -> None:
