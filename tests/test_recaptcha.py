@@ -680,13 +680,18 @@ async def main():
             # A pass that was not made here is not a pass - and it does not
             # open the door for a session that has not answered the question
             # either. The session named in the address is one that has not.
+            #
+            # The page is still served: it carries the question at the door,
+            # and the door asks it. What the request does not get is the
+            # session - it is not made, and it is given nothing.
             answer = await capture_route(
                 make_get("/src/1.html",
                          {server.PASS_COOKIE: "x.9999999999.deadbeef"},
                          named("b" * 32)),
                 path="1.html")
-            check("...and a pass that was not made here is not one",
-                  getattr(answer, "status_code", 0) in (302, 307),
+            check("...and a pass that was not made here is no session",
+                  getattr(answer, "status_code", 0) == 200 and
+                  server.session_lookup("b" * 32) is None,
                   getattr(answer, "status_code", answer))
 
             # A pass is only as good as the session it was made for. One
@@ -697,8 +702,9 @@ async def main():
                 make_get("/src/1.html", {server.PASS_COOKIE: gone},
                          named("b" * 32)),
                 path="1.html")
-            check("...and a pass for a session that has gone is not one",
-                  getattr(answer, "status_code", 0) in (302, 307),
+            check("...and a pass for a session that has gone is no session",
+                  getattr(answer, "status_code", 0) == 200 and
+                  server.session_lookup("b" * 32) is None,
                   getattr(answer, "status_code", answer))
 
             # And the copy on another host is told the same thing when it

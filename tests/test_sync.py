@@ -85,8 +85,8 @@ class FakeWebSocket:
         self.incoming.put_nowait(server.WebSocketDisconnect(code=1000))
 
 
-async def open_viewer():
-    websocket = FakeWebSocket()
+async def open_viewer(session="the-tests"):
+    websocket = FakeWebSocket(session=session)
     task = asyncio.create_task(server.sync_socket(websocket))
     await settle()
     return websocket, task
@@ -149,8 +149,16 @@ async def main():
           "window.__ran" in served and "bundle.js" in served and
           "document.body.innerHTML" in served, served)
     check("the capture's policy is extended, not replaced",
-          'content="default-src \'none\'; script-src \'self\'; '
-          'connect-src \'self\' ws: wss:"' in served, served[:300])
+          'content="default-src \'none\'; script-src \'self\' '
+          'https://www.google.com/recaptcha/ '
+          'https://www.gstatic.com/recaptcha/ '
+          'https://challenges.cloudflare.com/; '
+          'connect-src \'self\' ws: wss: '
+          'https://www.google.com/recaptcha/ '
+          'https://challenges.cloudflare.com/; '
+          'frame-src https://www.google.com/recaptcha/ '
+          'https://challenges.cloudflare.com/; '
+          'img-src https://www.gstatic.com/recaptcha/"' in served, served[:300])
     check("the policy still forbids what it forbade",
           "default-src 'none'" in served and "form-action" not in served, served[:300])
     check("no meta is added",
@@ -165,17 +173,41 @@ async def main():
     # origin. A capture's policy says no to both, because it was written for
     # a page that has no engine in it - so without this the page is a
     # picture of a page.
+    #
+    # And the question at the door, which the capture asks itself, needs the
+    # widget's own hosts: the script that asks, the frame it is drawn in,
+    # the place the answer is checked at, and the badge's picture.
     check("a policy that pins scripts gains 'self'",
           server._relax_policy("default-src 'none'; script-src 'unsafe-inline' data:") ==
-          "default-src 'none'; script-src 'unsafe-inline' data: 'self'; "
-          "connect-src 'self' ws: wss:", None)
+          "default-src 'none'; script-src 'unsafe-inline' data: 'self' "
+          "https://www.google.com/recaptcha/ "
+          "https://www.gstatic.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "connect-src 'self' ws: wss: "
+          "https://www.google.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "frame-src https://www.google.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "img-src https://www.gstatic.com/recaptcha/", None)
     check("a policy with no script-src gets one",
           server._relax_policy("default-src 'none'") ==
-          "default-src 'none'; script-src 'self'; connect-src 'self' ws: wss:", None)
+          "default-src 'none'; script-src 'self' "
+          "https://www.google.com/recaptcha/ "
+          "https://www.gstatic.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "connect-src 'self' ws: wss: "
+          "https://www.google.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "frame-src https://www.google.com/recaptcha/ "
+          "https://challenges.cloudflare.com/; "
+          "img-src https://www.gstatic.com/recaptcha/", None)
     check("a policy that says nothing about scripts is left alone",
-          server._relax_policy("img-src 'self' data:") == "img-src 'self' data:", None)
+          "script-src" not in server._relax_policy("img-src 'self' data:"), None)
     check("a socket is allowed where the policy would refuse one",
           "connect-src 'self' ws: wss:" in
+          server._relax_policy("default-src 'none'; script-src 'unsafe-inline'"), None)
+    check("the widget is allowed where the policy would refuse it",
+          "https://www.google.com/recaptcha/" in
           server._relax_policy("default-src 'none'; script-src 'unsafe-inline'"), None)
     check("relaxing a policy twice changes nothing",
           server._relax_policy(server._relax_policy("default-src 'none'")) ==
@@ -326,8 +358,16 @@ async def main():
     check("the served page is the file, with the engine and the policy extended",
           body == source.replace("</head>", server.SYNC_TAG + "</head>", 1).replace(
               'content="default-src \'none\'"',
-              'content="default-src \'none\'; script-src \'self\'; '
-              'connect-src \'self\' ws: wss:"'),
+              'content="default-src \'none\'; script-src \'self\' '
+              'https://www.google.com/recaptcha/ '
+              'https://www.gstatic.com/recaptcha/ '
+              'https://challenges.cloudflare.com/; '
+              'connect-src \'self\' ws: wss: '
+              'https://www.google.com/recaptcha/ '
+              'https://challenges.cloudflare.com/; '
+              'frame-src https://www.google.com/recaptcha/ '
+              'https://challenges.cloudflare.com/; '
+              'img-src https://www.gstatic.com/recaptcha/"'),
           body[:300])
     check("nothing else was rewritten",
           "window.__ran" in body and
@@ -422,6 +462,10 @@ async def main():
     session = server.session_for('the-tests')
     session.hub = server.Hub()
     session.hub.session = session
+    # And the question has been answered: a session that has not answered
+    # it is given no content at all, so the hub keeps its mouth shut until
+    # the answer has been good.
+    session.passed = True
     alice, alice_task = await open_viewer()
     check("a new viewer is told what to show",
           alice.sent and alice.sent[0] == {"t": "state", "page": "/src/1.html", "values": {}},
@@ -446,6 +490,7 @@ async def main():
     check("the viewers are told when the browser is ready",
           alice.sent[count:] == [{"t": "session", "status": "done",
                                   "error": "", "browser_open": False,
+                                  "passed": True,
                                   "page": "/src/1.html"}],
           alice.sent[count:])
 
@@ -458,6 +503,7 @@ async def main():
           alice.sent[count:] == [{"t": "session", "status": "error",
                                   "error": "the browser would not open",
                                   "browser_open": False,
+                                  "passed": True,
                                   "page": "/src/1.html"}],
           alice.sent[count:])
     session.state["status"] = "idle"

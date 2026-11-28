@@ -80,6 +80,7 @@ class FakeSocket {
     this.onclose = null;
     this.onerror = null;
     FakeSocket.last = this;
+    FakeSocket.made.push(this);
   }
 
   send(data) {
@@ -100,6 +101,10 @@ class FakeSocket {
     return this.sent.filter((message) => message.t === type);
   }
 }
+
+// Every socket that was opened, so that a test can tell a page that opened
+// the line from a page that is still waiting at the door.
+FakeSocket.made = [];
 
 (async () => {
   const dom = capture(PAGE, "http://localhost:9002/src/1.html");
@@ -955,6 +960,44 @@ class FakeSocket {
   check("...and in a copy that lives in a folder of its own",
     inFolderWin.__icloudSync.launcherUrl() === "/app/",
     inFolderWin.__icloudSync.launcherUrl());
+
+  // ---- and the door at the capture ---------------------------------------
+  // A capture may carry the question at the door itself: the page asks it
+  // before the page does anything, and the engine waits for the answer. The
+  // page says it has a door by leaving window.__icloudDoor behind - so a
+  // page without a door is not held up, and a page whose question was not
+  // answered is sent back to the launcher rather than left waiting.
+  const made = FakeSocket.made.length;
+  const atTheDoor = capture(PAGE, "http://localhost:9002/src/1.html");
+  atTheDoor.window.__icloudDoor = { state: "asking", why: "" };
+  atTheDoor.window.WebSocket = FakeSocket;
+  atTheDoor.window.eval(SYNC);
+  await sleep(400);
+  check("a capture at the door opens no line",
+    FakeSocket.made.length === made,
+    FakeSocket.made.length + " - " + made);
+  check("...and says where it stands",
+    atTheDoor.window.__icloudSync &&
+      atTheDoor.window.__icloudSync.doorState() === "asking",
+    atTheDoor.window.__icloudSync &&
+      atTheDoor.window.__icloudSync.doorState());
+
+  // The answer comes, and the line opens.
+  atTheDoor.window.__icloudDoor.state = "passed";
+  await sleep(400);
+  check("...and the line opens when the door opens",
+    FakeSocket.made.length === made + 1,
+    FakeSocket.made.length + " - " + made);
+
+  // A door that was not opened sends the page back to the launcher.
+  const shutDoor = capture(PAGE, "http://localhost:9002/src/1.html");
+  shutDoor.window.__icloudDoor = { state: "refused", why: "not answered" };
+  shutDoor.window.WebSocket = FakeSocket;
+  shutDoor.window.eval(SYNC);
+  await sleep(400);
+  check("a capture whose door was shut is sent back to the launcher",
+    !!shutDoor.window.__icloudRefused,
+    shutDoor.window.__icloudRefused);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);

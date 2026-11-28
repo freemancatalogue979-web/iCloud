@@ -333,6 +333,7 @@
   var RETRY_MAX = 5000;
   var MARK_MS = 450;
   var TYPE_DELAY = 70;      // a gap between keystrokes, not a message per letter
+  var DOOR_TRIES = 240;     // a minute at the door, and then the page gives up
 
   var socket = null;
   var retry = RETRY_MIN;
@@ -539,6 +540,33 @@
   // bound never reached them.
   function askWhere() {
     send({ t: "where" });
+  }
+
+  /* The door.
+   *
+   * A capture may carry the question at the door itself: the page asks it
+   * before the page does anything, and the engine waits for the answer. The
+   * page says it has a door by leaving window.__icloudDoor behind - so a
+   * page without a door is not held up, and a page whose question was not
+   * answered is sent back to the launcher rather than left waiting.
+   */
+  function doorState() {
+    var door = window.__icloudDoor;
+    if (!door) return "none";
+    return String(door.state || "asking");
+  }
+
+  function openTheDoor(tries) {
+    var state = doorState();
+    if (state === "none" || state === "passed") {
+      connect();
+      return;
+    }
+    if (state === "refused" || tries <= 0) {
+      refused("the question at the door was not answered");
+      return;
+    }
+    setTimeout(function () { openTheDoor(tries - 1); }, 250);
   }
 
   function connect() {
@@ -1735,7 +1763,9 @@
     start();
   }
 
-  connect();
+  // And the line is opened when the door is open - when this page carries
+  // the question at the door, that is when the answer has been given.
+  openTheDoor(DOOR_TRIES);
 
   // One handle, so the page can be inspected from the console without
   // reaching into a closure.
@@ -1749,5 +1779,6 @@
     fitFrames: fitFrames,
     namedPath: namedPath,
     launcherUrl: launcherUrl,
+    doorState: doorState,
   };
 })();

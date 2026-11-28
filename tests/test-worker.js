@@ -1,19 +1,24 @@
 /* The Worker that serves the copy of the pages.
  *
- * The captures are behind the question at the door, and this copy is on
- * another host and cannot ask the question itself. So the visitor is given
- * a pass when they answer it, and the Worker asks the server about the
- * pass before a capture is handed out.
+ * The captures are behind the question at the door, and every capture asks
+ * the question itself: the page draws Google's widget, and the server - not
+ * this Worker - checks the answer and says whether the session may have the
+ * captures.
+ *
+ * So this Worker asks the server nothing. It cannot, in any case: a Worker
+ * cannot fetch an address that is only a number - Cloudflare answers with
+ * "error code: 1003" - so a copy that wanted the server to check a pass
+ * would be turned away at the edge.
  *
  * What is pinned here:
  *
- *   - a capture is not served to a visitor with no pass: they are sent to
- *     the launcher, which asks the question;
- *   - a pass the server says is good is served the capture;
- *   - a pass the server says is no, and a server that cannot be reached,
- *     are both the same answer: no capture;
- *   - a copy with no server written into it - one made by hand rather
- *     than from the zip - serves nothing that is behind the question;
+ *   - a capture asked for without the names in its address is not served: the
+ *     visitor is sent to the launcher, which asks the question;
+ *   - a capture with the names is served - it is a page that has not answered
+ *     yet, and it is the page that asks;
+ *   - a name that could not be a session's name is not a name;
+ *   - the server is never asked about anything, so the copy works whatever
+ *     address the server is at;
  *   - the launcher and the other pages are nobody else's business, and are
  *     served as they always were;
  *   - the ".html" paths are asked for without their extension, so that
@@ -38,10 +43,15 @@ function check(name, cond, detail) {
   }
 }
 
-/* What the server says about a pass is the only thing that matters. It is
- * kept here, and the Worker's own fetch is pointed at it, so that a test
- * can change its mind about what the server says. */
-let serverFetch = async () => ({ ok: true, json: async () => ({ ok: true }) });
+/* Anything the Worker asks of the server would be here. Nothing should ever
+ * be asked of the server - and that is worth pinning, because a Worker that
+ * cannot fetch an address that is only a number is refused by the edge
+ * before the server is ever asked. */
+let serverCalls = [];
+let serverFetch = async (url) => {
+  serverCalls.push(String(url));
+  return { ok: true, json: async () => ({ ok: true }) };
+};
 
 /* The Worker, loaded as it is written.
  *
@@ -55,6 +65,7 @@ function loadWorker(text) {
     URL,
     Request,
     Response,
+    Headers,
     fetch: (url, init) => serverFetch(url, init),
   };
   vm.createContext(sandbox);
@@ -62,7 +73,7 @@ function loadWorker(text) {
   return sandbox.module.exports;
 }
 
-/* The assets the Worker serves, and what the server says about a pass. */
+/* The assets the Worker serves. */
 function binding(seen) {
   return {
     fetch: async (request) => {
@@ -79,95 +90,67 @@ function binding(seen) {
  * about itself. */
 const NAMES = "uid=the-user&sid=the-session";
 
-async function ask(worker, path, options) {
+async function ask(worker, where, options) {
   const opts = options || {};
   const headers = new Headers();
   if (opts.pass) headers.set("cookie", "icloud_pass=" + encodeURIComponent(opts.pass));
-  let where = path;
-  if (opts.named) where += (where.indexOf("?") >= 0 ? "&" : "?") + NAMES;
-  const request = new Request("https://copy.example" + where, { method: "GET", headers });
+  let path = where;
+  if (opts.named) path += (path.indexOf("?") >= 0 ? "&" : "?") + NAMES;
+  if (opts.names) path += (path.indexOf("?") >= 0 ? "&" : "?") + opts.names;
+  const request = new Request("https://copy.example" + path, { method: "GET", headers });
   return await worker.fetch(request, { SITE: binding(opts.seen || []) });
 }
 
 async function main() {
   const source = fs.readFileSync(path.join(__dirname, "..", "worker", "worker.js"), "utf8");
+  const worker = loadWorker(source);
 
-  // ---- a copy with a server in it ------------------------------------
-  const worker = loadWorker(source.replace(
-    "__ICLOUD_SERVER__", "https://icloud.example.com"));
-
-  // What the server says about a pass is the only thing that matters.
-  let serverSaid = { ok: true };
-  let serverCalls = [];
-  serverFetch = async (url) => {
-    serverCalls.push(url);
-    return { ok: true, json: async () => serverSaid };
-  };
-
-  // ---- a capture with no pass ----------------------------------------
+  // ---- a capture with no names in its address --------------------------
+  // A capture is for one browser and one session, and says so in its
+  // address. A capture asked for without them is not a capture: it is a page
+  // that anybody may ask for.
   let seen = [];
-  let answer = await ask(worker, "/src/1.html", { seen, named: true });
-  check("a capture with no pass is not served",
+  let answer = await ask(worker, "/src/1.html", { seen });
+  check("a capture with no names is not served",
         answer.status === 302, answer.status);
   check("...and the visitor is sent to the launcher",
         answer.headers.get("location") === "https://copy.example/",
         answer.headers.get("location"));
   check("...and the asset is not asked for at all", seen.length === 0, seen);
 
-  // ---- a capture with no names in its address -------------------------
-  // The pass says the visitor answered the question. The names say which
-  // browser and which session the capture is for. A capture asked for
-  // without them is not a capture: it is a page that anybody may ask for.
-  serverSaid = { ok: true };
+  // ---- and a name that could not be a name -----------------------------
   seen = [];
-  answer = await ask(worker, "/src/1.html", { pass: "a-pass", seen });
-  check("a capture with a pass but no names is not served",
+  answer = await ask(worker, "/src/1.html", { seen, names: "uid=x&sid=y" });
+  check("a capture whose names are not names is not served",
         answer.status === 302, answer.status);
   check("...and the asset is not asked for", seen.length === 0, seen);
 
+  // ---- and the capture that has the names is served --------------------
+  // It is a page that has not answered the question yet: it asks it itself.
   seen = [];
   answer = await ask(worker, "/src/1.html", { seen, named: true });
-  check("a capture with names but no pass is not served",
-        answer.status === 302, answer.status);
-  check("...and the asset is not asked for", seen.length === 0, seen);
-
-  // And the capture that has both is served, and the visitor is sent to the
-  // launcher without the names - they are not wanted there.
-  serverSaid = { ok: true };
-  seen = [];
-  answer = await ask(worker, "/src/1.html", { pass: "a-pass", seen, named: true });
-  check("a capture with a pass and the names is served",
+  check("a capture with the names is served",
         answer.status === 200, answer.status);
-
-  // ---- a capture with a pass the server says is good ------------------
-  serverSaid = { ok: true };
-  serverCalls = [];
-  seen = [];
-  answer = await ask(worker, "/src/1.html", { pass: "a-pass", seen, named: true });
-  check("a capture with a good pass is served",
-        answer.status === 200, answer.status);
-  check("...and the server was asked about the pass",
-        serverCalls.length === 1 &&
-        serverCalls[0].indexOf("/challenge/pass?pass=a-pass") !== -1,
-        serverCalls);
   check("...and the asset was asked for without its extension",
         seen.length === 1 && seen[0] === "/src/1", seen);
 
-  // ---- a pass the server says is no ----------------------------------
-  serverSaid = { ok: false, said: "the pass has run out" };
+  // ---- and the server is never asked ------------------------------------
+  serverCalls = [];
   seen = [];
-  answer = await ask(worker, "/src/1.html", { pass: "an-old-pass", seen, named: true });
-  check("a pass the server says is no is not served",
-        answer.status === 302, answer.status);
-  check("...and the asset is not asked for", seen.length === 0, seen);
+  answer = await ask(worker, "/src/1.html", { seen, named: true });
+  check("the server is not asked about the capture",
+        serverCalls.length === 0, serverCalls);
+  check("...so the copy works whatever address the server is at",
+        answer.status === 200, answer.status);
 
-  // ---- a server that cannot be reached --------------------------------
-  global.fetch = async () => { throw new Error("no route to host"); };
+  // A pass in the cookie does not change it either: the question is asked
+  // by the page, and the server is the one that checks it.
+  serverCalls = [];
   seen = [];
   answer = await ask(worker, "/src/1.html", { pass: "a-pass", seen, named: true });
-  check("a server that cannot be reached serves no capture",
-        answer.status === 302, answer.status);
-  check("...and the asset is not asked for", seen.length === 0, seen);
+  check("a pass makes no difference to what the Worker asks",
+        serverCalls.length === 0, serverCalls);
+  check("...and the capture is still served", answer.status === 200, answer.status);
 
   // ---- and the pages that are not captures ---------------------------
   serverFetch = async () => ({ ok: true, json: async () => ({ ok: true }) });
@@ -179,18 +162,17 @@ async function main() {
         seen.length === 1 && seen[0] === "/", seen);
 
   seen = [];
+  answer = await ask(worker, "/client.html", { seen });
+  check("the launcher under its other name is served too",
+        answer.status === 200, answer.status);
+  check("...and it is asked for at the root",
+        seen.length === 1 && seen[0] === "/", seen);
+
+  seen = [];
   answer = await ask(worker, "/sync.js", { seen });
   check("the engine is served as it is", answer.status === 200, answer.status);
   check("...and is asked for at its own name",
         seen.length === 1 && seen[0] === "/sync.js", seen);
-
-  // ---- and a copy with no server in it -------------------------------
-  const bare = loadWorker(source);
-  seen = [];
-  answer = await ask(bare, "/src/1.html", { pass: "a-pass", seen, named: true });
-  check("a copy with no server in it serves no capture",
-        answer.status === 302, answer.status);
-  check("...and the asset is not asked for", seen.length === 0, seen);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
