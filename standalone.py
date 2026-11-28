@@ -27,6 +27,8 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+import door
+
 HERE = Path(__file__).parent
 
 # The pages the visitor sees, and the engine that makes them live.
@@ -329,6 +331,28 @@ def worker_name(origin: str = "") -> str:
     return said.split(".")[0]
 
 
+def worker_address(said: str) -> str:
+    """The address the Worker may ask the server at.
+
+    A Worker cannot fetch an address that is only a number: Cloudflare answers
+    such a request with "error code: 1003" - direct IP access is not allowed
+    - and the server would never be asked about a pass.
+
+    So when the copy is told to talk to the server by its number, the Worker
+    is told the name the server answers on instead. The visitor's own browser
+    has no such trouble: it reaches the server by its number, and the pages
+    keep it.
+    """
+    if not re.match(r"^https?://\d+\.\d+\.\d+\.\d+", said or ""):
+        return said
+
+    import server  # imported here, not at the top: the server imports this
+
+    for name in server.own_names():
+        return f"https://{name}/"
+    return said
+
+
 def build(server: str, worker: str = "") -> bytes:
     """The zip, ready to be downloaded.
 
@@ -359,6 +383,15 @@ def build(server: str, worker: str = "") -> bytes:
 
     allowed = origin_of(said)
 
+    # The question that is being asked now, and the key to ask it with. The
+    # pages carry it, so that a page carries its own question with it - and
+    # so that a key changed in the panel is in the next copy that is built.
+    said_question = server.challenge_settings()
+    question = {"provider": said_question["provider"],
+                "site_key": said_question["site_key"],
+                "kind": said_question["kind"],
+                "action": said_question["action"]}
+
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         # The launcher, under both of the names it goes by. A host that
@@ -371,11 +404,19 @@ def build(server: str, worker: str = "") -> bytes:
         zip_file.writestr("client.html", launcher)
         zip_file.writestr("index.html", launcher)
 
+        # The door on its own. A host that serves the copy hands out the
+        # captures only to a visitor who has answered the question, and this
+        # is what it gives out instead: the question, with the key that is
+        # live in it, and the address of the server that checks the answer.
+        zip_file.writestr("door.html",
+                          door.page(server=said, question=question))
+
         # The captures, with the engine in them and the engine beside them.
         if SRC.is_dir():
             for page in sorted(SRC.glob("*.html")):
                 source = page.read_text(encoding="utf-8", errors="replace")
                 source = with_server(source, said)
+                source = door.with_question(source, **question)
                 source = server.with_engine(source, connect=allowed,
                                            script="sync.js")
                 zip_file.writestr(f"src/{page.name}", source)
@@ -403,8 +444,10 @@ def build(server: str, worker: str = "") -> bytes:
                     # The Worker asks this server about a pass before it
                     # hands out the captures, so it has to know where the
                     # server is. The address goes in the file that is
-                    # written, and not in the one in the repository.
-                    text = text.replace(SERVER_MARK, said)
+                    # written, and not in the one in the repository - and
+                    # it is an address the Worker can fetch, which an
+                    # address that is only a number is not.
+                    text = text.replace(SERVER_MARK, worker_address(said))
                 elif name == "wrangler.toml" and worker:
                     # The name of the Worker this copy is served by: the
                     # copy is deployed to that Worker and replaces it, rather
