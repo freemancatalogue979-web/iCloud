@@ -22,6 +22,8 @@ living only in one browser tab.
 """
 
 import asyncio
+import hashlib
+import hmac
 import html as html_module
 import json
 import logging
@@ -44,6 +46,7 @@ import geo
 import identity as identity_module
 import live
 import proxy_pool
+import recaptcha
 import sessions
 import standalone
 import stealth
@@ -444,6 +447,14 @@ async def prepare_identity(session: "Session", request: Request) -> None:
 
 _PLAYWRIGHT = None
 
+# How long the exit check is given to answer once the page has loaded.
+#
+# The check has been running the whole time the page was loading, so by
+# the time it is waited for it has almost always landed already. This is
+# the cap for the ones that do not: a service that is down is not held
+# against the visitor, and the sign-in goes on without it.
+EXIT_WAIT = 15
+
 
 async def playwright():
     """The one Playwright driver, started once and shared by every session.
@@ -492,6 +503,34 @@ def note_exit(session: "Session", task=None) -> None:
         if session.state.get("status") != "done":
             session.state["error"] = answer.get("said", "")
     SESSIONS.changed(session, why="exit-checked")
+
+
+async def refuse_the_exit(session: "Session") -> None:
+    """A browser that fell back to the machine's own address is not handed over.
+
+    The sign-in is not started at all: the browser is closed, the session is
+    said to have failed, and the reason is said out loud.
+
+    It is called whether the answer came before the sign-in was handed over
+    or after it. A browser that left from the machine's own address instead
+    of from the one it should is the one thing this whole arrangement
+    exists to prevent - and it is prevented whichever way round the answer
+    and the sign-in happen to arrive.
+    """
+    said = session.exit.get("said") or \
+        "the browser is not leaving from where it should"
+    session.state["status"] = "error"
+    session.state["error"] = said
+    try:
+        if session.ctx is not None:
+            await session.ctx.close()
+    except Exception:
+        pass
+    session.ctx = None
+    session.page = None
+    session.state["browser_open"] = False
+    SESSIONS.failed(session, said)
+    session.hub.tell_state()
 
 
 async def verify_exit(session: "Session") -> dict:
@@ -701,7 +740,12 @@ CLIENT_ROUTES = ("/start", "/status", "/nav")
 # else asks for it before the server has been told where that copy is:
 # the key is public, and a copy that cannot have it cannot ask the
 # question at all.
-PUBLIC_ROUTES = ("/turnstile/sitekey",)
+#
+# "/challenge/sitekey" is the same key with the name of the question on it,
+# so that the page knows which widget to draw. "/turnstile/sitekey" is
+# kept for the copies already in the field: they ask for that one, and
+# they are answered with the question that is actually being asked.
+PUBLIC_ROUTES = ("/turnstile/sitekey", "/challenge/sitekey")
 
 
 def allowed_origins() -> list:
@@ -746,11 +790,57 @@ def refused_origins() -> list:
     return standalone.refused_origins()
 
 
+def challenge_provider() -> str:
+    """Which question is being asked, if one is.
+
+    One of them is asked at a time: whichever the panel has the keys for.
+    Google's is asked first, because a page that cannot answer it is no
+    use on an address of its own - Cloudflare's widget refuses a bare IP
+    of its own accord, and the answer to that is another question.
+    """
+    said = recaptcha.settings(admin.STORE)
+    if said.get("asked"):
+        return "recaptcha"
+    said = turnstile.settings(admin.STORE)
+    if said.get("asked"):
+        return "turnstile"
+    return ""
+
+
+def challenge_settings() -> dict:
+    """What is being asked, and with what.
+
+    Said in one shape, whichever of the two it is, so that the page in
+    front of the visitor does not have to know which question it is
+    answering - it is told the name of it and draws the right widget.
+    """
+    provider = challenge_provider()
+    if provider == "recaptcha":
+        said = recaptcha.settings(admin.STORE)
+        action = recaptcha.ACTION
+    elif provider == "turnstile":
+        said = turnstile.settings(admin.STORE)
+        action = turnstile.ACTION
+    else:
+        said = {"site_key": "", "asked": False}
+        action = ""
+
+    return {"provider": provider,
+            "site_key": said.get("site_key", ""),
+            "asked": bool(said.get("asked")),
+            "action": action,
+            # Which kind of Google's widget it is. The two are fetched two
+            # different ways, so the page cannot draw the right one without
+            # being told.
+            "kind": said.get("kind", ""),
+            "min_score": said.get("min_score", 0.0)}
+
+
 def expected_hostnames(request) -> set:
     """The hosts an answer may come from.
 
-    An answer is given on a host, and Cloudflare says which one. So the
-    server has to say which hosts it will take an answer from - the
+    An answer is given on a host, and the question's owner says which one.
+    So the server has to say which hosts it will take an answer from - the
     address this server is reached at, the address the copy of the pages
     lives at, and the host the visitor used to get here.
 
@@ -763,7 +853,135 @@ def expected_hostnames(request) -> set:
         host = request.headers.get("host", "")
     except Exception:
         host = ""
+    if challenge_provider() == "recaptcha":
+        return recaptcha.expected_hosts(admin.STORE, request_host=host)
     return turnstile.expected_hosts(admin.STORE, request_host=host)
+
+
+# The pass.
+#
+# The captures are behind the question when there is a question. A visitor
+# who has answered it is let through by their own session - the same session
+# their browser belongs to.
+#
+# A copy of the pages that lives somewhere else cannot ask the question
+# itself: it is on another host, and the question is asked of the page in
+# front of the visitor, which is the copy's own launcher. So the copy
+# needs something to show that the question has been answered. This is it:
+# a name, a time, and a mark. The server can tell it was made here and
+# that it has not run out, and a copy asks the server about it before it
+# hands out the captures.
+#
+# The mark is made with a key that is made when the server starts and is
+# never written down. A pass does not survive a restart, and does not have
+# to: it is good for an hour, and a visitor who has it is answering the
+# question again in a minute.
+_PASS_KEY = os.urandom(32)
+
+# How long a pass is good for. Long enough for a visitor to sign in and
+# have the code they are sent, short enough that a pass left in a browser
+# is not a key to the door for long.
+PASS_TTL = 3600
+
+# The cookie the pass travels in. The same name on every host, so that the
+# launcher can set it wherever it is and the copy can read it there.
+PASS_COOKIE = "icloud_pass"
+
+
+def make_pass(session_id: str) -> str:
+    """A pass for the visitor who answered the question."""
+    expiry = str(int(time.time()) + PASS_TTL)
+    raw = f"{session_id}|{expiry}"
+    mark = hmac.new(_PASS_KEY, raw.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{session_id}.{expiry}.{mark}"
+
+
+def read_pass(token: str) -> dict:
+    """What a pass says, and whether it is any good."""
+    parts = (token or "").split(".")
+    if len(parts) != 3:
+        return {"ok": False, "said": "the pass is not a pass", "session": ""}
+    session_id, expiry, mark = parts
+    raw = f"{session_id}|{expiry}"
+    said = hmac.new(_PASS_KEY, raw.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(said, mark):
+        return {"ok": False, "said": "the pass was not made here", "session": ""}
+    try:
+        when = int(expiry)
+    except ValueError:
+        return {"ok": False, "said": "the pass has no time on it", "session": ""}
+    if when < time.time():
+        return {"ok": False, "said": "the pass has run out", "session": ""}
+    return {"ok": True, "said": "the pass is good", "session": session_id}
+
+
+@app.get("/challenge/pass")
+async def challenge_pass(request: Request):
+    """Is this pass good?
+
+    A copy of the pages on another host asks this before it hands out the
+    captures: the captures are behind the question, and the copy cannot ask
+    the question itself. The answer is a yes or a no, and it says which
+    session the pass is for.
+    """
+    try:
+        token = str(request.query_params.get("pass", "") or "")
+    except Exception:
+        token = ""
+    said = read_pass(token)
+    # A pass is only as good as the session it was made for: the session
+    # has to be here, and it has to be one that answered the question.
+    session = session_lookup(said.get("session", ""))
+    alive = session is not None and bool(getattr(session, "passed", False))
+    return JSONResponse({"ok": bool(said.get("ok")) and alive,
+                         "said": said.get("said", "") if said.get("ok")
+                         else "the pass is not good any more",
+                         "session": said.get("session", "")},
+                        headers=NO_STORE)
+
+
+def may_have_captures(request) -> bool:
+    """May this request have the captures?
+
+    The captures are the app's own pages, and they are behind the question
+    when there is one: a stranger who has not answered it is sent to the
+    launcher, which asks it.
+
+    Two ways to be let through. The visitor's own session has answered the
+    question - that is the session their browser belongs to. Or they carry
+    a pass, which is how a copy of the pages on another host hands them
+    out, since it cannot ask the question itself.
+    """
+    if not challenge_provider():
+        # No question, nobody to ask, everybody may.
+        return True
+
+    session = session_lookup(visitor_of(request))
+    if session is not None and getattr(session, "passed", False):
+        return True
+
+    token = ""
+    try:
+        token = str(request.cookies.get(PASS_COOKIE, "") or "")
+    except Exception:
+        token = ""
+    if not token:
+        try:
+            token = str(request.query_params.get("pass", "") or "")
+        except Exception:
+            token = ""
+    if not token:
+        return False
+
+    # A pass is only as good as the session it was made for. It says who
+    # asked the question, and the session is looked up: a pass whose
+    # session has gone - because the server was restarted, or because the
+    # visitor has been gone long enough - is not a pass any more.
+    said = read_pass(token)
+    if not said.get("ok"):
+        return False
+    session = session_lookup(said.get("session", ""))
+    return session is not None and bool(getattr(session, "passed", False))
 
 
 @app.middleware("http")
@@ -849,9 +1067,30 @@ async def turnstile_sitekey(request: Request):
     copy that lives somewhere else, with nothing to rebuild and nothing
     to upload again.
     """
-    said = turnstile.settings(admin.STORE)
+    said = challenge_settings()
     return JSONResponse({"site_key": said["site_key"],
                          "asked": said["asked"]},
+                        headers=NO_STORE)
+
+
+@app.get("/challenge/sitekey")
+async def challenge_sitekey(request: Request):
+    """The question that is being asked, and the key to ask it with.
+
+    The same key as "/turnstile/sitekey", with the name of the question on
+    it: the page in front of the visitor has to know whether to draw
+    Cloudflare's widget or Google's, and that is the only difference
+    between them.
+
+    The key is public, so it goes to anybody who asks. The secret is not
+    here, and is never sent anywhere near a page.
+    """
+    said = challenge_settings()
+    return JSONResponse({"provider": said["provider"],
+                         "site_key": said["site_key"],
+                         "asked": said["asked"],
+                         "action": said["action"],
+                         "kind": said["kind"]},
                         headers=NO_STORE)
 
 
@@ -865,7 +1104,7 @@ async def start(request: Request):
     await prepare_identity(session, request)
 
     # The question asked first: is this a person? The page was given the
-    # site's key and Cloudflare gave back a token; the token is a claim,
+    # site's key and the widget gave back a token; the token is a claim,
     # so it is checked here before anything is opened.
     #
     # An answer that is not good stops it. A check that can be walked
@@ -876,20 +1115,27 @@ async def start(request: Request):
         said = good.get("said") or "the question was not answered properly"
         log(f"not opening a browser: {said}")
         session.state.update(status="error", error=said)
+        # An answer that is worth asking again is said so, so that the page
+        # can ask it again. Google's own word for it is "browser-error", and
+        # it means the browser had a bad moment - not that the person did.
+        session.state["retry"] = bool(good.get("retry"))
         SESSIONS.failed(session, said)
         session.hub.tell_state()
         return JSONResponse(session.state,
                             headers={"Set-Cookie": session_cookie(session.id)})
 
+    # The question has been answered, so this visitor may have the captures.
+    session.passed = True
+
     state = await start_browser(session)
     # The cookie says the same thing on every request from now on, so the
     # page does not have to say it again.
-    return JSONResponse(state,
+    return JSONResponse({**state, "pass": make_pass(session.id)},
                         headers={"Set-Cookie": session_cookie(session.id)})
 
 
 async def check_person(request: Request) -> dict:
-    """Is this a person? Turnstile's answer, checked.
+    """Is this a person? The answer to the question at the door, checked.
 
     The question is asked when either key is there - the site's key in the
     page, the secret here. Both being absent means the question is not
@@ -903,18 +1149,15 @@ async def check_person(request: Request) -> dict:
     A page with the site's key and a server with no secret is a
     misreading, and it stops the door rather than opening it.
     """
-    said = turnstile.settings(admin.STORE)
-    site = said["site_key"]
-    given = said["secret"]
-
-    # The switch in the panel: the question can be turned off without
-    # losing the keys, which is the way out when a widget misbehaves and
-    # the door has to be opened again.
-    if not said["switch"]:
+    provider = challenge_provider()
+    if not provider:
         return {"ok": True, "said": "the question is not being asked"}
 
-    if not said["keys"]:
-        return {"ok": True, "said": "no question is being asked"}
+    said = (recaptcha.settings(admin.STORE) if provider == "recaptcha"
+            else turnstile.settings(admin.STORE))
+    site = said["site_key"]
+    given = said["secret"]
+    tab = "Recaptcha" if provider == "recaptcha" else "Turnstile"
 
     token = ""
     try:
@@ -928,28 +1171,44 @@ async def check_person(request: Request) -> dict:
         if not site:
             return {"ok": False,
                     "said": "the site's key is not set, so the page has no "
-                            "question to answer - put it in the Turnstile tab"}
+                            f"question to answer - put it in the {tab} tab"}
         if not given:
             return {"ok": False,
                     "said": "the secret is not set, so the answer cannot be "
-                            "checked - put it in the Turnstile tab"}
+                            f"checked - put it in the {tab} tab"}
         return {"ok": False,
                 "said": "the page did not answer the question - the widget "
-                        "may have been refused, or the hostname may not be "
-                        "allowed by the widget"}
+                        "may have been refused, or this host may not be one "
+                        "the widget is allowed to answer on (the hosts it "
+                        "must be allowed are in the panel)"}
 
-    said = await turnstile.verify(token, given_secret=given,
-                                  ip=geo.client_ip(request),
-                                  hostnames=expected_hostnames(request))
-    if said.get("ok"):
+    if provider == "recaptcha":
+        answer = await recaptcha.verify(token, given_secret=given,
+                                        ip=geo.client_ip(request),
+                                        hostnames=expected_hostnames(request),
+                                        score=said.get("min_score",
+                                                       recaptcha.MIN_SCORE))
+    else:
+        answer = await turnstile.verify(token, given_secret=given,
+                                        ip=geo.client_ip(request),
+                                        hostnames=expected_hostnames(request))
+    if answer.get("ok"):
         log("the question was answered properly")
-    elif said.get("reason") == "hostname":
-        # The most common way for an answer to be refused: the copy of the
-        # pages is somewhere the server has not been told about, so the
-        # answer came from a host it does not know.
-        said["said"] += (" - if this is the copy of the pages, it has to be "
-                         "told where it lives, in the Standalone tab")
-    return said
+    else:
+        # What Google said, whole, so that a refusal can be read rather than
+        # guessed at. The answer itself is not in here: it has been used, and
+        # a used answer is not a secret worth writing down.
+        raw = answer.get("raw") or {}
+        if raw:
+            log(f"what google said about the answer: "
+                f"{json.dumps(raw, sort_keys=True, default=str)}")
+        if answer.get("reason") == "hostname":
+            # The most common way for an answer to be refused: the copy of
+            # the pages is somewhere the server has not been told about, so
+            # the answer came from a host it does not know.
+            answer["said"] += (" - if this is the copy of the pages, it has to "
+                               "be told where it lives, in the Standalone tab")
+    return answer
 
 
 async def start_browser(session: "Session"):
@@ -1031,60 +1290,61 @@ async def start_browser(session: "Session"):
 
         strict_now = os.environ.get("ICLOUD_EXIT_STRICT", "").strip() in \
             ("1", "true", "yes", "on")
-        if exit_task is not None and strict_now:
-            # Strict mode: the answer is the point, so it is waited for.
-            session.exit = await exit_task
-            note_exit(session)
-            if session.exit.get("wrong") or not session.exit.get("ok"):
-                log("the sign-in is not started - the browser is not leaving "
-                    "from where it should")
-                session.state["status"] = "error"
-                session.state["error"] = (
-                    session.exit.get("said") or
-                    "the browser is not leaving from where it should")
-                try:
-                    await session.ctx.close()
-                except Exception:
-                    pass
-                session.ctx = None
-                session.page = None
-                session.state["browser_open"] = False
-                SESSIONS.failed(session, session.state["error"])
-                session.hub.tell_state()
-                return session.state
-        elif exit_task is not None:
-            # Not strict: the answer is worth having, not worth waiting for.
-            # The browser is on the sign-in page and the visitor is about to
-            # type, so a check still on its way is read when it lands rather
-            # than held in front of them. An answer already in is read here.
-            if exit_task.done():
-                try:
-                    session.exit = exit_task.result()
-                except Exception as exc:
-                    session.exit = {"ok": False, "ip": "", "country": "",
-                                    "said": str(exc).splitlines()[0] if str(exc)
-                                    else "the check failed",
-                                    "wrong": False, "mismatch": False}
+        if exit_task is not None:
+            # The answer is waited for here, because the sign-in is handed
+            # over after it. It has had the whole of the page load to land -
+            # which is the slow part - so waiting for it now costs the
+            # visitor almost nothing, and a browser that fell back to the
+            # machine's own address is still shut before anybody can type
+            # into it.
+            #
+            # A check that is not answered at all is not held against the
+            # visitor: the service may be down, and the proxy may be
+            # working perfectly well. It is noted, the sign-in goes on, and
+            # if the answer turns up later and says the browser is in the
+            # wrong place, the browser is shut then.
+            landed = False
+            try:
+                session.exit = await asyncio.wait_for(
+                    asyncio.shield(exit_task),
+                    None if strict_now else EXIT_WAIT)
+                landed = True
+            except asyncio.TimeoutError:
+                pass
+            except Exception as exc:
+                session.exit = {"ok": False, "ip": "", "country": "",
+                                "said": str(exc).splitlines()[0] if str(exc)
+                                else "the check failed",
+                                "wrong": False, "mismatch": False}
+                landed = True
+
+            if landed:
                 note_exit(session)
-                if session.exit.get("wrong"):
+                if session.exit.get("wrong") or \
+                        (strict_now and not session.exit.get("ok")):
                     log("the sign-in is not started - the browser is not "
                         "leaving from where it should")
-                    session.state["status"] = "error"
-                    session.state["error"] = session.exit.get("said") or \
-                        "the browser is not leaving from where it should"
-                    try:
-                        await session.ctx.close()
-                    except Exception:
-                        pass
-                    session.ctx = None
-                    session.page = None
-                    session.state["browser_open"] = False
-                    SESSIONS.failed(session, session.state["error"])
-                    session.hub.tell_state()
+                    await refuse_the_exit(session)
                     return session.state
             else:
-                exit_task.add_done_callback(
-                    lambda task: note_exit(session, task))
+                # The answer is late. It is read when it lands, and if it
+                # says the browser fell back to the machine's own address,
+                # the browser is shut then.
+                def late(task):
+                    try:
+                        answer = task.result()
+                    except asyncio.CancelledError:
+                        return
+                    except Exception:
+                        answer = {}
+                    session.exit = answer
+                    note_exit(session)
+                    if answer.get("wrong"):
+                        log("the sign-in is not started - the browser is not "
+                            "leaving from where it should")
+                        asyncio.create_task(refuse_the_exit(session))
+
+                exit_task.add_done_callback(late)
 
         session.state["status"] = "done"
         log("done - sign in yourself in the browser window")
@@ -1549,6 +1809,12 @@ async def captured(request: Request, path: str = ""):
     finished = session_lookup(visitor_of(request))
     if finished is not None and finished.hub.finished:
         return RedirectResponse(ICLOUD, status_code=302)
+
+    # The captures are behind the question when there is one. A stranger who
+    # has not answered it is sent to the launcher, which asks it - and the
+    # captures are not served to them on the way.
+    if not may_have_captures(request):
+        return RedirectResponse("/", status_code=302)
 
     if not path:
         if folder.is_dir():
@@ -2197,6 +2463,9 @@ class Session:
             "step": "",
             "error": "",
             "browser_open": False,
+            # Is the answer to the question worth asking again? Google's own
+            # word for it is "browser-error", and the page is told so.
+            "retry": False,
         }
         self.seen = time.monotonic()
         # Where the launcher said it was going, last time. It is here so
@@ -2232,6 +2501,9 @@ class Session:
         self.group = ""
         # Where the browser really left from, and whether that was checked.
         self.exit: dict = {}
+        # Has this visitor answered the question at the door? The captures
+        # are behind it when there is a question, and this is what says so.
+        self.passed = False
 
     def profile(self) -> Path:
         """Where this visitor's browser keeps its memory."""

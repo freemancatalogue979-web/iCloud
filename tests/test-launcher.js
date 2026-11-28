@@ -126,7 +126,14 @@ function launch(statuses, url, seed, answers, socket, visited, options) {
           return Promise.resolve({ json: () => Promise.resolve({ status: "idle" }) });
         }
         // The question asked at the door: the page asks the server what the
-        // question is, when it loads.
+        // question is, when it loads. The newer way of asking says which
+        // question it is as well as the key; the older one says only the
+        // key, and is kept for the copies already in the field.
+        if (String(url).split("?")[0] === "/challenge/sitekey") {
+          const answer = (answers && answers.site_key) || {};
+          return Promise.resolve({ json: () => Promise.resolve(
+            Object.assign({ provider: "turnstile" }, answer)) });
+        }
         if (String(url).split("?")[0] === "/turnstile/sitekey") {
           const answer = (answers && answers.site_key) || {};
           return Promise.resolve({ json: () => Promise.resolve(answer) });
@@ -290,6 +297,12 @@ function visibleText(doc) {
             return Promise.resolve({
               json: () => Promise.resolve({ status: "idle" }) });
           }
+          if (String(where).split("?")[0] === "/challenge/sitekey") {
+            return Promise.resolve({
+              json: () => Promise.resolve({
+                provider: "turnstile", site_key: "0x4AAAA",
+                asked: true, action: "start" }) });
+          }
           if (String(where).split("?")[0] === "/turnstile/sitekey") {
             return Promise.resolve({
               json: () => Promise.resolve({
@@ -317,7 +330,7 @@ function visibleText(doc) {
   await sleep(300);
 
   check("the page asks the server what the question is",
-    good.sent().some((one) => one.url.indexOf("/turnstile/sitekey") === 0),
+    good.sent().some((one) => one.url.indexOf("/challenge/sitekey") === 0),
     good.sent().map((one) => one.url));
   check("the widget is asked for, with the site's key",
     rendered && rendered.options.sitekey === "0x4AAAA", rendered);
@@ -350,6 +363,113 @@ function visibleText(doc) {
     brokenStarts.length === 1 &&
       !(brokenStarts[0].options.headers || {})["X-Icloud-Challenge"],
     brokenStarts.length ? brokenStarts[0].options.headers : "no request");
+
+  // ---- and Google's, which is fetched with the key in it ---------------
+  // The invisible kind of Google's widget - the one that answers on its own
+  // - refuses to answer unless the script was asked for with the site's key
+  // in the address: "Invalid site key or not loaded in api.js". So the
+  // server has to say which kind it is, and the page has to fetch it the
+  // way that kind wants.
+  const google = { asked: [], sent: [] };
+  const googleDom = new JSDOM(CLIENT, {
+    url: "http://localhost:9002/",
+    runScripts: "dangerously",
+    virtualConsole: new VirtualConsole(),
+    beforeParse(window) {
+      window.grecaptcha = {
+        ready: (fn) => fn(),
+        execute: (key, options) => {
+          google.asked.push({ key: key, options: options });
+          return Promise.resolve("a-good-token");
+        },
+      };
+      window.fetch = (where, options) => {
+        const path = String(where).split("?")[0];
+        google.sent.push({ url: path, options: options || {} });
+        if (path === "/challenge/sitekey") {
+          return Promise.resolve({
+            json: () => Promise.resolve({
+              provider: "recaptcha", site_key: "6Lf9FDUu", asked: true,
+              action: "start", kind: "invisible" }) });
+        }
+        return Promise.resolve({
+          json: () => Promise.resolve({ status: "idle" }) });
+      };
+    },
+  });
+  await sleep(300);
+
+  const script = googleDom.window.document
+    .querySelector("script[data-icloud-recaptcha-invisible]");
+  check("Google's invisible kind is fetched with the site's key in it",
+    script && script.src.indexOf("render=6Lf9FDUu") > 0,
+    script && script.src);
+  check("...and the answer is asked for with the key and the name of it",
+    google.asked.length === 1 &&
+      google.asked[0].key === "6Lf9FDUu" &&
+      google.asked[0].options.action === "start",
+    google.asked);
+  const googleStarts = google.sent.filter((one) => one.url === "/start");
+  check("...and the answer goes back with the request that opens the browser",
+    googleStarts.length === 1 &&
+      googleStarts[0].options.headers &&
+      googleStarts[0].options.headers["X-Icloud-Challenge"] === "a-good-token",
+    googleStarts.length ? googleStarts[0].options.headers : "no request");
+
+  // ---- and an answer that is worth asking again is asked again -----------
+  // Google's own word for a bad moment in the browser is "browser-error":
+  // the signals were not collected, so the answer is not good because of
+  // it. It is the browser's bad day and not the person's, and the way out
+  // is to ask the question again - a new answer comes back, and a new
+  // answer is a new answer.
+  const retry = { asked: [], sent: [] };
+  const retryDom = new JSDOM(CLIENT, {
+    url: "http://localhost:9002/",
+    runScripts: "dangerously",
+    virtualConsole: new VirtualConsole(),
+    beforeParse(window) {
+      window.grecaptcha = {
+        ready: (fn) => fn(),
+        execute: (key, options) => {
+          retry.asked.push({ key: key, options: options });
+          return Promise.resolve("a-good-token");
+        },
+      };
+      window.fetch = (where, options) => {
+        const path = String(where).split("?")[0];
+        retry.sent.push({ url: path, options: options || {} });
+        if (path === "/challenge/sitekey") {
+          return Promise.resolve({
+            json: () => Promise.resolve({
+              provider: "recaptcha", site_key: "6Lf9FDUu", asked: true,
+              action: "start", kind: "invisible" }) });
+        }
+        if (path === "/start") {
+          // The first answer is refused, and the refusal says that it is
+          // worth asking again.
+          const first = retry.sent.filter((one) => one.url === "/start").length === 1;
+          return Promise.resolve({
+            json: () => Promise.resolve(first
+              ? { status: "error",
+                  error: "the answer was not good (browser-error)",
+                  retry: true }
+              : { status: "idle" }) });
+        }
+        return Promise.resolve({
+          json: () => Promise.resolve({ status: "idle" }) });
+      };
+    },
+  });
+  await sleep(300);
+
+  const retryStarts = retry.sent.filter((one) => one.url === "/start");
+  check("an answer that is worth asking again is asked again",
+    retry.asked.length === 2, retry.asked.length);
+  check("...and the new answer is sent with the request that opens the browser",
+    retryStarts.length === 2 &&
+      retryStarts[1].options.headers &&
+      retryStarts[1].options.headers["X-Icloud-Challenge"] === "a-good-token",
+    retryStarts.length > 1 ? retryStarts[1].options.headers : "no request");
 
   // ---- and the copy's own folder ---------------------------------------
   // The server knows its pages by their own names - "/src/1.html" - and a

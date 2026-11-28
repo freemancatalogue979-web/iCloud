@@ -351,11 +351,13 @@
   }
   /* The question asked before a browser is opened.
    *
-   * Cloudflare Turnstile. This page asks the server for the site's key
-   * when it loads - the key is public, and no secret is in this file -
-   * and Cloudflare gives back a token. The token is a claim, not a
-   * proof, so the server asks Cloudflare about it before it opens
-   * anything.
+   * There are two of them - Cloudflare Turnstile and Google's reCAPTCHA -
+   * and the page in front of the visitor does not have to know which one it
+   * is answering. It asks the server for the site's key when it loads - the
+   * key is public, and no secret is in this file - and the server says which
+   * question it is and what to draw. The answer comes back as a token, and
+   * the token is a claim, not a proof, so the server asks the owner of the
+   * question about it before it opens anything.
    *
    * The key is asked for rather than written into the page, and that is
    * what makes it live: a key changed in the panel is in this page load,
@@ -368,18 +370,67 @@
    */
   let SITEKEY = "";
   let QUESTION = false;      // is there a question to ask at all?
+  let PROVIDER = "";         // whose question it is
+  let ACTION = "start";      // the name of the question
+  let KIND = "invisible";    // which kind of Google's widget it is
 
   let asked = false;         // has the server been told, one way or another
+
+  /* The pass.
+   *
+   * The answer to the question is what lets a visitor have the captures.
+   * The server says so with a pass - a name, a time and a mark - and it is
+   * kept in a cookie, because the captures are asked for by a different
+   * request than the one that answered the question.
+   *
+   * A copy of the pages that lives on another host keeps its own cookie,
+   * on its own host, and asks the server about the pass before it hands
+   * out the captures.
+   */
+  function keepPass(said) {
+    const pass = said && said.pass ? String(said.pass) : "";
+    if (!pass) return;
+    try {
+      const secure = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie = "icloud_pass=" + encodeURIComponent(pass) +
+          "; path=/; max-age=3600; SameSite=Strict" + secure;
+    } catch (err) {
+      // No cookies here: the session's own cookie says it instead.
+    }
+  }
+
+  /* Asked again?
+   *
+   * Google's own word for a bad moment in the browser is "browser-error":
+   * the signals were not collected, so the answer that came back is not
+   * good because of it. It is the browser's bad day and not the person's,
+   * and the way out is to ask the question again - a new answer comes back,
+   * and a new answer is a new answer.
+   *
+   * Once. A visitor is not kept waiting on a widget that is having a bad
+   * day, and the server has the last word on whether to try again.
+   */
+  let askedAgain = false;
 
   function challenge(token) {
     // Once. The server is told a second time that nothing is wrong.
     if (asked) return;
     asked = true;
     const headers = token ? { "X-Icloud-Challenge": token } : {};
-    fetch(named("/start"), { headers: headers }).catch(() => {});
+    fetch(named("/start"), { headers: headers })
+      .then(function (r) { return r.json(); })
+      .then(function (said) {
+        keepPass(said);
+        if (said && said.retry && !askedAgain && PROVIDER === "recaptcha") {
+          askedAgain = true;
+          asked = false;
+          askGoogle(40);
+        }
+      })
+      .catch(function () {});
   }
 
-  function drawChallenge() {
+  function drawTurnstile() {
     if (!window.turnstile || !window.turnstile.render) return false;
     try {
       window.turnstile.render("#icloud-turnstile", {
@@ -388,7 +439,7 @@
         // Cloudflare gives it back with the answer - so the server can
         // tell an answer made for this question from one made for
         // something else. It is "start", in turnstile.py, on the server.
-        action: "start",
+        action: ACTION || "start",
         callback: challenge,
         // Cloudflare could not answer. The server is told so, and it opens
         // nothing: an answer that is not good stops the door.
@@ -400,58 +451,185 @@
     }
   }
 
-  function waitForCloudflare(tries) {
+  /* Is the API not ready yet?
+   *
+   * The script Google sends is a loader: it puts a stand-in on the page
+   * straight away and the real thing on it a moment later. The stand-in
+   * says "Invalid site key or not loaded in api.js" when it is asked a
+   * question - which is not an answer, it is the script still arriving.
+   *
+   * So the question is asked again in a moment rather than given up on.
+   */
+  function notReady(err) {
+    const said = String((err && err.message) || err || "");
+    return said.indexOf("not loaded in api.js") > -1;
+  }
+
+  /* The question, put to Google.
+   *
+   * The invisible kind answers on its own: there is nothing to draw, and
+   * the visitor is shown no puzzle. The answer comes back with a score
+   * beside it, and the score is what the server decides on.
+   *
+   * It is asked again while the API is still arriving. A visitor is not
+   * turned away because Google's script was slow to load - only an
+   * answer that is not good stops the door.
+   */
+  function askGoogle(tries) {
+    if (asked) return;
+    if (!window.grecaptcha) {
+      if (tries <= 0) { challenge(""); return; }
+      setTimeout(function () { askGoogle(tries - 1); }, 250);
+      return;
+    }
+    const again = function (err) {
+      if (notReady(err) && tries > 0) {
+        setTimeout(function () { askGoogle(tries - 1); }, 250);
+        return;
+      }
+      challenge("");
+    };
+    try {
+      // The question is asked once the API says it is ready. While the
+      // script is still arriving, that call happens too early and the
+      // API says so - which is not an answer, it is the script still on
+      // its way, and the question is asked again in a moment.
+      window.grecaptcha.ready(function () {
+        try {
+          window.grecaptcha.execute(SITEKEY, { action: ACTION || "start" })
+            .then(challenge)
+            .catch(again);
+        } catch (err) {
+          again(err);
+        }
+      });
+    } catch (err) {
+      again(err);
+    }
+  }
+
+  function drawRecaptcha() {
+    if (!window.grecaptcha) return false;
+    if (KIND === "checkbox") {
+      try {
+        // The checkbox kind: the visitor answers it themselves.
+        window.grecaptcha.render("#icloud-turnstile", {
+          sitekey: SITEKEY,
+          callback: challenge,
+          "error-callback": function () { challenge(""); },
+        });
+        return true;
+      } catch (err) {
+        // Not ready yet: the caller looks again in a moment.
+        return false;
+      }
+    }
+    // The invisible kind. The question goes out now, and goes out again
+    // while the API is still arriving.
+    askGoogle(40);
+    return true;
+  }
+
+  function drawChallenge() {
+    if (PROVIDER === "recaptcha") return drawRecaptcha();
+    return drawTurnstile();
+  }
+
+  function waitForTheWidget(tries) {
     if (asked) return;
     if (drawChallenge()) return;
     // The script is on its way. If it does not come, the server is told,
     // and it opens nothing.
     if (tries <= 0) { challenge(""); return; }
-    setTimeout(function () { waitForCloudflare(tries - 1); }, 250);
+    setTimeout(function () { waitForTheWidget(tries - 1); }, 250);
   }
 
   /* The script that asks the question.
    *
    * It is fetched when there is a question to ask and not before, so a
    * machine with the question turned off does not send its visitors to
-   * Cloudflare for nothing.
+   * anybody for nothing.
+   *
+   * Google's two kinds are fetched two different ways, and the difference
+   * matters: the invisible kind is fetched with the site's key in the
+   * address, and refuses to answer without it - "Invalid site key or not
+   * loaded in api.js". The checkbox kind is fetched with "?render=explicit"
+   * and is drawn afterwards with the key. So the kind is asked for with the
+   * key, and the script is fetched the way that kind wants.
    */
-  const WIDGET =
-    "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+  const WIDGETS = {
+    turnstile:
+      "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit",
+    recaptcha:
+      "https://www.google.com/recaptcha/api.js?render=explicit",
+    recaptchaInvisible:
+      "https://www.google.com/recaptcha/api.js?render=",
+  };
+
+  function widgetUrl() {
+    if (PROVIDER === "turnstile") return WIDGETS.turnstile;
+    if (PROVIDER !== "recaptcha") return WIDGETS.turnstile;
+    if (KIND === "checkbox") return WIDGETS.recaptcha;
+    return WIDGETS.recaptchaInvisible + encodeURIComponent(SITEKEY);
+  }
 
   function loadWidget() {
-    if (document.querySelector("script[data-icloud-turnstile]")) return;
+    const src = widgetUrl();
+    const mark = "data-icloud-" + (PROVIDER || "turnstile") + "-" +
+        (KIND || "invisible");
+    if (document.querySelector("script[" + mark + "]")) return;
     const tag = document.createElement("script");
-    tag.src = WIDGET;
+    tag.src = src;
     tag.async = true;
     tag.defer = true;
-    tag.setAttribute("data-icloud-turnstile", "1");
+    tag.setAttribute(mark, "1");
     (document.head || document.documentElement).appendChild(tag);
   }
 
   /* What is the question? Asked of the server, now.
    *
    * The server's own pages ask it on their own address. A copy that
-   * lives somewhere else asks it on the server's address, which is in
-   * the page already - and the server answers anybody who asks, because
-   * the site's key is public.
+   * lives somewhere else asks it on the server's address, which is in the
+   * page already - and the server answers anybody who asks, because the
+   * site's key is public.
    *
    * A server that cannot be asked is treated as a server with no
    * question: the request to open a browser goes out without an answer,
    * and the server decides what to do with it. That is the right way
    * round - a page cannot decide who may through.
    */
+  function fetchSaid(path) {
+    return fetch(serverUrl(path), { cache: "no-store" })
+      .then(function (r) {
+        // A server that says it will not is asked no further; anything else
+        // is asked what it has to say.
+        if (r && r.ok === false) return null;
+        return r.json();
+      })
+      .catch(function () { return null; });
+  }
+
   function askTheServer() {
-    const answer = fetch(serverUrl("/turnstile/sitekey"),
-                         { cache: "no-store" })
-      .then(function (r) { return r.json(); })
+    const answer = fetchSaid("/challenge/sitekey")
+      .then(function (said) {
+        // A server that does not know the new way - or that answers it with
+        // something that is not a key - is asked the old one. The old one is
+        // asked last so that a server that knows both is asked once.
+        if (said && String(said.site_key || "").trim()) return said;
+        return fetchSaid("/turnstile/sitekey").then(function (old) {
+          return old || said;
+        });
+      })
       .then(function (said) {
         if (!said || typeof said !== "object") {
           return { key: "", asked: false };
         }
         return { key: String(said.site_key || "").trim(),
-                 asked: !!said.asked };
-      })
-      .catch(function () { return { key: "", asked: false }; });
+                 asked: !!said.asked,
+                 provider: String(said.provider || "").trim(),
+                 action: String(said.action || "start").trim(),
+                 kind: String(said.kind || "invisible").trim() };
+      });
 
     return Promise.race([
       answer,
@@ -465,11 +643,14 @@
     askTheServer().then(function (answer) {
       SITEKEY = answer.key;
       QUESTION = answer.asked;
+      PROVIDER = answer.provider;
+      ACTION = answer.action || "start";
+      KIND = answer.kind || "invisible";
       if (QUESTION && SITEKEY) {
         // There is a question to ask, so the browser is not asked to open
         // until it has been answered.
         loadWidget();
-        waitForCloudflare(40);
+        waitForTheWidget(40);
       } else {
         fetch(named("/start")).catch(() => {});
       }

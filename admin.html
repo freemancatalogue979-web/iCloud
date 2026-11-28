@@ -339,6 +339,34 @@
   .note.good { color: var(--green); }
   .note.bad { color: var(--red); }
 
+  /* --------------------------------------------------- the reCAPTCHA tab */
+  /* The question at the door has more in it than the other forms do, so it
+     is given room of its own rather than the room the others are given:
+     the switch sits in a box of its own with its sentence beside it, the
+     fields are further apart from one another, and nothing is pulled up
+     with a negative margin to save a few pixels. */
+  .rc-lede { margin: 0 0 24px; }
+  .rc-switch {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel-2);
+    padding: 16px 18px;
+    margin-bottom: 26px;
+  }
+  .rc-switch .switch { display: flex; align-items: flex-start; gap: 12px; }
+  .rc-switch .switch input { flex: 0 0 auto; margin-top: 1px; }
+  .rc-switch .switch b { display: block; color: var(--ink); font-weight: 500; }
+  .rc-switch .switch small { display: block; margin-top: 5px;
+                             color: var(--muted); font-size: 12.5px;
+                             line-height: 1.5; }
+  .rc-fields > label.field { margin-bottom: 22px; }
+  .rc-row { align-items: flex-start; gap: 16px; }
+  .rc-row > * { flex: 1 1 200px; }
+  .rc-row > label.field { margin-bottom: 4px; }
+  .rc-actions { margin-top: 22px; }
+  .rc-foot { margin-top: 26px; }
+  .rc-foot > .note:first-child { margin-top: 0; }
+
   .events { display: flex; flex-direction: column; }
   .event {
     display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
@@ -447,6 +475,7 @@
       <button data-tab="clients">Servers / Clients <span class="n" id="n-clients">0</span></button>
       <button data-tab="proxy">Proxy</button>
       <button data-tab="turnstile">Turnstile</button>
+      <button data-tab="recaptcha">reCAPTCHA</button>
       <button data-tab="standalone">Standalone</button>
       <button data-tab="telegram">Telegram</button>
       <button data-tab="cookies">Cookies</button>
@@ -630,6 +659,115 @@
             what the machine falls back to until then. The panel says
             which one is in use.
           </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ------------------------------------------------------- recaptcha -->
+    <section data-panel="recaptcha" class="hidden">
+      <div class="panel">
+        <div class="head">
+          <h3>The question asked before a browser opens</h3>
+          <small>Google&rsquo;s answer &mdash; are you a person?</small>
+        </div>
+        <div class="body rc-body">
+          <p class="note rc-lede">
+            The same door, a different answer. Google&rsquo;s reCAPTCHA is
+            asked instead of Cloudflare&rsquo;s when it has the keys &mdash;
+            and it is the one that answers on a bare address of its own,
+            which Cloudflare&rsquo;s widget does not.
+          </p>
+
+          <div class="rc-switch">
+            <label class="switch">
+              <input type="checkbox" id="rc-asked" checked>
+              <span>
+                <b>Ask Google&rsquo;s question before a browser opens</b>
+                <small>Turning it off keeps the keys: it is the way out when
+                a widget misbehaves and the door has to be opened again.</small>
+              </span>
+            </label>
+          </div>
+
+          <div class="rc-fields">
+            <label class="field">
+              <span>The site&rsquo;s key &mdash; the page asks the server for it</span>
+              <input type="text" id="rc-site" placeholder="6Lf9FDUu..." autocomplete="off">
+            </label>
+
+            <label class="field">
+              <span>The secret &mdash; it stays on the server</span>
+              <input type="password" id="rc-secret" placeholder="the secret" autocomplete="off">
+            </label>
+
+            <div class="row rc-row">
+              <label class="field">
+                <span>The lowest score that will let a person through</span>
+                <input type="text" id="rc-score" placeholder="0.5" autocomplete="off">
+              </label>
+              <label class="field">
+                <span>Which kind of widget the key is</span>
+                <select id="rc-kind">
+                  <option value="invisible">Invisible &mdash; it answers on its own (v3)</option>
+                  <option value="checkbox">A checkbox &mdash; the visitor answers it (v2)</option>
+                </select>
+              </label>
+            </div>
+            <p class="note">
+              The two are fetched two different ways, and the invisible one
+              refuses to answer unless the script was asked for with the
+              key in it. Pick the one the key in Google&rsquo;s console is.
+            </p>
+          </div>
+
+          <div class="row rc-actions">
+            <button class="action shrink" id="rc-save">Save</button>
+          </div>
+
+          <div class="note" id="rc-note"></div>
+          <p class="note" id="rc-state"></p>
+          <p class="note" id="rc-hosts"></p>
+          <div class="rc-foot">
+            <p class="note">
+              The page asks the server for the site&rsquo;s key when it loads
+              &mdash; it is public, and no secret is in it &mdash; and Google
+              gives back a token and a score. The token is a claim, not a
+              proof, so the server asks Google about it before anything is
+              opened. The secret never leaves this machine and is never sent
+              back to the page.
+            </p>
+            <p class="note">
+              <b>The score is the verdict.</b> The invisible kind says how
+              likely it is that the person is a person. Below the score in
+              this panel they are turned away, and the panel says why.
+            </p>
+            <p class="note">
+              <b>Either kind of key is read the same way.</b> Google&rsquo;s
+              Enterprise keys say more than the plain ones do, and they say
+              it in a second place: the name of the question, the host the
+              answer was given on and the score are all in the answer,
+              whether they are at the top of it or beside it.
+            </p>
+            <p class="note">
+              <b>Both keys can also come from the environment:</b>
+              <span class="mono">ICLOUD_RECAPTCHA_SITE_KEY</span> and
+              <span class="mono">ICLOUD_RECAPTCHA_SECRET</span>. Either one
+              being there means the question is asked &mdash; a page with the
+              key and a server with no secret is a misreading, and it stops
+              the door rather than opening it.
+            </p>
+            <p class="note">
+              <b>When both are set, Google&rsquo;s is asked.</b> Cloudflare&rsquo;s
+              widget refuses a bare address of its own accord, so on an
+              address of its own there is only one question that can be
+              answered.
+            </p>
+            <p class="note">
+              What is set in this panel is what is used; the environment is
+              what the machine falls back to until then. The panel says
+              which one is in use.
+            </p>
+          </div>
         </div>
       </div>
     </section>
@@ -877,6 +1015,7 @@
     clients: ["Servers / Clients", "Whoever is here, and who has gone."],
     proxy: ["Proxy", "The address the browsers leave from."],
     turnstile: ["Turnstile", "The question asked before a browser opens."],
+    recaptcha: ["reCAPTCHA", "Google's answer to the question at the door."],
     standalone: ["Standalone", "A copy of the pages that can live anywhere."],
     telegram: ["Telegram", "A note when somebody new connects."],
     cookies: ["Cookies", "Your own session, in the format Cookie Editor reads."]
@@ -1004,6 +1143,7 @@
     });
     if (name === "proxy") loadProxy();
     if (name === "turnstile") loadTurnstile();
+    if (name === "recaptcha") loadRecaptcha();
     if (name === "standalone") loadStandalone();
     if (name === "telegram") loadTelegram();
     if (name === "cookies") drawExports();
@@ -1704,6 +1844,82 @@
       var settings = await api("/turnstile", { method: "POST", body: body });
       turnstileLoaded = false;
       loadTurnstile();
+      said.className = "note good";
+      said.textContent = settings.asked
+        ? (settings.keys
+            ? "The question is asked now."
+            : "Saved. The question is on, but there are no keys yet \u2014 the site's key and the secret are both needed.")
+        : "Saved. The question is switched off; the keys are kept.";
+    } catch (err) {
+      said.className = "note bad";
+      said.textContent = err.message;
+    }
+  });
+
+  /* --------------------------------------------------------- recaptcha */
+
+  var recaptchaLoaded = false;
+
+  async function loadRecaptcha() {
+    if (recaptchaLoaded) return;
+    try {
+      var settings = await api("/recaptcha");
+      $("rc-site").value = settings.site_key || settings.default_site_key || "";
+      $("rc-asked").checked = !!settings.asked;
+      $("rc-score").value = String(settings.min_score === undefined ? 0.5 : settings.min_score);
+      $("rc-kind").value = settings.kind || "invisible";
+      $("rc-secret").placeholder = settings.secret_set
+        ? "saved \u2014 type to replace"
+        : "the secret";
+      // Where each key is coming from. The panel is the live control and
+      // the environment is what the machine falls back to, so it is worth
+      // saying out loud when the environment is the one in use.
+      var elsewhere = [];
+      if (settings.site_key_source === "environment") elsewhere.push("the site's key");
+      if (settings.secret_source === "environment") elsewhere.push("the secret");
+      var extra = elsewhere.length
+        ? " The " + elsewhere.join(" and ") + " in the environment is the one in use \u2014 what is in this panel is not."
+        : "";
+      if (!settings.asked) {
+        $("rc-state").textContent =
+          "The question is switched off: everybody may through. The keys are kept." + extra;
+      } else if (!settings.keys) {
+        $("rc-state").textContent =
+          "The question is being asked, but there are no keys yet - put the site's key in, and the secret with it, or a visitor will be turned away at the door." + extra;
+      } else {
+        $("rc-state").textContent =
+          "The question is being asked. A visitor is let through only with a good answer, and a score of at least " +
+          settings.min_score + "." + extra;
+      }
+      // The hosts an answer may come from. Google says which host an
+      // answer was given on, and the server only takes answers from the
+      // hosts this deployment is reached at.
+      $("rc-hosts").textContent = (settings.hostnames && settings.hostnames.length)
+        ? "An answer is only taken from these hosts: " + settings.hostnames.join(", ") +
+          ". Google serves its widget on a host that is not on the key's own list of domains as though it were not there at all, and the widget then refuses to draw - so these hosts have to be on that list in Google's console before anyone can come in."
+        : "";
+      recaptchaLoaded = true;
+    } catch (err) {
+      $("rc-note").className = "note bad";
+      $("rc-note").textContent = err.message;
+    }
+  }
+
+  $("rc-save").addEventListener("click", async function () {
+    var said = $("rc-note");
+    said.className = "note";
+    said.textContent = "Saving\u2026";
+    try {
+      var body = { site_key: $("rc-site").value.trim(),
+                   asked: $("rc-asked").checked,
+                   kind: $("rc-kind").value,
+                   min_score: $("rc-score").value.trim() };
+      // An empty secret field means "keep the one that is there": the page
+      // is never sent the secret, so it cannot send one back.
+      if ($("rc-secret").value.trim()) body.secret = $("rc-secret").value.trim();
+      var settings = await api("/recaptcha", { method: "POST", body: body });
+      recaptchaLoaded = false;
+      loadRecaptcha();
       said.className = "note good";
       said.textContent = settings.asked
         ? (settings.keys
